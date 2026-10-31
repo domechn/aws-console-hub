@@ -29,7 +29,7 @@ import { canSendText, submitText, type LocalCommand } from './commands'
 import { EmptyState } from './EmptyState'
 import { Markdown } from './Markdown'
 import { editKey, fromUserIndex, isOlder, MessageActions, MessageFailure, panelEscapeStops, truncatesChanges, turnActionsAt } from './MessageActions'
-import { cardDisabledState, liveStatus, pendingDecisionCount, regenerationOrdinal, regenerationPreview, resultChange, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload } from './panelLogic'
+import { cardDisabledState, liveStatus, pendingDecisionCount, regenerationOrdinal, regenerationPreview, resultChange, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload, historyConversationDeleted } from './panelLogic'
 import type { Block } from '../../../../shared/cards'
 import { PageChip } from './PageChip'
 import { ProposalCard } from './ProposalCard'
@@ -183,7 +183,10 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       setMonth(view.month)
       stickRef.current = true
     } catch (err) {
-      if (currentRef.current === target) setNotice(ipcError(err))
+      if (currentRef.current === target) {
+        if (historyConversationDeleted(ipcError(err))) void loadConversation(accId, null)
+        setNotice(ipcError(err))
+      }
     }
   }, [drafts])
 
@@ -277,6 +280,10 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
               setQueue(view.queue ?? [])
               setUsage(view.usage)
               setMonth(view.month)
+            }).catch((err) => {
+              if (currentRef.current !== draftKey(acc, id)) return
+              if (historyConversationDeleted(ipcError(err))) void loadConversation(acc, null)
+              setNotice(ipcError(err))
             })
           }
           return
@@ -316,7 +323,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           ? [...prev.slice(0, -1), { kind: 'note', text: event.text }, prev.at(-1)!]
           : applyEvent(prev, event))
       }),
-    [accountId, refreshList]
+    [accountId, refreshList, loadConversation]
   )
 
   useEffect(() => {
@@ -501,9 +508,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     if (!accountId) return
     const title = visibleConversations.find((c) => c.id === id)?.title || '这个对话'
     if (!confirm(`删除「${title}」？`)) return
-    await ai.delete(accountId, id)
-    await refreshList(accountId)
-    if (id === conversationId) void loadConversation(accountId, null)
+    try {
+      await ai.delete(accountId, id)
+      await refreshList(accountId)
+      if (id === conversationId) void loadConversation(accountId, null)
+    } catch (err) {
+      setNotice(ipcError(err))
+    }
   }
 
   const clearAll = async (): Promise<void> => {

@@ -62,6 +62,7 @@ function createWindow(): void {
   // The console pages keep their pre-P3 light color scheme. The renderer paints app chrome separately.
   nativeTheme.themeSource = 'light'
   ipcMain.on('app:system-dark', (event) => { event.returnValue = systemDark })
+  ipcMain.on('app:theme-preference', (event) => { event.returnValue = preference })
 
   const icon = loadAppIcon()
   // On macOS the dock icon comes from the bundle when packaged, but in dev it
@@ -102,15 +103,18 @@ function createWindow(): void {
     ? systemPreferences.subscribeNotification('AppleInterfaceThemeChangedNotification', () => {
       updateSystemDark(systemPreferences.getUserDefault('AppleInterfaceStyle', 'string') === 'Dark')
     }) : null
-  const refreshSystem = (): void => readSystemDark(process.platform, updateSystemDark)
-  if (process.platform !== 'darwin') refreshSystem()
-  const systemTimer = process.platform !== 'darwin' ? setInterval(refreshSystem, 10_000) : null
+  const refreshSystem = (): void => {
+    if (process.platform === 'darwin') updateSystemDark(systemPreferences.getUserDefault('AppleInterfaceStyle', 'string') === 'Dark')
+    else readSystemDark(process.platform, updateSystemDark)
+  }
+  refreshSystem()
   win.on('focus', refreshSystem)
+  win.on('show', refreshSystem)
   win.on('closed', () => {
     ipcMain.removeAllListeners('app:system-dark')
+    ipcMain.removeAllListeners('app:theme-preference')
     ipcMain.removeAllListeners('app:theme')
     if (systemNotification !== null) systemPreferences.unsubscribeNotification(systemNotification)
-    if (systemTimer) clearInterval(systemTimer)
   })
   ipcMain.on('app:theme', (event, choice: unknown, resolved: unknown) => {
     if (event.sender !== win.webContents || (choice !== 'system' && choice !== 'light' && choice !== 'dark') || (resolved !== 'light' && resolved !== 'dark')) return
@@ -121,6 +125,7 @@ function createWindow(): void {
     // Keep Chromium light for every embedded console WebContentsView.
     // The renderer's data-theme selects the app colors.
     preference = choice
+    if (choice === 'system') refreshSystem()
     paintBackground()
   })
   win.setMenuBarVisibility(false)

@@ -32,4 +32,8 @@ describe('checkReplies', () => {
     expect(checkReplies({ options: [o('确认', text), o('好', '好')] })).toEqual([o('好', '好')])
     expect(checkReplies({ options: [o(text.slice(0, 16), '好')] })).toEqual([])
   })
+
+  it.each(['/清空', ' /只读', '\u200b/新对话', '／清空', '\u200b／清空'])('drops command shaped text: %s', (text) => {
+    expect(checkReplies({ options: [o('bad', text), o('ok', 'ordinary')] })).toEqual([o('ok', 'ordinary')])
+  })
 })

@@ -9,18 +9,26 @@ export function resolvedSystemDark(platform: NodeJS.Platform, nativeDark: boolea
 }
 
 /** Read the OS setting independently of Electron's app-wide forced light theme. */
+const pendingSystemReads = new Map<NodeJS.Platform, ((dark: boolean) => void)[]>()
 export function readSystemDark(platform: NodeJS.Platform, onResult: (dark: boolean) => void): void {
   const command = platform === 'win32'
     ? ['reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize', '/v', 'AppsUseLightTheme']]
     : platform === 'linux' ? ['gsettings', ['get', 'org.gnome.desktop.interface', 'color-scheme']] : null
   if (!command) return
+  const pending = pendingSystemReads.get(platform)
+  if (pending) return void pending.push(onResult)
+  pendingSystemReads.set(platform, [onResult])
   execFile(command[0] as string, command[1] as string[], { timeout: 2000 }, (error, stdout) => {
+    const listeners = pendingSystemReads.get(platform) ?? []
+    pendingSystemReads.delete(platform)
     if (error) return
+    let dark: boolean | undefined
     if (platform === 'win32') {
       const value = stdout.match(/AppsUseLightTheme\s+REG_DWORD\s+(0x[01])/i)?.[1]
-      if (value) onResult(value === '0x0')
-    } else if (stdout.includes('prefer-dark')) onResult(true)
-    else if (stdout.includes('prefer-light') || stdout.includes('default')) onResult(false)
+      if (value) dark = value === '0x0'
+    } else if (stdout.includes('prefer-dark')) dark = true
+    else if (stdout.includes('prefer-light') || stdout.includes('default')) dark = false
+    if (dark !== undefined) for (const listener of listeners) listener(dark)
   })
 }
 

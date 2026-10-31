@@ -5,6 +5,7 @@ import type { ToastInput } from '../shared/types'
 const api: ToastApi = {
   platform: process.platform,
   systemDark: ipcRenderer.sendSync('app:system-dark') as boolean,
+  themePreference: ipcRenderer.sendSync('app:theme-preference') as ToastApi['themePreference'],
   onSystemDark: (cb) => {
     const listener = (_e: unknown, dark: boolean): void => cb(dark)
     ipcRenderer.on('app:system-dark-changed', listener)

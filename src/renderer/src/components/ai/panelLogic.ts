@@ -2,6 +2,10 @@ import type { AiEvent, ChatItem, ResourceCandidate, ResourceRef } from '../../..
 import type { Block } from '../../../../shared/cards'
 import { restoreFailedSend } from './Composer'
 
+export function historyConversationDeleted(message: string): boolean {
+  return message.includes('对话不存在')
+}
+
 export function invalidatesHistoryReload(runId: number, type: AiEvent['type']): boolean {
   return type !== 'done' && (runId !== 0 || type === 'proposal-result' || type === 'proposal' || type === 'proposal-state' || type === 'approval' || type === 'note' || type === 'error')
 }

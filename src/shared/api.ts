@@ -26,6 +26,7 @@ import type { FormValues } from './cards'
 export interface ToastApi {
   platform: string
   systemDark: boolean
+  themePreference: 'system' | 'light' | 'dark'
   onSystemDark(cb: (dark: boolean) => void): () => void
   onToast(cb: (toast: ToastInput) => void): () => void
   /** Subscribed; main holds pushes back until then. */
@@ -48,6 +49,7 @@ export interface SaveAccountResult {
 /** API exposed to the renderer via contextBridge (window.api). */
 export interface Api {
   systemDark: boolean
+  themePreference: 'system' | 'light' | 'dark'
   onSystemDark(cb: (dark: boolean) => void): () => void
   setAppTheme(preference: 'system' | 'light' | 'dark', resolved: 'light' | 'dark'): void
   /** process.platform, so shortcuts can use ⌘ on macOS and Ctrl elsewhere. */

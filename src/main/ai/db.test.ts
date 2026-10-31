@@ -6,6 +6,11 @@ import { describe, expect, it, vi } from 'vitest'
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-db-test-'))
 vi.mock('electron', () => ({ app: { getPath: () => dir } }))
+const redactedInputs = vi.hoisted(() => [] as string[])
+vi.mock('./redact', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./redact')>()
+  return { ...original, redactSecrets: (text: string) => { redactedInputs.push(text); return original.redactSecrets(text) } }
+})
 
 const { AiStore, migrate, openAiDb } = await import('./db')
 
@@ -86,6 +91,30 @@ describe('ai.sqlite', () => {
     expect(store.search('a1', 'internal action')).toEqual([])
     expect(store.search('a1', 'internal result')).toEqual([])
     expect(store.search('a1', 'internal request')).toEqual([])
+  })
+  it('matches Unicode case pairs and keeps snippet offsets in the original text', () => {
+    const { store } = fresh()
+    for (const [body, query] of [
+      ['before Ä after', 'ä'],
+      ['before Σ after', 'σ'],
+      ['before ПРИВЕТ after', 'привет']
+    ]) {
+      const id = store.createConversation('a1', query)
+      store.addMessage(id, { role: 'user', content: body })
+      expect(store.search('a1', query)).toMatchObject([{ id, snippet: expect.stringContaining(body.slice(-8)) }])
+    }
+    const shifted = store.createConversation('a1', 'shifted')
+    store.addMessage(shifted, { role: 'user', content: `${'İ'.repeat(60)}target` })
+    expect(store.search('a1', 'target')).toMatchObject([{ id: shifted, snippet: expect.stringContaining('target') }])
+  })
+  it('does not redact unrelated rows for an ASCII search', () => {
+    const { store } = fresh()
+    const id = store.createConversation('a1')
+    store.addMessage(id, { role: 'user', content: 'ordinary unrelated text' })
+    store.addMessage(id, { role: 'user', content: 'a needle here' })
+    redactedInputs.length = 0
+    expect(store.search('a1', 'needle')).toMatchObject([{ id }])
+    expect(redactedInputs).toEqual(['a needle here'])
   })
   it('excludes internal turns with an underscore and falls back to an older visible match', () => {
     const { db, store } = fresh()

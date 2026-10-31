@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { cardDisabledState, liveStatus, regenerationOrdinal, regenerationPreview, resultChange, pendingDecisionCount, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload } from './panelLogic'
+import { cardDisabledState, liveStatus, regenerationOrdinal, regenerationPreview, resultChange, pendingDecisionCount, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload, historyConversationDeleted } from './panelLogic'
 import { draftStore } from './Composer'
 
 describe('panel decisions', () => {
+  it('leaves a finished conversation only when history says it was deleted', () => {
+    expect(historyConversationDeleted('Error invoking remote method ai:history: 对话不存在')).toBe(true)
+    expect(historyConversationDeleted('临时读取失败')).toBe(false)
+  })
   it('only item events invalidate a pending history reload', () => {
     expect(invalidatesHistoryReload(0, 'usage')).toBe(false)
     expect(invalidatesHistoryReload(0, 'card-state')).toBe(false)

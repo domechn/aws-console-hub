@@ -7,14 +7,6 @@ import { redactSecrets } from './redact'
 
 type SqlValue = string | number | null
 
-function searchableText(message: unknown): string {
-  if (typeof message === 'string') return message
-  const content = (message as { content?: unknown } | null)?.content
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content.filter((p) => p && p.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('')
-}
-
 /** What this module needs from a driver. node:sqlite's DatabaseSync and better-sqlite3's Database both fit as-is. */
 export interface SqlDatabase {
   exec(sql: string): void
@@ -188,10 +180,16 @@ export class AiStore {
   }
 
   search(accountId: string, query: string): { id: string; title: string; snippet: string }[] {
-    const escaped = query.replace(/[\\%_]/g, '\\$&')
+    // SQL LIKE misses rare Unicode folds (ǅ, K, İ); a single rare cased letter can page through huge histories.
+    const nonAsciiCased = [...query].find((char) => char.charCodeAt(0) > 127 && char.toLocaleLowerCase() !== char.toLocaleUpperCase())
+    const variants = nonAsciiCased
+      ? [nonAsciiCased.toLocaleLowerCase(), nonAsciiCased.toLocaleUpperCase()]
+      : [query]
+    const prefilters = variants.map((part) => `%${part.replace(/[\\%_]/g, '\\$&')}%`)
+    const like = prefilters.map(() => "text like ? escape '\\'").join(' or ')
     const search = this.db.prepare(
       `with searchable as (
-         select c.id, c.title, m.content_json, m.id as message_id,
+         select c.id, c.title, m.id as message_id,
          case json_type(m.content_json, '$.content')
            when 'array' then (select group_concat(json_extract(p.value, '$.text'), '') from json_each(m.content_json, '$.content') p
              where json_extract(p.value, '$.type') = 'text')
@@ -202,31 +200,38 @@ export class AiStore {
          where c.account_id = ? and m.role in ('user', 'assistant') and m.id < ?
        )
        , matched as (
-         select id, title, content_json, message_id from searchable
-         where text like ? escape '\\'
+         select id, title, text, message_id from searchable
+         where (${like})
            and ltrim(text) not like '[card\\_action]%' escape '\\'
            and ltrim(text) not like '[proposal\\_result]%' escape '\\'
            and ltrim(text) not like '[answer\\_request]%' escape '\\'
        )
-       select id, title, content_json, message_id from matched
+       select id, title, text, message_id from matched
        order by message_id desc limit 200`
     )
     const results: { id: string; title: string; snippet: string }[] = []
     const seen = new Set<string>()
     let before = Number.MAX_SAFE_INTEGER
     while (results.length < 20) {
-      const rows = search.all(accountId, before, `%${escaped}%`) as { id: string; title: string; content_json: string; message_id: number }[]
+      const rows = search.all(accountId, before, ...prefilters) as { id: string; title: string; text: string; message_id: number }[]
       if (!rows.length) break
       before = rows.at(-1)!.message_id
       for (const row of rows) {
         if (seen.has(row.id)) continue
-        const text = searchableText(JSON.parse(row.content_json))
+        const text = row.text ?? ''
         if (/^\s*\[(?:card_action|proposal_result|answer_request)\]/.test(text)) continue
         const safe = redactSecrets(text)
         const at = safe.toLocaleLowerCase().indexOf(query.toLocaleLowerCase())
         if (at < 0) continue
+        const positions: number[] = []
+        for (let i = 0; i < safe.length; i++) {
+          const lowered = safe[i].toLocaleLowerCase()
+          for (let n = 0; n < lowered.length; n++) positions.push(i)
+        }
+        const start = positions[at] ?? at
+        const end = (positions[at + query.toLocaleLowerCase().length - 1] ?? at) + 1
         seen.add(row.id)
-        results.push({ id: row.id, title: row.title, snippet: safe.slice(Math.max(0, at - 50), at + query.length + 80).slice(0, 180) })
+        results.push({ id: row.id, title: row.title, snippet: safe.slice(Math.max(0, start - 50), end + 80).slice(0, 180) })
         if (results.length === 20) break
       }
       if (rows.length < 200) break

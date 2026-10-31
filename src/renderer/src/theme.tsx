@@ -12,12 +12,21 @@ export function resolveTheme(preference: ThemePreference, systemDark: boolean): 
   return preference === 'system' ? (systemDark ? 'dark' : 'light') : preference
 }
 
+export function preferenceFromEvent(value: unknown): ThemePreference | undefined {
+  return value === 'system' || value === 'light' || value === 'dark' ? value : undefined
+}
+
 export function getThemePreference(): ThemePreference {
+  const source = window as Window & { api?: Api; toastApi?: ToastApi; themePreferenceOverride?: ThemePreference }
+  if (source.themePreferenceOverride) return source.themePreferenceOverride
+  const main = (source.api ?? source.toastApi)?.themePreference
+  if (main) return main
   const value = localStorage.getItem(KEY)
   return value === 'light' || value === 'dark' ? value : 'system'
 }
 
 export function setThemePreference(preference: ThemePreference): void {
+  ;(window as Window & { themePreferenceOverride?: ThemePreference }).themePreferenceOverride = preference
   localStorage.setItem(KEY, preference)
   window.dispatchEvent(new Event(EVENT))
   const channel = new BroadcastChannel(CHANNEL)
@@ -28,7 +37,7 @@ export function setThemePreference(preference: ThemePreference): void {
 /** Each renderer applies the preference locally; the toast is a separate WebContentsView. */
 export function observeTheme(onChange?: (preference: ThemePreference, resolved: ResolvedTheme) => void): () => void {
   const media = window.matchMedia('(prefers-color-scheme: dark)')
-  const themeWindow = window as Window & { api?: Api; toastApi?: ToastApi }
+  const themeWindow = window as Window & { api?: Api; toastApi?: ToastApi; themePreferenceOverride?: ThemePreference }
   const themeApi = themeWindow.api ?? themeWindow.toastApi
   let systemDark = themeApi?.systemDark ?? media.matches
   const channel = new BroadcastChannel(CHANNEL)
@@ -38,10 +47,20 @@ export function observeTheme(onChange?: (preference: ThemePreference, resolved: 
     onChange?.(preference, resolved)
   }
   const fromStorage = (event: StorageEvent): void => {
-    if (event.key === KEY) apply()
+    if (event.key === KEY) {
+      const preference = preferenceFromEvent(event.newValue)
+      if (preference) {
+        themeWindow.themePreferenceOverride = preference
+        apply(preference)
+      }
+    }
   }
   const fromChannel = (event: MessageEvent<ThemePreference>): void => {
-    if (event.data === 'system' || event.data === 'light' || event.data === 'dark') apply(event.data)
+    const preference = preferenceFromEvent(event.data)
+    if (preference) {
+      themeWindow.themePreferenceOverride = preference
+      apply(preference)
+    }
   }
   const update = (): void => { if (!themeApi) systemDark = media.matches; apply() }
   const offSystem = themeApi?.onSystemDark((dark) => { systemDark = dark; apply() })

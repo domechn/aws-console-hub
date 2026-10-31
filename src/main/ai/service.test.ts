@@ -413,6 +413,180 @@ describe('AiService', () => {
     await until(() => s.events.filter((e) => e.event.type === 'queue-failed').length === 2)
     expect(s.events.flatMap((e) => e.event.type === 'queue-failed' ? [e.event.id] : [])).toEqual(['queued-A', 'queued-B'])
   })
+  it('drops a failed setup batch after one resolve and one error note', async () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1', 'gap')
+    const internals = s.service as unknown as {
+      queued: Map<string, unknown[]>
+      next: (account: AwsAccount, id: string, emit: (event: unknown) => void) => void
+      resolve: () => Promise<unknown>
+    }
+    const resolve = vi.spyOn(internals, 'resolve').mockRejectedValue(new Error('model broken'))
+    internals.queued.set(id, [
+      { kind: 'card', cardId: 'c-1', text: '[card_action] one', label: 'one' },
+      { kind: 'card', cardId: 'c-2', text: '[card_action] two', label: 'two' },
+      { kind: 'user', id: 'q-1', text: 'later' }
+    ])
+    internals.next(ACCOUNT, id, () => {})
+    await until(() => !s.service.isRunning(id) && !internals.queued.has(id))
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(s.store.messages(id).filter((m) => m.role === 'note')).toHaveLength(1)
+    expect(s.events.filter((e) => e.event.type === 'queue-failed')).toHaveLength(1)
+  })
+  it('does not start a card turn when Stop happens during model setup', async () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1', 'gap')
+    const internals = s.service as unknown as { startCardTurn: (account: AwsAccount, id: string, turn: unknown) => Promise<void>; resolve: () => Promise<unknown>; runs: Map<string, unknown> }
+    let release!: (value: unknown) => void
+    const good = await internals.resolve()
+    vi.spyOn(internals, 'resolve').mockReturnValue(new Promise((r) => { release = r }))
+    const turn = { kind: 'card', cardId: 'c-1', text: '[card_action] one', label: 'one' }
+    const pending = internals.startCardTurn(ACCOUNT, id, turn)
+    s.service.abort(id)
+    release(good)
+    await expect(pending).rejects.toThrow('已停止')
+    expect(internals.runs.has(id)).toBe(false)
+  })
+  it('does not start a card turn after its conversation is deleted during setup', async () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1')
+    const internals = s.service as unknown as { startCardTurn: (account: AwsAccount, id: string, turn: unknown) => Promise<void>; resolve: () => Promise<unknown>; runs: Map<string, unknown> }
+    let release!: (value: unknown) => void
+    const good = await internals.resolve()
+    vi.spyOn(internals, 'resolve').mockReturnValue(new Promise((r) => { release = r }))
+    const pending = internals.startCardTurn(ACCOUNT, id, { kind: 'card', cardId: 'c-1', text: '[card_action] one', label: 'one' })
+    s.service.delete('acc-1', id)
+    release(good)
+    await expect(pending).rejects.toThrow('已停止')
+    expect(internals.runs.has(id)).toBe(false)
+  })
+  it('checks ownership after card setup even if the store was deleted outside the queue', async () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1')
+    const internals = s.service as unknown as { startCardTurn: (account: AwsAccount, id: string, turn: unknown) => Promise<void>; resolve: () => Promise<unknown>; runs: Map<string, unknown> }
+    let release!: (value: unknown) => void
+    const good = await internals.resolve()
+    vi.spyOn(internals, 'resolve').mockReturnValue(new Promise((r) => { release = r }))
+    const pending = internals.startCardTurn(ACCOUNT, id, { kind: 'card', cardId: 'c-1', text: '[card_action] one', label: 'one' })
+    s.store.deleteConversation(id)
+    release(good)
+    await expect(pending).rejects.toThrow('对话已删除')
+    expect(internals.runs.has(id)).toBe(false)
+  })
+  it('keeps the cancellation epoch after forgetting a conversation', () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1')
+    const internals = s.service as unknown as { queueEpoch: Map<string, number> }
+    s.service.delete('acc-1', id)
+    expect(internals.queueEpoch.get(id)).toBe(1)
+  })
+  it('Stop during regeneration setup preserves the prior transcript', async () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1', 'gap')
+    s.store.addMessage(id, { role: 'user', content: { role: 'user', content: 'original' } })
+    const internals = s.service as unknown as { resolve: () => Promise<unknown> }
+    let release!: (value: unknown) => void
+    const good = await internals.resolve()
+    vi.spyOn(internals, 'resolve').mockReturnValue(new Promise((r) => { release = r }))
+    const pending = s.service.regenerate('acc-1', id, 0, 'original', 'edited')
+    s.service.abort(id)
+    release(good)
+    await expect(pending).rejects.toThrow('已停止')
+    expect(s.store.messages(id).some((m) => JSON.stringify(m.content).includes('original'))).toBe(true)
+  })
+  it('flushes a user turn queued during failed regeneration setup', async () => {
+    const s = setup([fauxAssistantMessage('queued answer')])
+    const id = s.store.createConversation('acc-1', 'gap')
+    s.store.addMessage(id, { role: 'user', content: { role: 'user', content: 'original' } })
+    const internals = s.service as unknown as { resolve: () => Promise<unknown>; queued: Map<string, unknown[]> }
+    let reject!: (err: Error) => void
+    vi.spyOn(internals, 'resolve').mockReturnValueOnce(new Promise((_, r) => { reject = r }))
+    const pending = s.service.regenerate('acc-1', id, 0, 'original', 'edited')
+    internals.queued.set(id, [{ kind: 'user', id: 'q-1', text: 'queued' }])
+    reject(new Error('model broken'))
+    await expect(pending).rejects.toThrow('model broken')
+    await until(() => s.store.messages(id).some((m) => m.role === 'assistant'))
+    expect(s.service.view('acc-1', id).queue).toEqual([])
+    expect(s.service.view('acc-1', id).items.some((i) => i.kind === 'user' && i.text === 'queued')).toBe(true)
+  })
+  it('runs a queued proposal follow-up after failed regeneration when the budget permits', async () => {
+    const s = setup([fauxAssistantMessage('follow-up answer')])
+    const id = s.store.createConversation('acc-1')
+    s.store.addMessage(id, { role: 'user', content: { role: 'user', content: 'original' } })
+    s.config.save({ budget: { monthlyTokens: 1_000_000, monthlyUsd: null, block: true } })
+    const internals = s.service as unknown as {
+      resolve: () => Promise<unknown>
+      deliverResult: (account: AwsAccount, id: string, result: unknown, followUp: boolean) => Promise<void>
+    }
+    let reject!: (err: Error) => void
+    vi.spyOn(internals, 'resolve').mockReturnValueOnce(new Promise((_, r) => { reject = r }))
+    const pending = s.service.regenerate('acc-1', id, 0, 'original', 'edited')
+    await internals.deliverResult(ACCOUNT, id, { proposalId: 'p-1', status: 'cancelled', title: 'cancelled' }, true)
+    reject(new Error('model broken'))
+    await expect(pending).rejects.toThrow('model broken')
+    await until(() => s.store.messages(id).some((m) => JSON.stringify(m.content).includes('follow-up answer')))
+    expect(s.faux.state.callCount).toBe(1)
+    expect(s.store.messages(id).some((m) => JSON.stringify(m.content).includes('[proposal_result]'))).toBe(true)
+  })
+  it('stores a proposal result without follow-up if Stop interrupts its model setup', async () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1', 'gap')
+    const internals = s.service as unknown as {
+      resolve: () => Promise<unknown>
+      deliverResult: (account: AwsAccount, id: string, result: unknown, followUp: boolean) => Promise<void>
+      runs: Map<string, unknown>
+    }
+    let release!: (value: unknown) => void
+    const good = await internals.resolve()
+    vi.spyOn(internals, 'resolve').mockReturnValue(new Promise((r) => { release = r }))
+    const pending = internals.deliverResult(ACCOUNT, id, { proposalId: 'p-1', status: 'cancelled', title: 'cancelled' }, true)
+    s.service.abort(id)
+    release(good)
+    await pending
+    expect(internals.runs.has(id)).toBe(false)
+    expect(s.store.messages(id).some((m) => JSON.stringify(m.content).includes('[proposal_result]'))).toBe(true)
+  })
+  it.each(['runs', 'pendingSetup', 'regenerating'] as const)('queues a stopped result behind a new %s state', async (state) => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1', 'gap')
+    const internals = s.service as unknown as {
+      resolve: () => Promise<unknown>
+      deliverResult: (account: AwsAccount, id: string, result: unknown, followUp: boolean) => Promise<void>
+      runs: Map<string, unknown>
+      pendingSetup: Map<string, unknown>
+      regenerating: Set<string>
+      queued: Map<string, { kind: string; silent: boolean }[]>
+    }
+    let release!: (value: unknown) => void
+    const good = await internals.resolve()
+    vi.spyOn(internals, 'resolve').mockReturnValue(new Promise((resolve) => { release = resolve }))
+    const pending = internals.deliverResult(ACCOUNT, id, { proposalId: 'p-1', status: 'succeeded', title: 'done' }, true)
+    s.service.abort(id)
+    if (state === 'regenerating') internals.regenerating.add(id)
+    else internals[state].set(id, {})
+    release(good)
+    await pending
+    expect(s.store.messages(id).some((m) => JSON.stringify(m.content).includes('[proposal_result]'))).toBe(false)
+    expect(internals.queued.get(id)).toMatchObject([{ kind: 'result', silent: true }])
+  })
+  it('queues a result when model setup fails after a new run starts', async () => {
+    const s = setup([])
+    const id = s.store.createConversation('acc-1', 'gap')
+    const internals = s.service as unknown as {
+      resolve: () => Promise<unknown>
+      deliverResult: (account: AwsAccount, id: string, result: unknown, followUp: boolean) => Promise<void>
+      runs: Map<string, unknown>
+      queued: Map<string, { kind: string; silent: boolean }[]>
+    }
+    let reject!: (error: Error) => void
+    vi.spyOn(internals, 'resolve').mockReturnValue(new Promise((_, fail) => { reject = fail }))
+    const pending = internals.deliverResult(ACCOUNT, id, { proposalId: 'p-1', status: 'succeeded', title: 'done' }, true)
+    internals.runs.set(id, {})
+    reject(new Error('model unavailable'))
+    await pending
+    expect(s.store.messages(id).some((m) => JSON.stringify(m.content).includes('[proposal_result]'))).toBe(false)
+    expect(internals.queued.get(id)).toMatchObject([{ kind: 'result', silent: true }])
+  })
   it('settles a queued turn if publishing its start event throws', async () => {
     const s = setup([])
     const id = s.store.createConversation('acc-1', 'gap')
@@ -436,6 +610,48 @@ describe('AiService', () => {
     expect(s.service.isRunning(id)).toBe(false)
     expect(s.events.filter((e) => e.event.type === 'queue-failed')).toHaveLength(1)
     expect(s.store.messages(id).filter((m) => m.role === 'user')).toEqual([])
+  })
+  it('continues to the next queued user after one turn fails after setup', async () => {
+    const s = setup([fauxAssistantMessage('second answered')])
+    const id = s.store.createConversation('acc-1')
+    const internals = s.service as unknown as {
+      queued: Map<string, unknown[]>
+      next: (account: AwsAccount, id: string, emit: (event: unknown) => void) => void
+      resolveResources: (account: string, context?: unknown) => unknown
+    }
+    const real = internals.resolveResources.bind(internals)
+    let calls = 0
+    vi.spyOn(internals, 'resolveResources').mockImplementation((...args) => {
+      if (++calls === 2) throw new Error('one turn failed')
+      return real(...args)
+    })
+    internals.queued.set(id, [{ kind: 'user', id: 'q-1', text: 'first' }, { kind: 'user', id: 'q-2', text: 'second' }])
+    internals.next(ACCOUNT, id, () => {})
+    await until(() => s.store.messages(id).some((m) => JSON.stringify(m.content).includes('second answered')))
+    expect(s.events.flatMap((e) => e.event.type === 'queue-failed' ? [e.event.id] : [])).toEqual(['q-1'])
+    expect(s.service.view('acc-1', id).items.filter((i) => i.kind === 'user').map((i) => i.text)).toEqual(['second'])
+  })
+  it('keeps later queued turns after a card start fails and records one note', async () => {
+    const s = setup([fauxAssistantMessage('later answered')])
+    const id = s.store.createConversation('acc-1')
+    const internals = s.service as unknown as {
+      d: { emit: (event: AiEventEnvelope) => void }
+      queued: Map<string, unknown[]>
+      next: (account: AwsAccount, id: string, emit: (event: unknown) => void) => void
+    }
+    const publish = internals.d.emit
+    internals.d.emit = (event) => {
+      if (event.event.type === 'user' && event.event.text === 'card label') throw new Error('card display failed')
+      publish(event)
+    }
+    internals.queued.set(id, [
+      { kind: 'card', cardId: 'c-1', text: '[card_action] first', label: 'card label' },
+      { kind: 'user', id: 'q-2', text: 'later' }
+    ])
+    internals.next(ACCOUNT, id, () => {})
+    await until(() => s.store.messages(id).some((m) => JSON.stringify(m.content).includes('later answered')))
+    expect(s.store.messages(id).filter((m) => m.role === 'note')).toHaveLength(1)
+    expect(s.service.view('acc-1', id).items.filter((i) => i.kind === 'user').map((i) => i.text)).toEqual(['later'])
   })
 
   it('checks queued resource ownership again at start', async () => {

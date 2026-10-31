@@ -11,6 +11,7 @@ function subscribe(channel: string) {
 
 const api: Api = {
   systemDark: ipcRenderer.sendSync('app:system-dark') as boolean,
+  themePreference: ipcRenderer.sendSync('app:theme-preference') as Api['themePreference'],
   onSystemDark: subscribe('app:system-dark-changed'),
   setAppTheme: (preference, resolved) => ipcRenderer.send('app:theme', preference, resolved),
   platform: process.platform,

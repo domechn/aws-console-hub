@@ -29,7 +29,7 @@ export function checkReplies(input: unknown): QuickReply[] {
     const label = clean((o as { label?: unknown } | null)?.label)
     const text = clean((o as { text?: unknown } | null)?.text)
     if (!label || !text || [...label].length > REPLY_LIMITS.label || text.length > REPLY_LIMITS.text) continue
-    if (CONTROL_PREFIX.test(label) || CONTROL_PREFIX.test(text)) continue
+    if (CONTROL_PREFIX.test(label) || CONTROL_PREFIX.test(text) || /^[/／]/u.test(text)) continue
     if (out.some((r) => r.label === label || r.text === text)) continue
     out.push({ label, text })
   }

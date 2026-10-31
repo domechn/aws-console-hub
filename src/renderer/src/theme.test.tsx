@@ -1,8 +1,47 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { observeTheme, resolveTheme, setThemePreference, ThemeSetting } from './theme'
+import { observeTheme, resolveTheme, setThemePreference, ThemeSetting, getThemePreference, preferenceFromEvent } from './theme'
 
 describe('theme preference', () => {
+  it('accepts valid cross-window preferences and ignores invalid values', () => {
+    expect(preferenceFromEvent('dark')).toBe('dark')
+    expect(preferenceFromEvent('light')).toBe('light')
+    expect(preferenceFromEvent('system')).toBe('system')
+    expect(preferenceFromEvent(null)).toBeUndefined()
+    expect(preferenceFromEvent('invalid')).toBeUndefined()
+  })
+  it('keeps a toast on the new theme for both cross-window event orders', () => {
+    for (const order of [['storage', 'channel'], ['channel', 'storage']]) {
+      const media = Object.assign(new EventTarget(), { matches: false })
+      const win = Object.assign(new EventTarget(), { matchMedia: () => media, toastApi: { themePreference: 'light', systemDark: false, onSystemDark: () => () => {} } })
+      const doc = { documentElement: { dataset: {} as Record<string, string> } }
+      let channel!: EventTarget
+      class TestChannel extends EventTarget {
+        constructor(_name: string) { super(); channel = this }
+        postMessage(): void {}
+        close(): void {}
+      }
+      vi.stubGlobal('localStorage', { getItem: () => 'dark' })
+      vi.stubGlobal('window', win)
+      vi.stubGlobal('document', doc)
+      vi.stubGlobal('BroadcastChannel', TestChannel)
+      const stop = observeTheme()
+      expect(doc.documentElement.dataset.theme).toBe('light')
+      for (const source of order) {
+        if (source === 'storage') win.dispatchEvent(Object.assign(new Event('storage'), { key: 'appTheme', newValue: 'dark' }))
+        else channel.dispatchEvent(new MessageEvent('message', { data: 'dark' }))
+        expect(doc.documentElement.dataset.theme).toBe('dark')
+      }
+      stop()
+      vi.unstubAllGlobals()
+    }
+  })
+  it('takes startup preference from main over a stale renderer cache', () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'dark' })
+    vi.stubGlobal('window', { api: { themePreference: 'light' } })
+    expect(getThemePreference()).toBe('light')
+    vi.unstubAllGlobals()
+  })
   it('syncs the app and toast observers on preference and system changes', () => {
     const values = new Map<string, string>()
     const media = Object.assign(new EventTarget(), { matches: true })
