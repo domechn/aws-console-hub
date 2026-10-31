@@ -142,7 +142,16 @@ export interface ConversationSummary {
   id: string
   title: string
   updatedAt: number
+  pinned?: boolean
+  status?: { running: boolean; awaitingApproval: boolean; pendingProposals: number }
 }
+
+export interface ResourceRef { type: string; id: string; region: string }
+export interface ResourceContext { resources: ResourceRef[] }
+export interface ResourceCandidate extends ResourceRef { label: string }
+export interface ConversationSearchResult { id: string; title: string; snippet: string }
+export interface QueuedMessage { id: string; text: string; context?: ResourceContext }
+export const MAX_PROMPT_CHARS = 8000
 
 export interface UsageTotals {
   input: number
@@ -158,8 +167,8 @@ export interface UsageTotals {
 /** What the panel shows; built in main from the stored transcript (never raw tool results). */
 export type ChatItem =
   /** `page`: the page label it was asked on, when page context was on. */
-  | { kind: 'user'; text: string; page?: string; cardAction?: boolean; ordinal?: number }
-  | { kind: 'assistant'; text: string; error?: string; aborted?: boolean; retryable?: boolean; usage?: { input: number; output: number; costUsd?: number }; model?: string }
+  | { kind: 'user'; text: string; page?: string; cardAction?: boolean; ordinal?: number; resources?: ResourceCandidate[] }
+  | { kind: 'assistant'; text: string; error?: string; aborted?: boolean; retryable?: boolean; usage?: { input: number; output: number; costUsd?: number }; model?: string; ordinal?: number; feedback?: 'up' | 'down' | null }
   /** waiting: paused on an approval card (the approval item follows it). run_script: `code` and the `calls` it made (`ec2:DescribeInstances ×3`), shown on expand. */
   | { kind: 'tool'; id: string; label: string; status: 'running' | 'waiting' | 'ok' | 'error'; summary?: string; code?: string; calls?: string[]; ms?: number }
   /** A render_card call (`id` is the tool call's); `card` is null while it streams (skeleton). */
@@ -188,6 +197,7 @@ export interface ConversationView {
   month: MonthUsage
   /** The conversation sends the current page each turn (its chip's ×). */
   pageContext: boolean
+  queue?: QueuedMessage[]
 }
 
 /** main → renderer `ai:event`. Display data only. */
@@ -201,7 +211,9 @@ export type AiEvent =
   | { type: 'card'; id: string; card: Card }
   | { type: 'card-state'; cardId: string; state: CardState }
   /** A user turn main started itself (a card button's reply), as the panel shows it. */
-  | { type: 'user'; text: string }
+  | { type: 'user'; text: string; resources?: ResourceCandidate[] }
+  | { type: 'queue'; items: QueuedMessage[] }
+  | { type: 'queue-failed'; id: string; text: string; context?: ResourceContext; resources?: ResourceCandidate[]; message: string }
   /** propose_change made a proposal (`id` is the tool call's). */
   | { type: 'proposal'; id: string; proposal: ProposalView }
   /** A proposal changed state (confirmed, executed, cancelled, expired, drifted). Not part of a run. */
@@ -362,6 +374,7 @@ export interface SessionAllowView {
 export interface AiSendResult {
   conversationId: string
   runId: number
+  queued?: { id: string }
   /** The monthly budget is nearly or fully used (and does not block). */
   warning?: string
 }

@@ -11,7 +11,7 @@ body {
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
   font-size: 12px;
-  color: #1b2027;
+  color: var(--text);
 }
 
 /* Padding leaves room for the shadow inside the view's bounds. */
@@ -31,19 +31,19 @@ body {
   gap: 8px;
   padding: 9px 9px 9px 11px;
   border-radius: 8px;
-  border: 1px solid #c6cdd6;
-  background: #ffffff;
-  box-shadow: 0 6px 18px rgba(20, 30, 45, 0.18);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  box-shadow: var(--popover-shadow);
 }
 
 .toast.error {
-  background: #fdecea;
-  border-color: #efb8b0;
-  border-left: 3px solid #d13212;
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  border-left: 3px solid var(--danger);
 }
 
 .toast.info {
-  border-left: 3px solid #0972d3;
+  border-left: 3px solid var(--accent);
 }
 
 .toast-message {
@@ -66,7 +66,7 @@ body {
 
 .toast-count {
   padding: 2px 4px;
-  color: #6b7684;
+  color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
 
@@ -75,16 +75,16 @@ body {
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: #6b7684;
+  color: var(--text-dim);
   font: inherit;
   cursor: pointer;
 }
 
 .toast-actions button:hover {
-  background: rgba(0, 0, 0, 0.07);
-  color: #1b2027;
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .toast-actions button:focus-visible {
-  outline: 2px solid #0972d3;
+  outline: 2px solid var(--focus);
 }

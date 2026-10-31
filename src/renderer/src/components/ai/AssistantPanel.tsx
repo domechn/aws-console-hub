@@ -10,6 +10,9 @@ import {
   type ConversationSummary,
   type MonthUsage,
   type PageContext,
+  type ResourceCandidate,
+  type QueuedMessage,
+  type ConversationSearchResult,
   type SessionAllowView,
   type UsageTotals
 } from '../../../../shared/ai'
@@ -26,7 +29,8 @@ import { canSendText, submitText, type LocalCommand } from './commands'
 import { EmptyState } from './EmptyState'
 import { Markdown } from './Markdown'
 import { editKey, fromUserIndex, isOlder, MessageActions, MessageFailure, panelEscapeStops, truncatesChanges, turnActionsAt } from './MessageActions'
-import { cardDisabledState, liveStatus, regenerationOrdinal, regenerationPreview } from './panelLogic'
+import { cardDisabledState, liveStatus, pendingDecisionCount, regenerationOrdinal, regenerationPreview, resultChange, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload } from './panelLogic'
+import type { Block } from '../../../../shared/cards'
 import { PageChip } from './PageChip'
 import { ProposalCard } from './ProposalCard'
 import { QuickReplies } from './QuickReplies'
@@ -57,6 +61,7 @@ const ai = window.api.ai
 /** Right-hand chat panel. A sibling of the console column, so the native console view narrows instead of covering it. */
 export function AssistantPanel({ account, config, width, onResize, onOpenSettings, onOpenAudit, onConfig, onClose, onSetAllowWrite, focusToken, pageKey }: Props): React.JSX.Element {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [conversationsAccount, setConversationsAccount] = useState<string | null>(null)
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [items, setItems] = useState<ChatItem[]>([])
   const [usage, setUsage] = useState<UsageTotals | null>(null)
@@ -65,8 +70,17 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const [running, setRunning] = useState<ReadonlySet<string>>(new Set())
   const [notice, setNotice] = useState<string | null>(null)
   const [input, setInput] = useState('')
+  const [resources, setResources] = useState<ResourceCandidate[]>([])
+  const [resourceQuery, setResourceQuery] = useState<string | null>(null)
+  const [candidates, setCandidates] = useState<ResourceCandidate[]>([])
+  const [queue, setQueue] = useState<QueuedMessage[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<ConversationSearchResult[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
   const [viewScope, setViewScope] = useState(() => draftKey(account?.id ?? null, null))
   const [drafts] = useState(draftStore)
+  const resourceDrafts = useRef(new Map<string, ResourceCandidate[]>())
+  const failedNotices = useRef(new Map<string, string>())
   // The configured provider's catalog, for the model chip.
   const [models, setModels] = useState<AiModelInfo[]>([])
   // Chips the user started typing over (by their suggest_replies call id).
@@ -78,6 +92,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const [editIndex, setEditIndex] = useState<number | null>(null)
   const [editText, setEditText] = useState('')
+  const [editResources, setEditResources] = useState<ResourceCandidate[]>([])
   const [regenerating, setRegenerating] = useState(false)
   const regeneratingRef = useRef(false)
   const [justExecuted, setJustExecuted] = useState(false)
@@ -93,6 +108,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stickRef = useRef(true)
   const currentRef = useRef<string | null>(null)
+  const eventVersions = useRef(new Map<string, number>())
   const accountRef = useRef<string | null>(null)
   /** Last conversation shown per account, so switching accounts and back returns to it. */
   const lastByAccount = useRef(new Map<string, string | null>())
@@ -107,6 +123,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const scope = draftKey(accountId, conversationId)
   currentRef.current = scope
   const { items: visibleItems, input: visibleInput } = scopedContent(scope, viewScope, items, input)
+  const visibleConversations = conversationsAccount === accountId ? conversations : []
   const ready = aiReady(config)
   const busy = conversationId !== null && running.has(conversationId)
   const hasPendingDecision = visibleItems.some((item) =>
@@ -141,9 +158,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     setConversationId(id)
     setViewScope(target)
     setItems([])
+    setQueue([])
+    setResources(resourceDrafts.current.get(target) ?? [])
+    setResourceQuery(null)
     setUsage(null)
     lastByAccount.current.set(accId, id)
-    setNotice(null)
+    setNotice(failedNotices.current.get(target) ?? null)
+    failedNotices.current.delete(target)
     setJustExecuted(false)
     setEditIndex(null)
     setInput(drafts.get(draftKey(accId, id)))
@@ -156,6 +177,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       const view = await ai.history(accId, id)
       if (currentRef.current !== target) return
       setItems(view.items)
+      setQueue(view.queue ?? [])
       setPageOn(view.pageContext)
       setUsage(view.usage)
       setMonth(view.month)
@@ -173,7 +195,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
 
   const refreshList = useCallback(async (accId: string): Promise<ConversationSummary[]> => {
     const list = await ai.conversations(accId)
-    if (accountRef.current === accId) setConversations(list)
+    if (accountRef.current === accId) { setConversations(list); setConversationsAccount(accId) }
     return list
   }, [])
 
@@ -184,6 +206,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     setConversationId(null)
     setViewScope(target)
     setItems([])
+    setQueue([])
+    setResources(resourceDrafts.current.get(target) ?? [])
+    setResourceQuery(null)
     setUsage(null)
     if (!accountId) {
       setConversations([])
@@ -191,6 +216,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       return
     }
     setConversations([])
+    setConversationsAccount(null)
+    setSearchResults([])
+    setSearchQuery('')
     setInput(drafts.get(target))
     let cancelled = false
     void refreshList(accountId).then((list) => {
@@ -204,10 +232,37 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     }
   }, [accountId, refreshList, loadConversation, drafts])
 
+  useEffect(() => {
+    if (!accountId || resourceQuery === null || resources.length >= 5) { setCandidates([]); return }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void ai.resourceCandidates(accountId, resourceQuery).then(
+        (list) => { if (!cancelled) setCandidates(list) },
+        () => { if (!cancelled) setCandidates([]) }
+      )
+    }, 200)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [accountId, resourceQuery, resources.length])
+
+  useEffect(() => {
+    if (!accountId || !conversationsOpen || !searchQuery.trim()) { setSearchResults([]); setSearchLoading(false); return }
+    let cancelled = false
+    setSearchLoading(true)
+    const timer = setTimeout(() => {
+      void ai.search(accountId, searchQuery.trim()).then(
+        (list) => { if (!cancelled) { setSearchResults(list); setSearchLoading(false) } },
+        () => { if (!cancelled) { setSearchResults([]); setSearchLoading(false) } }
+      )
+    }, 250)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [accountId, conversationsOpen, searchQuery])
+
   useEffect(
     () =>
       ai.onEvent(({ accountId: acc, conversationId: id, runId, event }) => {
+        if (invalidatesHistoryReload(runId, event.type)) eventVersions.current.set(id, (eventVersions.current.get(id) ?? 0) + 1)
         if (event.type === 'done') {
+          const version = eventVersions.current.get(id) ?? 0
           setRunning((prev) => {
             const next = new Set(prev)
             next.delete(id)
@@ -217,14 +272,36 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           // The stored transcript is the truth; the live items were a preview of it.
           if (draftKey(acc, id) === currentRef.current) {
             void ai.history(acc, id).then((view) => {
-              if (currentRef.current !== draftKey(acc, id)) return
+              if (currentRef.current !== draftKey(acc, id) || version !== (eventVersions.current.get(id) ?? 0)) return
               setItems(view.items)
+              setQueue(view.queue ?? [])
               setUsage(view.usage)
               setMonth(view.month)
             })
           }
           return
         }
+        if (event.type === 'queue') {
+          if (draftKey(acc, id) === currentRef.current) setQueue(event.items)
+          return
+        }
+        if (event.type === 'queue-failed') {
+          const target = event.message === '对话已删除' ? draftKey(acc, null) : draftKey(acc, id)
+          const deleted = event.message === '对话已删除'
+          const restored = deleted ? null : restoreQueuedDraft(drafts, currentRef.current, target, event.text)
+          const merged = deleted ? [] : mergeQueuedResources(resourceDrafts.current.get(target) ?? [], event.context?.resources ?? [], event.resources)
+          if (!deleted) resourceDrafts.current.set(target, merged)
+          const message = deleted ? '对话已删除，排队消息已丢弃' : `排队消息未发送：${event.message}`
+          if (target !== currentRef.current) failedNotices.current.set(target, message)
+          if (deleted && currentRef.current === target) setNotice(message)
+          if (restored !== null) {
+            setInput(restored)
+            setResources(merged)
+            setNotice(message)
+          }
+          return
+        }
+        if (acc === accountId && (event.type === 'approval' || event.type === 'proposal' || event.type === 'proposal-state')) void refreshList(acc)
         if (event.type === 'proposal-state' && event.proposal.state === 'succeeded' && draftKey(acc, id) === currentRef.current) setJustExecuted(true)
         // Main starts turns too (a card button's reply), so any run event means the conversation is running.
         // Card and proposal state changes, result cards and an impact analysis's usage come outside runs (runId 0).
@@ -327,18 +404,23 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   }
 
   const send = async (text: string): Promise<void> => {
-    if (!accountId || !canSendText(text) || busy) return
+    if (!accountId || !canSendText(text)) return
     const sentScope = scope
     setJustExecuted(false)
     setNotice(null)
     setDraft('')
     stickRef.current = true
-    const previous = visibleItems
-    setItems((prev) => [...prev, { kind: 'user', text: text.trim() }])
+    const sentResources = resources
+    const preview: ChatItem = { kind: 'user', text: text.trim(), resources: sentResources }
+    setResources([])
+    resourceDrafts.current.delete(sentScope)
+    setResourceQuery(null)
+    if (!busy) setItems((prev) => [...prev, preview])
     try {
-      const { conversationId: id, warning } = await ai.send(accountId, conversationId, text, pageOn)
+      const { conversationId: id, warning, queued } = await ai.send(accountId, conversationId, text, pageOn, sentResources.length ? { resources: sentResources.map(({ type, id, region }) => ({ type, id, region })) } : undefined)
+      if (queued && !busy && currentRef.current === sentScope) setItems((prev) => removeQueuedPreview(prev, preview))
       if (warning && currentRef.current === sentScope) setNotice(warning)
-      setRunning((prev) => new Set(prev).add(id))
+      if (!queued) setRunning((prev) => new Set(prev).add(id))
       void refreshList(accountId)
       if (id !== conversationId) {
         const nextScope = draftKey(accountId, id)
@@ -352,9 +434,12 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       // Nothing was sent: give the text back.
       const restored = restoreFailedSend(drafts.get(sentScope), text)
       drafts.set(sentScope, restored)
+      const merged = mergeQueuedResources(resourceDrafts.current.get(sentScope) ?? [], sentResources)
+      resourceDrafts.current.set(sentScope, merged)
       if (currentRef.current === sentScope) {
-        setItems(previous)
+        setItems((prev) => removeQueuedPreview(prev, preview))
         setInput(restored)
+        setResources(merged)
         setNotice(ipcError(err))
       }
     }
@@ -376,11 +461,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     setRegenerating(true)
     setJustExecuted(false)
     setNotice(null)
-    setItems(regenerationPreview(visibleItems, index, text ?? selected.text))
+    setItems(regenerationPreview(visibleItems, index, text ?? selected.text).map((item) =>
+      item.kind === 'user' && item.ordinal === ordinal && text !== undefined && editIndex === index ? { ...item, resources: editResources } : item))
     try {
       let timer: ReturnType<typeof setTimeout> | undefined
       const result = await Promise.race([
-        ai.regenerate(accountId, conversationId, ordinal, selected.text, text),
+        ai.regenerate(accountId, conversationId, ordinal, selected.text, text, text !== undefined && editIndex === index
+          ? { resources: editResources.map(({ type, id, region }) => ({ type, id, region })) } : undefined),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('重新生成超时，请刷新对话后重试')), 35_000) })
       ]).finally(() => clearTimeout(timer))
       setRunning((prev) => new Set(prev).add(result.conversationId))
@@ -412,11 +499,11 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
 
   const remove = async (id: string): Promise<void> => {
     if (!accountId) return
-    const title = conversations.find((c) => c.id === id)?.title || '这个对话'
+    const title = visibleConversations.find((c) => c.id === id)?.title || '这个对话'
     if (!confirm(`删除「${title}」？`)) return
     await ai.delete(accountId, id)
-    const list = await refreshList(accountId)
-    if (id === conversationId) void loadConversation(accountId, list[0]?.id ?? null)
+    await refreshList(accountId)
+    if (id === conversationId) void loadConversation(accountId, null)
   }
 
   const clearAll = async (): Promise<void> => {
@@ -434,6 +521,26 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     } catch (err) {
       setNotice(ipcError(err))
     }
+  }
+
+  const pin = async (id: string, pinned: boolean): Promise<void> => {
+    if (!accountId) return
+    try { await ai.pin(accountId, id, pinned); void refreshList(accountId) }
+    catch (err) { setNotice(ipcError(err)) }
+  }
+
+  const feedback = async (ordinal: number, value: 'up' | 'down' | null): Promise<void> => {
+    if (!accountId || !conversationId) return
+    const old = items.find((item) => item.kind === 'assistant' && item.ordinal === ordinal)
+    setItems((prev) => prev.map((item) => item.kind === 'assistant' && item.ordinal === ordinal ? { ...item, feedback: value } : item))
+    try { await ai.feedback(accountId, conversationId, ordinal, value) }
+    catch (err) { setItems((prev) => prev.map((item) => item.kind === 'assistant' && item.ordinal === ordinal && old?.kind === 'assistant' ? { ...item, feedback: old.feedback } : item)); setNotice(ipcError(err)) }
+  }
+
+  const denyAll = async (): Promise<void> => {
+    if (!accountId || !conversationId || !confirm('拒绝这个对话中全部待处理的审批和提案？')) return
+    try { await ai.denyAll(accountId, conversationId) }
+    catch (err) { setNotice(ipcError(err)) }
   }
 
   const startResize = (e: React.PointerEvent<HTMLDivElement>): void => {
@@ -533,7 +640,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const status = pendingStatus(pendingCalls.length, pending.length, hidden.length > 0)
   const shownReplies = busy ? null : visibleReplies(visibleItems)
   const replies = shownReplies && shownReplies.id !== dismissedReplies ? shownReplies : null
-  const current = conversations.find((c) => c.id === conversationId)
+  const current = visibleConversations.find((c) => c.id === conversationId)
   const allowed = allows.filter((a) => a.conversationId === conversationId)
 
   return (
@@ -586,7 +693,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           ×
         </button>
       </header>
-      {account && ready && <ConversationPopover conversations={conversations} currentId={conversationId} running={running} open={conversationsOpen} editTarget={editTarget} onClose={closeConversations} onOpen={(id) => void loadConversation(account.id, id)} onRename={(id, title) => void rename(id, title)} onDelete={(id) => void remove(id)} onClear={() => void clearAll()} />}
+      {account && ready && <ConversationPopover key={account.id} conversations={visibleConversations} currentId={conversationId} running={running} open={conversationsOpen} editTarget={editTarget} onClose={closeConversations} onOpen={(id) => void loadConversation(account.id, id)} onRename={(id, title) => void rename(id, title)} onDelete={(id) => void remove(id)} onClear={() => void clearAll()} onPin={(id, pinned) => void pin(id, pinned)} searchQuery={searchQuery} searchResults={searchResults} searchLoading={searchLoading} onSearch={setSearchQuery} />}
 
       {allowed.length > 0 && (
         <div className="ai-allows" role="group" aria-label="本对话已允许的动作">
@@ -638,7 +745,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           <EmptyState
             account={account}
             page={page}
-            recent={conversations.filter((c) => c.id !== conversationId)}
+            recent={visibleConversations.filter((c) => c.id !== conversationId)}
             onPick={fill}
             onOpen={(id) => void loadConversation(account.id, id)}
             onAllowWrite={() => void toggleWrite()}
@@ -652,6 +759,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
             return <Fragment key={Array.isArray(item) ? item[0].id : item.kind === 'card' || item.kind === 'proposal' || item.kind === 'approval' ? item.id : i}>
               {Array.isArray(item) ? <ActivityGroup tools={item} /> : <Item
                 item={item}
+                resultChange={item.kind === 'card' ? resultChange(visibleItems, item.id) : null}
                 index={index}
                 older={isOlder(visibleItems, index)}
                 userIndex={fromUserIndex(visibleItems, index)}
@@ -660,8 +768,10 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
                 cardDisabled={cardDisabled}
                 editing={editIndex === index}
                 editText={editText}
+                editResources={editResources}
                 onEditText={setEditText}
-                onEdit={() => { setEditIndex(index); setEditText(item.kind === 'user' ? item.text : '') }}
+                onRemoveEditResource={(candidate) => setEditResources((prev) => prev.filter((r) => r.type !== candidate.type || r.id !== candidate.id || r.region !== candidate.region))}
+                onEdit={() => { setEditIndex(index); setEditText(item.kind === 'user' ? item.text : ''); setEditResources(item.kind === 'user' ? item.resources ?? [] : []) }}
                 onCancelEdit={() => setEditIndex(null)}
                 onRegenerate={regenerate}
                 onCopy={copy}
@@ -672,7 +782,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
                 onApproval={approvalAction}
                 accountColor={account.color}
               />}
-              {actions && <MessageActions kind="assistant" text={actions.text} model={actions.model} usage={actions.usage} disabled={actionsDisabled} onRegenerate={() => void regenerate(actions.userIndex)} onCopy={copy} />}
+              {actions && <MessageActions kind="assistant" text={actions.text} model={actions.model} usage={actions.usage} feedback={actions.feedback} onFeedback={actions.ordinal === undefined ? undefined : (value) => void feedback(actions.ordinal!, value)} disabled={actionsDisabled} onRegenerate={() => void regenerate(actions.userIndex)} onCopy={copy} />}
             </Fragment>
           })
         )}
@@ -690,6 +800,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       {account && ready && config && (
         <footer className="ai-footer">
           {notice && <div className="ai-send-notice" role="alert">{notice}</div>}
+          {pendingDecisionCount(visibleItems) >= 2 && <button type="button" className="ai-deny-all" disabled={regenerating} onClick={() => void denyAll()}>全部拒绝（{pendingDecisionCount(visibleItems)}）</button>}
+          {queue.length > 0 && <QueueView queue={queue} onCancel={(q) => { if (accountId && conversationId) void ai.queueCancel(accountId, conversationId, q.id).catch((err) => setNotice(ipcError(err))) }} />}
           {status && (
             // Says why the answer stopped and can bring the card into view; never a way to allow (only the card, next to its parameters, does that).
             <div className="ai-status-line" role="status">
@@ -736,6 +848,19 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
             onOpenSettings={onOpenSettings}
             usage={usage}
             month={month}
+            resources={resources}
+            candidates={candidates}
+            onResourceQuery={setResourceQuery}
+            onSelectResource={(candidate) => setResources((prev) => {
+              const next = [...prev, candidate]
+              resourceDrafts.current.set(scope, next)
+              return next
+            })}
+            onRemoveResource={(candidate) => setResources((prev) => {
+              const next = prev.filter((r) => r.type !== candidate.type || r.id !== candidate.id || r.region !== candidate.region)
+              resourceDrafts.current.set(scope, next)
+              return next
+            })}
           />
         </footer>
       )}
@@ -743,8 +868,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   )
 }
 
+export function QueueView({ queue, onCancel }: { queue: QueuedMessage[]; onCancel: (item: QueuedMessage) => void }): React.JSX.Element {
+  return <div className="ai-queue" role="list" aria-label="排队消息">{queue.map((q) => <div key={q.id} role="listitem" className="ai-msg user ai-queued-user"><span><span className="ai-dim small">排队中 · </span>{q.text}</span><button type="button" aria-label={`取消排队：${q.text}`} onClick={() => onCancel(q)}>取消</button></div>)}</div>
+}
+
 interface ItemProps {
   item: NonToolItem
+  resultChange?: Extract<Block, { type: 'change' }> | null
   index: number
   userIndex: number
   retryable: boolean
@@ -752,7 +882,9 @@ interface ItemProps {
   cardDisabled: boolean
   editing: boolean
   editText: string
+  editResources?: ResourceCandidate[]
   onEditText: (text: string) => void
+  onRemoveEditResource?: (resource: ResourceCandidate) => void
   onEdit: () => void
   onCancelEdit: () => void
   onRegenerate: (index: number, text?: string) => void
@@ -766,7 +898,7 @@ interface ItemProps {
   accountColor: string
 }
 
-export function Item({ item, index, userIndex, retryable, actionsDisabled, cardDisabled, editing, editText, onEditText, onEdit, onCancelEdit, onRegenerate, onCopy, onOpenModel, older, onLink, onCardAction, onProposal, onApproval, accountColor }: ItemProps): React.JSX.Element | null {
+export function Item({ item, resultChange: change, index, userIndex, retryable, actionsDisabled, cardDisabled, editing, editText, editResources, onEditText, onRemoveEditResource, onEdit, onCancelEdit, onRegenerate, onCopy, onOpenModel, older, onLink, onCardAction, onProposal, onApproval, accountColor }: ItemProps): React.JSX.Element | null {
   if (item.kind === 'user') {
     return (
       <div className="ai-user-turn">
@@ -777,6 +909,7 @@ export function Item({ item, index, userIndex, retryable, actionsDisabled, cardD
           }} />
           <div><button type="button" disabled={actionsDisabled || !editText.trim()} onClick={() => onRegenerate(index, editText)}>发送修改</button><button type="button" onClick={onCancelEdit}>取消</button><span>⌘↵ 发送 · Esc 取消</span></div>
         </div> : <div className="ai-msg user">{item.text}</div>}
+        {(editing ? editResources : item.resources)?.length ? <div className="ai-msg-resources" aria-label="引用的资源">{(editing ? editResources : item.resources)!.map((r) => <span key={`${r.type}/${r.region}/${r.id}`} className="ai-chip">{r.label} · {r.id} · {r.region}{editing && <button type="button" aria-label={`移除资源引用：${r.label}`} onClick={() => onRemoveEditResource?.(r)}>×</button>}</span>)}</div> : null}
         {item.page && (
           <div className="ai-msg-page" title="提问时打开的页面">
             {item.page}
@@ -811,7 +944,7 @@ export function Item({ item, index, userIndex, retryable, actionsDisabled, cardD
   if (item.kind === 'card') {
     const card = item.card
     if (!card) return <CardSkeleton />
-    const view = <CardView card={card} disabled={cardDisabled} onLink={onLink} accountColor={accountColor} onAction={(a, row, values) => onCardAction(card.id, a, row, values)} />
+    const view = <CardView card={change ? { ...card, blocks: [...card.blocks, { ...change, summary: '已执行的变更（提案时 → 执行目标）' }] } : card} disabled={cardDisabled} onLink={onLink} accountColor={accountColor} onAction={(a, row, values) => onCardAction(card.id, a, row, values)} />
     return older && card.state !== 'active' && card.origin === 'system' ? <details className="ai-old-card"><summary>上一个卡片：{card.title} · {card.state === 'resolved' ? '✓ 已处理' : '■ 已失效'}</summary>{view}</details> : view
   }
   return (

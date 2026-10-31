@@ -1,5 +1,5 @@
-import { useId, useLayoutEffect, useRef, useState } from 'react'
-import { AI_PROVIDERS, BEDROCK_PROVIDER_ID, CUSTOM_PROVIDER_ID, type AiConfigView, type AiModelInfo, type MonthUsage, type UsageTotals } from '../../../../shared/ai'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { AI_PROVIDERS, BEDROCK_PROVIDER_ID, CUSTOM_PROVIDER_ID, MAX_PROMPT_CHARS, type AiConfigView, type AiModelInfo, type MonthUsage, type ResourceCandidate, type UsageTotals } from '../../../../shared/ai'
 import { formatCost, formatMonth, formatUsage } from '../../ai'
 import { IconArrowUp, IconCheck, IconChevronDown, IconStop } from '../icons'
 import { localCommand, menuSelection, type LocalCommand } from './commands'
@@ -68,11 +68,25 @@ export function scopedContent<T>(active: string, source: string, items: T[], inp
 }
 
 export function restoreFailedSend(currentDraft: string, sentText: string): string {
-  return currentDraft || sentText
+  const joined = [currentDraft, sentText].filter((part) => part.length > 0).join('\n\n')
+  if (joined.length <= MAX_PROMPT_CHARS) return joined
+  const notice = '\n\n[内容过长，已截断]'
+  return joined.slice(0, MAX_PROMPT_CHARS - notice.length) + notice
 }
 
 export function recallForScope(active: string, previous: string, at: Recall | null): Recall | null {
   return active === previous ? at : null
+}
+
+/** The @ token being edited, if the caret is directly after it. */
+export function resourceToken(value: string, caret: number): { query: string; start: number; end: number } | null {
+  const before = value.slice(0, caret)
+  const match = /(^|\s)@([^\s@]*)$/.exec(before)
+  return match ? { query: match[2], start: caret - match[2].length - 1, end: caret + (/^[^\s@]*/.exec(value.slice(caret))?.[0].length ?? 0) } : null
+}
+
+export function insertResource(value: string, token: { start: number; end: number }): string {
+  return value.slice(0, token.start) + value.slice(token.end)
 }
 
 const SHORT_PROVIDER: Record<string, string> = { [BEDROCK_PROVIDER_ID]: 'Bedrock', [CUSTOM_PROVIDER_ID]: '自定义端点' }
@@ -108,22 +122,44 @@ interface Props {
   onOpenSettings: () => void
   usage: UsageTotals | null
   month: MonthUsage | null
+  resources?: ResourceCandidate[]
+  candidates?: ResourceCandidate[]
+  onResourceQuery?: (query: string | null) => void
+  onSelectResource?: (candidate: ResourceCandidate) => void
+  onRemoveResource?: (candidate: ResourceCandidate) => void
 }
 
 /** The input box (plan ai-ux-redesign §3.7): grows 1–8 lines, one send / stop button, model and cost in its toolbar. */
-export function Composer({ scope, value, onChange, onSend, onCommand, onStop, onClose, busy, pausedOnApproval = false, history, inputRef, chip, config, models, onModel, onOpenSettings, usage, month }: Props): React.JSX.Element {
+export function Composer({ scope, value, onChange, onSend, onCommand, onStop, onClose, busy, pausedOnApproval = false, history, inputRef, chip, config, models, onModel, onOpenSettings, usage, month, resources = [], candidates = [], onResourceQuery, onSelectResource, onRemoveResource }: Props): React.JSX.Element {
   const at = useRef<Recall | null>(null)
   const [commandIndex, setCommandIndex] = useState(-1)
   const [closedCommand, setClosedCommand] = useState<string | null>(null)
+  const [resourceIndex, setResourceIndex] = useState(0)
+  const [closedResource, setClosedResource] = useState<string | null>(null)
+  const [caret, setCaret] = useState(value.length)
   const previousScope = useRef(scope)
   useLayoutEffect(() => {
     at.current = recallForScope(scope, previousScope.current, at.current)
     previousScope.current = scope
   }, [scope])
+  useEffect(() => {
+    const update = (): void => {
+      const el = inputRef.current
+      if (!el || document.activeElement !== el) return
+      setCaret(el.selectionStart)
+      onResourceQuery?.(resourceToken(el.value, el.selectionStart)?.query ?? null)
+    }
+    document.addEventListener('selectionchange', update)
+    return () => document.removeEventListener('selectionchange', update)
+  }, [inputRef, onResourceQuery])
   const id = useId()
   const modelPop = `${id}-model`
   const costPop = `${id}-cost`
   const commandListId = `${id}-commands`
+  const resourceListId = `${id}-resources`
+  const token = resourceToken(value, caret)
+  const resourceOpen = token && value !== closedResource && Boolean(onSelectResource) && resources.length < 5
+  const shownCandidates = resourceOpen ? candidates.filter((c) => !resources.some((r) => r.type === c.type && r.id === c.id && r.region === c.region)) : []
   const label = modelLabel(config, models)
   const choices = ([
     { text: '/新对话', label: '新对话' },
@@ -134,6 +170,17 @@ export function Composer({ scope, value, onChange, onSend, onCommand, onStop, on
     const command = localCommand(text)
     if (command) onCommand?.(command)
   }
+  const chooseResource = (candidate: ResourceCandidate): void => {
+    if (!token) return
+    onChange(insertResource(value, token))
+    onSelectResource?.(candidate)
+    onResourceQuery?.(null)
+    setClosedResource(null)
+    requestAnimationFrame(() => {
+      inputRef.current?.focus()
+      inputRef.current?.setSelectionRange(token.start, token.start)
+    })
+  }
   const monthLine = month && hasUsage(month.totals) ? formatMonth(month) : null
   // A click on any button inside closes the popover it is in.
   const closeOnPick = (e: React.MouseEvent<HTMLDivElement>): void => {
@@ -141,6 +188,25 @@ export function Composer({ scope, value, onChange, onSend, onCommand, onStop, on
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (resourceOpen && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
+      if (shownCandidates.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault()
+        setResourceIndex((n) => menuSelection(n, e.key as 'ArrowUp' | 'ArrowDown', shownCandidates.length))
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        setClosedResource(value)
+        onResourceQuery?.(null)
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey && shownCandidates.length) {
+        e.preventDefault()
+        chooseResource(shownCandidates[Math.min(resourceIndex, shownCandidates.length - 1)])
+        return
+      }
+    }
     if (choices.length && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault()
@@ -179,25 +245,31 @@ export function Composer({ scope, value, onChange, onSend, onCommand, onStop, on
 
   return (
     <div className="ai-composer">
+      {resourceOpen && <div id={resourceListId} className="ai-command-menu ai-resource-menu" role="listbox" aria-label="资源上下文候选">
+        {shownCandidates.map((c, i) => <button id={`${resourceListId}-${i}`} key={`${c.type}/${c.region}/${c.id}`} type="button" role="option" aria-selected={i === resourceIndex} onMouseDown={(e) => e.preventDefault()} onClick={() => chooseResource(c)}>{c.label} <span className="ai-dim">{c.type} · {c.id} · {c.region}</span></button>)}
+        {!shownCandidates.length && <div className="ai-dim small">没有匹配的资源</div>}
+      </div>}
       {choices.length > 0 && (
         <div id={commandListId} className="ai-command-menu" role="listbox" aria-label="本地命令">
           {choices.map((c, i) => <button id={`${commandListId}-${i}`} key={c.text} type="button" role="option" aria-selected={i === commandIndex} onMouseDown={(e) => e.preventDefault()} onClick={() => choose(c.text)}>{c.text} <span className="ai-dim">{c.label}</span></button>)}
         </div>
       )}
-      {chip && <div className="ai-composer-chips">{chip}</div>}
+      {(chip || resources.length > 0) && <div className="ai-composer-chips">{chip}{resources.map((r) => <span key={`${r.type}/${r.region}/${r.id}`} className="ai-chip">{r.label}<button type="button" className="ai-chip-x" aria-label={`移除资源 ${r.label}`} onClick={() => onRemoveResource?.(r)}>×</button></span>)}</div>}
       <textarea
         ref={inputRef}
         value={value}
         rows={1}
-        maxLength={8000}
+        maxLength={MAX_PROMPT_CHARS}
         aria-label="给 AI 助手的消息"
-        aria-controls={choices.length ? commandListId : undefined}
-        aria-activedescendant={choices.length && commandIndex >= 0 ? `${commandListId}-${Math.min(commandIndex, choices.length - 1)}` : undefined}
+        aria-controls={resourceOpen ? resourceListId : choices.length ? commandListId : undefined}
+        aria-activedescendant={resourceOpen && shownCandidates.length ? `${resourceListId}-${Math.min(resourceIndex, shownCandidates.length - 1)}` : choices.length && commandIndex >= 0 ? `${commandListId}-${Math.min(commandIndex, choices.length - 1)}` : undefined}
         placeholder="问点什么…（↵ 发送，⇧↵ 换行，↑ 上一条）"
-        onChange={(e) => { setClosedCommand(null); setCommandIndex(-1); onChange(e.target.value) }}
+        onChange={(e) => { setClosedCommand(null); setCommandIndex(-1); setClosedResource(null); setResourceIndex(0); setCaret(e.target.selectionStart); onChange(e.target.value); onResourceQuery?.(resourceToken(e.target.value, e.target.selectionStart)?.query ?? null) }}
+        onSelect={(e) => { setCaret(e.currentTarget.selectionStart); onResourceQuery?.(resourceToken(value, e.currentTarget.selectionStart)?.query ?? null) }}
         onKeyDown={onKeyDown}
       />
       <div className="ai-composer-tools">
+        {onResourceQuery && <button type="button" className="ai-mention" aria-label="添加资源上下文" title="引用本账号最近的资源" disabled={resources.length >= 5} onClick={() => { const next = `${value}${value && !/\s$/.test(value) ? ' ' : ''}@`; onChange(next); onResourceQuery(''); requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(next.length, next.length) }) }}>@</button>}
         {models.length > 1 ? (
           <>
             <button type="button" className="ai-model-chip" popoverTarget={modelPop} title={`模型：${label}（切换对所有对话生效）`}>

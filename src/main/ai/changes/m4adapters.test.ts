@@ -152,7 +152,8 @@ describe('dynamodb:UpdateTable', () => {
       { item: '读容量', before: '10 RCU', after: '100 RCU' },
       { item: '写容量', before: '5 WCU', after: '50 WCU' }
     ])
-    expect(up.plan.consequences[0]).toEqual({ kind: 'cost', text: '预置容量参考价约 $33.21/月（100 RCU + 50 WCU，us-east-1 标准表，不含存储和索引）', monthlyUsd: 33.21 })
+    expect(up.plan.consequences[0]).toEqual({ kind: 'cost', text: '预置容量参考价约 $33.21/月（100 RCU + 50 WCU，参考区域 us-east-1，可能与资源所在区域不同；标准表，不含存储和索引）', monthlyUsd: 33.21 })
+    expect(up.plan.consequences[1]).toEqual({ kind: 'throttling', text: '超过预置容量的请求会被限流（ProvisionedThroughputExceededException）' })
     expect(updateTable.request!(up.p, up.s)).toEqual({ TableName: 'orders', ProvisionedThroughput: { ReadCapacityUnits: 100, WriteCapacityUnits: 50 } })
     const down = await planOf(updateTable, { TableName: 'orders', ProvisionedThroughput: { ReadCapacityUnits: 5, WriteCapacityUnits: 5 } })
     expect(down.plan.risk).toBe('medium')

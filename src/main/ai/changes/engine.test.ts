@@ -252,6 +252,8 @@ describe('propose: more refusals send nothing to AWS', () => {
       const s = setup({}, { 'ec2:StopInstances#dryrun': answer })
       await expect(s.stop()).rejects.toThrow(message)
       expect(s.fake.writes()).toEqual([])
+      if (message === 'DryRun 失败') expect(s.audits.at(-1)?.data.reason).toContain('InvalidInstanceID.Malformed')
+      if (message.includes('没有 ec2:StopInstances 权限')) expect(s.audits.at(-1)?.data.reason).toContain('UnauthorizedOperation')
     }
   })
 
@@ -618,6 +620,14 @@ describe('permission pre-check by IAM policy simulation (services without DryRun
     expect(root.fake.of('iam', 'SimulatePrincipalPolicy')).toEqual([])
   })
 
+  it('does not put SDK deserialization details in a pre-check notice', async () => {
+    const broken = setup({}, { ...s3, 'iam:SimulatePrincipalPolicy': () => Promise.reject(new Error('Deserialization error: <Error><SecretAccessKey>hidden</SecretAccessKey></Error>')) })
+    const text = JSON.stringify((await broken.propose(versioning)).view.card)
+    expect(text).toContain('无法预检权限（服务响应异常）')
+    expect(text).not.toContain('Deserialization')
+    expect(text).not.toContain('<Error>')
+  })
+
   it('does not simulate where EC2 DryRun or a change set already checks', async () => {
     const s = setup()
     await s.stop()
@@ -672,7 +682,7 @@ describe('CloudFormation change sets', () => {
 
   it('reports a failed change set and cleans it up', async () => {
     const s = cfn([], { 'cloudformation:DescribeChangeSet': () => ({ Status: 'FAILED', StatusReason: "The submitted information didn't contain changes." }) })
-    await expect(s.go()).rejects.toThrow("didn't contain changes")
+    await expect(s.go()).rejects.toThrow('变更集没有实际变更')
     expect(s.deleted).toHaveLength(1)
   })
 

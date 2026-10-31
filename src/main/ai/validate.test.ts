@@ -17,6 +17,9 @@ import {
   checkTitle,
   checkTypedConfirmation,
   checkUrl,
+  checkSearchQuery,
+  checkFeedback,
+  checkQueueId,
   MAX_PROMPT_CHARS,
   trustedSender
 } from './validate'
@@ -47,6 +50,17 @@ describe('ai IPC validators', () => {
     expect(checkPrompt('  列出 EC2  ')).toBe('列出 EC2')
     expect(checkPrompt('x'.repeat(MAX_PROMPT_CHARS))).toHaveLength(MAX_PROMPT_CHARS)
     for (const bad of ['', '   ', 'x'.repeat(MAX_PROMPT_CHARS + 1), 42, ['hi']]) expect(() => checkPrompt(bad)).toThrow()
+  })
+
+  it('bounds search, feedback and queue ids', () => {
+    expect(checkSearchQuery(' CPU ')).toBe('CPU')
+    expect(checkSearchQuery('', true)).toBe('')
+    for (const bad of ['', 'x'.repeat(101), 'line\nbreak', 3]) expect(() => checkSearchQuery(bad)).toThrow()
+    expect(checkFeedback(null)).toBeNull()
+    expect(checkFeedback('up')).toBe('up')
+    expect(() => checkFeedback('allow')).toThrow()
+    expect(checkQueueId('01234567-89ab-cdef-0123-456789abcdef')).toBe('01234567-89ab-cdef-0123-456789abcdef')
+    expect(() => checkQueueId('../x')).toThrow()
   })
 
   it('flattens titles to one bounded line', () => {

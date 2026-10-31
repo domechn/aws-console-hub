@@ -111,8 +111,8 @@ export const updateTable: ChangeAdapter<TableParams, TableSnapshot> = {
         { item: '写容量', before: onDemand ? NONE : `${s.write} WCU`, after: `${write} WCU` }
       )
       const cost = capacityCost(read ?? 0, write ?? 0)
-      consequences.push({ kind: 'cost', text: `预置容量参考价约 ${usd(cost)}/月（${read} RCU + ${write} WCU，us-east-1 标准表，不含存储和索引）`, monthlyUsd: cost })
-      consequences.push({ kind: 'downtime', text: '超过预置容量的请求会被限流（ProvisionedThroughputExceededException）' })
+      consequences.push({ kind: 'cost', text: `预置容量参考价约 ${usd(cost)}/月（${read} RCU + ${write} WCU，参考区域 us-east-1，可能与资源所在区域不同；标准表，不含存储和索引）`, monthlyUsd: cost })
+      consequences.push({ kind: 'throttling', text: '超过预置容量的请求会被限流（ProvisionedThroughputExceededException）' })
       if (decrease) consequences.push({ kind: 'dependency', text: `AWS 限制每天缩减容量的次数（今天已缩减 ${s.decreasesToday} 次）` })
     }
     if (protectionChange) {

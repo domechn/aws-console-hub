@@ -124,7 +124,7 @@ const ConsequencesBlock = Type.Object({
   type: Type.Literal('consequences'),
   items: Type.Array(
     Type.Object({
-      kind: lit('downtime', 'irreversible', 'cost', 'dependency', 'blast-radius', 'data'),
+      kind: lit('downtime', 'irreversible', 'cost', 'dependency', 'blast-radius', 'data', 'throttling'),
       text: Str(L.cell),
       monthlyUsd: Type.Optional(Type.Number())
     }),

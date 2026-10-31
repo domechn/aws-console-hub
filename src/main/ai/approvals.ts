@@ -314,6 +314,10 @@ export class ApprovalStore {
     return [...this.records.values()].filter((r) => r.accountId === accountId && r.view.state === 'pending').length
   }
 
+  pendingIds(conversationId: string): string[] {
+    return [...this.records.values()].filter((r) => r.conversationId === conversationId && r.view.state === 'pending').map((r) => r.view.id)
+  }
+
   sweep(): void {
     const now = this.now()
     for (const [id, r] of this.records) {

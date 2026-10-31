@@ -117,6 +117,7 @@ export class ViewManager {
         partition: partitionFor(accountId)
       }
     })
+    view.setBackgroundColor('#ffffff')
     const wc = view.webContents
     const tabId = wc.id
     // Electron grants every permission by default; tabs and popups share this session.

@@ -1,4 +1,4 @@
-import { scriptCalls, scriptCode, toolLabel, type ApprovalView, type ChatItem, type ProposalState, type ProposalView, type TokenRates, type UsageTotals } from '../../shared/ai'
+import { scriptCalls, scriptCode, toolLabel, type ApprovalView, type ChatItem, type ProposalState, type ProposalView, type ResourceCandidate, type TokenRates, type UsageTotals } from '../../shared/ai'
 import type { Card } from '../../shared/cards'
 import { cardActionLabel, cardState, parseCardAction } from './cards'
 import { parseProposalResult, resultCard, type ProposalResult, type ResultStatus } from './changes/card'
@@ -39,6 +39,8 @@ export interface StoredAgentMessage {
   /** User turns: the page they were asked on (app metadata, not sent to the model). */
   page?: { label: string; url: string }
   rowId?: number
+  resources?: ResourceCandidate[]
+  feedback?: 'up' | 'down' | null
 }
 
 /** USD for `usage` at catalog `rates` ($ per 1M tokens). shortcut: ignores long-context price tiers; add them if a priced model in use has tiers. */
@@ -156,6 +158,7 @@ export function toChatItems(
   let turnModel: string | undefined
   let turnAssistant: Extract<ChatItem, { kind: 'assistant' }> | undefined
   let userOrdinal = 0
+  let assistantOrdinal = 0
   for (const m of messages) {
     if (m.role === 'note') {
       items.push(m.error ? { kind: 'assistant', text: '', error: m.error, ...(m.retryable === false && { retryable: false }) } : { kind: 'note', text: textOf(m.content) })
@@ -179,7 +182,7 @@ export function toChatItems(
       }
       const action = parseCardAction(text)
       const page = typeof m.page?.label === 'string' ? m.page.label : undefined
-      items.push({ kind: 'user', text: action ? cardActionLabel(action) : text, ...(action && { cardAction: true }), ...(page && { page }), ...(m.rowId !== undefined && { ordinal: userOrdinal }) })
+      items.push({ kind: 'user', text: action ? cardActionLabel(action) : text, ...(action && { cardAction: true }), ...(page && { page }), ...(m.rowId !== undefined && { ordinal: userOrdinal }), ...(m.resources?.length && { resources: m.resources }) })
       userOrdinal++
     } else if (m.role === 'assistant') {
       if (m.usage) {
@@ -195,8 +198,9 @@ export function toChatItems(
       const text = textOf(m.content)
       const error = m.stopReason === 'error' ? (m.errorMessage ?? '请求失败') : undefined
       if (text || error || m.stopReason === 'aborted') {
-        turnAssistant = { kind: 'assistant', text, ...(error && { error }), ...(m.stopReason === 'aborted' && { aborted: true }) }
+        turnAssistant = { kind: 'assistant', text, ...(error && { error }), ...(m.stopReason === 'aborted' && { aborted: true }), ...(m.rowId !== undefined && { ordinal: assistantOrdinal }), ...(m.feedback && { feedback: m.feedback }) }
         items.push(turnAssistant)
+        assistantOrdinal++
       }
       if (turnAssistant) Object.assign(turnAssistant, { ...(turnUsage && { usage: turnUsage }), ...(turnModel && { model: turnModel }) })
       for (const p of Array.isArray(m.content) ? m.content : []) {

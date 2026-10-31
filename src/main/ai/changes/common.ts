@@ -57,7 +57,7 @@ export const rowsOf = (lines: DiffLine[], label: (path: string) => string = (p) 
 
 /** `show`'s ∅ (empty) as words. */
 const friendly = (v: string | undefined): string => (v === undefined || v === '∅' ? '（空）' : v)
-export type ConsequenceKind = 'downtime' | 'irreversible' | 'cost' | 'dependency' | 'blast-radius' | 'data'
+export type ConsequenceKind = 'downtime' | 'irreversible' | 'cost' | 'dependency' | 'blast-radius' | 'data' | 'throttling'
 export interface Consequence {
   kind: ConsequenceKind
   text: string

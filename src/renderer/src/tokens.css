@@ -1,0 +1,64 @@
+:root {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-sunken: #f7f8fa;
+  --bg-raised: #ffffff;
+  --bg-hover: #eef1f5;
+  --bg-active: #e4eaf2;
+  --border: #dde1e7;
+  --border-strong: #c6cdd6;
+  --text: #1b2027;
+  /* 5.4:1 on --bg, 5.1:1 on --bg-sunken (was #6b7684, 4.3:1 on --bg-sunken). */
+  --text-dim: #5f6b7a;
+  --accent: #0972d3;
+  --danger: #d13212;
+  --ok: #037f0c;
+  --pin: #e08c00;
+  --shadow: 0 16px 48px rgba(20, 30, 45, 0.18);
+  /* Semantic aliases (plan ai-ux-redesign §3.18): the AI panel uses only tokens, so a dark theme swaps this block. */
+  --warn: var(--pin);
+  --warn-ink: #8a5300;
+  --warn-bg: #fdf3e1;
+  --warn-border: #f0c98a;
+  --danger-bg: #fbeae6;
+  --ok-bg: #e5f2e6;
+  --on-accent: #ffffff;
+  --on-account: #ffffff;
+  --rule: #eceff3;
+  --focus: var(--accent);
+  --popover-shadow: 0 8px 24px rgba(20, 30, 45, 0.14);
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --backdrop: rgba(22, 30, 42, 0.28);
+}
+
+[data-theme=dark] {
+  color-scheme: dark;
+  --bg: #15191e;
+  --bg-sunken: #11151a;
+  --bg-raised: #1d242c;
+  --bg-hover: #29333e;
+  --bg-active: #303c4a;
+  --border: #3c4752;
+  --border-strong: #586674;
+  --text: #f0f3f6;
+  --text-dim: #b1bfcd;
+  --accent: #70b7ff;
+  --danger: #ff8b78;
+  --ok: #6cda92;
+  --pin: #ffc266;
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  --warn: var(--pin);
+  --warn-ink: #ffc266;
+  --warn-bg: #322819;
+  --warn-border: #936d37;
+  --danger-bg: #35221f;
+  --ok-bg: #183326;
+  --on-accent: #101820;
+  --on-account: #ffffff;
+  --rule: #35404b;
+  --focus: #9accff;
+  --popover-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --backdrop: rgba(0, 0, 0, 0.6);
+}
+

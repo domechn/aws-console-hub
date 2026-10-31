@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ConversationSummary } from '../../../../shared/ai'
+import type { ConversationSearchResult, ConversationSummary } from '../../../../shared/ai'
 
 interface Group {
   label: string
@@ -13,6 +13,10 @@ export function groupConversations(items: ConversationSummary[], now = Date.now(
   const start = today.getTime()
   const groups = new Map<string, ConversationSummary[]>()
   for (const item of [...items].sort((a, b) => b.updatedAt - a.updatedAt)) {
+    if (item.pinned) {
+      groups.set('置顶', [...(groups.get('置顶') ?? []), item])
+      continue
+    }
     const date = new Date(item.updatedAt)
     const day = new Date(date)
     day.setHours(0, 0, 0, 0)
@@ -20,7 +24,29 @@ export function groupConversations(items: ConversationSummary[], now = Date.now(
     const label = age <= 0 ? '今天' : age === 1 ? '昨天' : age < 7 ? '最近 7 天' : age < 30 ? '最近 30 天' : `${date.getFullYear()}年${date.getMonth() + 1}月`
     groups.set(label, [...(groups.get(label) ?? []), item])
   }
-  return [...groups].map(([label, group]) => ({ label, items: group }))
+  return [...groups].sort((a, b) => a[0] === '置顶' ? -1 : b[0] === '置顶' ? 1 : 0).map(([label, group]) => ({ label, items: group }))
+}
+
+export function searchGroups(conversations: ConversationSummary[], query: string, results: ConversationSearchResult[]): Group[] {
+  const q = query.trim().toLocaleLowerCase()
+  if (!q) return groupConversations(conversations)
+  const titles = conversations.filter((c) => c.title.toLocaleLowerCase().includes(q))
+  const titleIds = new Set(titles.map((c) => c.id))
+  const resultIds = new Set(results.map((r) => r.id))
+  const contents = conversations.filter((c) => !titleIds.has(c.id) && resultIds.has(c.id))
+  return [
+    ...groupConversations(titles).map((g) => ({ ...g, label: `标题 · ${g.label}` })),
+    ...groupConversations(contents).map((g) => ({ ...g, label: `内容 · ${g.label}` }))
+  ]
+}
+
+export function conversationStatus(c: ConversationSummary, running: boolean, current: boolean): string {
+  return [
+    current ? '当前对话' : '',
+    c.status?.running || running ? '正在运行' : '',
+    c.status?.awaitingApproval ? '等待审批' : '',
+    c.status?.pendingProposals ? `${c.status.pendingProposals} 个提案待处理` : ''
+  ].filter(Boolean).join(' · ') || '对话'
 }
 
 export function conversationKey(key: string, index: number, count: number, modified: boolean): { index: number } | { open: number } | { delete: number } | { close: true } | null {
@@ -42,16 +68,22 @@ interface Props {
   onRename: (id: string, title: string) => void
   onDelete: (id: string) => void
   onClear: () => void
+  onPin?: (id: string, pinned: boolean) => void
+  searchQuery?: string
+  searchResults?: ConversationSearchResult[]
+  searchLoading?: boolean
+  onSearch?: (query: string) => void
 }
 
-export function ConversationPopover({ conversations, currentId, running, open, editTarget, onClose, onOpen, onRename, onDelete, onClear }: Props): React.JSX.Element | null {
-  const [query, setQuery] = useState('')
+export function ConversationPopover({ conversations, currentId, running, open, editTarget, onClose, onOpen, onRename, onDelete, onClear, onPin, searchQuery = '', searchResults = [], searchLoading = false, onSearch }: Props): React.JSX.Element | null {
+  const [query, setQuery] = useState(searchQuery)
   const [active, setActive] = useState(0)
   const [edit, setEdit] = useState<{ id: string; title: string } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (open) {
       setQuery('')
+      onSearch?.('')
       setActive(0)
       const target = conversations.find((c) => c.id === editTarget)
       setEdit(target ? { id: target.id, title: target.title } : null)
@@ -59,8 +91,8 @@ export function ConversationPopover({ conversations, currentId, running, open, e
     }
   }, [open, editTarget])
   if (!open) return null
-  const found = conversations.filter((c) => c.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
-  const groups = groupConversations(found)
+  const matches = query.trim() && query.trim() === searchQuery && !searchLoading ? new Map(searchResults.map((r) => [r.id, r])) : null
+  const groups = searchGroups(conversations, query, matches ? searchResults : [])
   const flat = groups.flatMap((g) => g.items)
   const selected = flat[Math.min(active, flat.length - 1)]
   const finishEdit = (): void => {
@@ -81,7 +113,7 @@ export function ConversationPopover({ conversations, currentId, running, open, e
   }
   return (
     <div className="ai-conversation-pop" role="dialog" aria-label="切换对话" onKeyDown={keyDown}>
-      <input ref={searchRef} type="search" value={query} aria-label="搜索对话标题" placeholder="搜索对话标题" onChange={(e) => { setQuery(e.target.value); setActive(0) }} />
+      <input ref={searchRef} type="search" value={query} aria-label="搜索对话标题和内容" placeholder="搜索对话标题和内容" onChange={(e) => { setQuery(e.target.value); onSearch?.(e.target.value); setActive(0) }} />
       <div className="ai-conversation-scroll">
         {groups.map((g) => (
           <div key={g.label} role="group" aria-label={g.label}>
@@ -110,12 +142,14 @@ export function ConversationPopover({ conversations, currentId, running, open, e
                       <span className="ai-conversation-mark">{currentId === c.id ? '✓' : running.has(c.id) ? '●' : ''}</span>
                       <span className="ai-conversation-main">
                         <span>{c.title || '未命名对话'}</span>
-                        <small>{currentId === c.id ? '当前对话' : running.has(c.id) ? '正在运行' : '对话'}</small>
+                        <small>{conversationStatus(c, running.has(c.id), currentId === c.id)}</small>
+                        {matches?.get(c.id)?.snippet && <small className="ai-conversation-snippet">{matches.get(c.id)?.snippet}</small>}
                       </span>
                       <time dateTime={new Date(c.updatedAt).toISOString()}>{new Date(c.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
                     </button>
                   )}
                   <div className="ai-conversation-actions">
+                    {onPin && <button type="button" aria-label={`${c.pinned ? '取消置顶' : '置顶'}对话：${c.title}`} onClick={() => onPin(c.id, !c.pinned)}>{c.pinned ? '◆' : '◇'}</button>}
                     <button type="button" aria-label={`重命名对话：${c.title}`} onClick={() => setEdit({ id: c.id, title: c.title })}>✎</button>
                     <button type="button" aria-label={`删除对话：${c.title}`} onClick={() => onDelete(c.id)}>×</button>
                   </div>
@@ -127,7 +161,7 @@ export function ConversationPopover({ conversations, currentId, running, open, e
         {flat.length === 0 && <p className="ai-dim">没有匹配的对话</p>}
       </div>
       <div className="ai-conversation-foot">
-        <span>匹配 {found.length} / {conversations.length} 个对话 · 只搜标题</span>
+        <span>匹配 {flat.length} / {conversations.length} 个对话 · {query.trim() && (searchLoading || searchQuery.trim() !== query.trim()) ? '正在搜索内容' : '标题和内容'}</span>
         <button type="button" disabled={conversations.length === 0} onClick={onClear}>清空本账号全部对话…</button>
       </div>
     </div>

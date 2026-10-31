@@ -59,6 +59,14 @@ it('assistant actions show supplied metadata and disable regeneration while pend
   expect(renderToStaticMarkup(<MessageActions kind="assistant" text="hi" onRegenerate={() => {}} />)).not.toContain('tokens')
 })
 
+it('assistant feedback is a local toggle with accessible labels', () => {
+  const html = renderToStaticMarkup(<MessageActions kind="assistant" text="ok" feedback="up" onFeedback={() => {}} onRegenerate={() => {}} />)
+  expect(html).toContain('aria-label="取消赞"')
+  expect(html).toContain('aria-pressed="true"')
+  expect(html).toContain('只保存在本机')
+  expect(html).toContain('aria-label="踩"')
+})
+
 it('failed and stopped replies have local retry actions and readable reasons', () => {
   const failed = renderToStaticMarkup(<MessageFailure error={'Bedrock 限流：稍后再试。\n原始错误：ThrottlingException'} onRetry={() => {}} onModel={() => {}} />)
   expect(failed).toContain('回答没有完成。')

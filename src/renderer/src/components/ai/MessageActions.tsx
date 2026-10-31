@@ -9,7 +9,7 @@ export function fromUserIndex(items: ChatItem[], index: number): number {
 export const isOlder = (items: ChatItem[], index: number): boolean => items.slice(index + 1).some((item) => item.kind === 'user')
 
 /** The bar belongs to the complete turn, after its cards, with the last assistant item's cumulative usage. */
-export function turnActionsAt(items: ChatItem[], index: number): { userIndex: number; text: string; model?: string; usage?: Extract<ChatItem, { kind: 'assistant' }>['usage'] } | null {
+export function turnActionsAt(items: ChatItem[], index: number): { userIndex: number; text: string; ordinal?: number; feedback?: 'up' | 'down' | null; model?: string; usage?: Extract<ChatItem, { kind: 'assistant' }>['usage'] } | null {
   if (items[index]?.kind === 'user' || items[index]?.kind === 'replies') return null
   const next = items.slice(index + 1).find((item) => item.kind !== 'replies')
   if (next && next.kind !== 'user') return null
@@ -19,7 +19,7 @@ export function turnActionsAt(items: ChatItem[], index: number): { userIndex: nu
   const answers = items.slice(userIndex + 1, index + 1).filter((item): item is Extract<ChatItem, { kind: 'assistant' }> => item.kind === 'assistant')
   const last = answers.at(-1)
   if (!last || last.error || last.aborted) return null
-  return { userIndex, text: answers.map((answer) => answer.text).filter(Boolean).join('\n\n'), ...(last.model && { model: last.model }), ...(last.usage && { usage: last.usage }) }
+  return { userIndex, text: answers.map((answer) => answer.text).filter(Boolean).join('\n\n'), ...(last.ordinal !== undefined && { ordinal: last.ordinal, feedback: last.feedback }), ...(last.model && { model: last.model }), ...(last.usage && { usage: last.usage }) }
 }
 
 /** A removed proposal may have changed AWS already, or may still need a decision. */
@@ -50,15 +50,18 @@ interface ActionsProps {
   onRegenerate: () => void
   onEdit?: () => void
   onCopy?: (text: string) => void
+  feedback?: 'up' | 'down' | null
+  onFeedback?: (value: 'up' | 'down' | null) => void
 }
 
-export function MessageActions({ kind, text, model, usage, disabled, onRegenerate, onEdit, onCopy }: ActionsProps): React.JSX.Element {
+export function MessageActions({ kind, text, model, usage, disabled, onRegenerate, onEdit, onCopy, feedback, onFeedback }: ActionsProps): React.JSX.Element {
   const meta = usage ? [model, `${formatTokens(usage.input + usage.output)} tokens`, usage.costUsd === undefined ? undefined : `≈${formatUsd(usage.costUsd)}`].filter(Boolean).join(' · ') : null
   return <div className={`ai-message-actions ${kind}`}>
     <div className="ai-message-buttons">
       {kind === 'user' && <button type="button" disabled={disabled} onClick={onEdit}>编辑并重发</button>}
       <button type="button" onClick={() => onCopy ? onCopy(text) : void navigator.clipboard.writeText(text)}>复制</button>
       {kind === 'assistant' && <button type="button" disabled={disabled} onClick={onRegenerate}>重新生成</button>}
+      {kind === 'assistant' && onFeedback && (['up', 'down'] as const).map((value) => <button key={value} type="button" disabled={disabled} aria-label={feedback === value ? `取消${value === 'up' ? '赞' : '踩'}` : value === 'up' ? '赞' : '踩'} aria-pressed={feedback === value} title="反馈只保存在本机，不发送给模型" onClick={() => onFeedback(feedback === value ? null : value)}>{value === 'up' ? '赞' : '踩'}</button>)}
     </div>
     {meta && <span className="ai-message-meta">{meta}</span>}
   </div>

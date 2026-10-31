@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
-const css = readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
+const css = readFileSync(new URL('./tokens.css', import.meta.url), 'utf8') + readFileSync(new URL('./styles.css', import.meta.url), 'utf8')
 const AI_START = '/* ---------- AI assistant ---------- */'
 
 /** One {selector, declaration} per line of a rule body, comments dropped. */
@@ -23,8 +23,33 @@ const contrast = (a: string, b: string): number => {
   return (hi + 0.05) / (lo + 0.05)
 }
 const token = (name: string): string => css.match(new RegExp(`--${name}: (#[0-9a-f]{6});`))![1]
+const lightTokens = Object.fromEntries([...css.slice(css.indexOf(':root {'), css.indexOf('html,')).matchAll(/--([\w-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]))
+const darkBlock = css.match(/\[data-theme=['"]?dark['"]?\]\s*\{([^}]+)\}/)?.[1] ?? ''
+const darkTokens = Object.fromEntries([...darkBlock.matchAll(/--([\w-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]))
+const darkToken = (name: string): string => darkTokens[name] as string
 
 describe('AI panel CSS (plan ai-ux-redesign §3.18)', () => {
+  it('defines every light colour token in dark mode and keeps text, states, and focus readable', () => {
+    expect(Object.keys(darkTokens).sort()).toEqual(Object.keys(lightTokens).sort())
+    for (const bg of ['bg', 'bg-sunken', 'bg-raised', 'bg-hover', 'bg-active']) {
+      for (const text of ['text', 'text-dim']) expect(contrast(darkToken(text), darkToken(bg)), `${text} on ${bg}`).toBeGreaterThanOrEqual(4.5)
+    }
+    for (const [fg, bg] of [['on-accent', 'accent'], ['warn-ink', 'warn-bg'], ['danger', 'danger-bg'], ['ok', 'ok-bg'], ['focus', 'bg'], ['focus', 'bg-raised'], ['pin', 'bg']]) {
+      expect(contrast(darkToken(fg), darkToken(bg)), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5)
+    }
+    expect(css).toMatch(/:root\s*\{[^}]*color-scheme:\s*light;/)
+    expect(darkBlock).toMatch(/color-scheme:\s*dark;/)
+  })
+
+  it('uses tokens for all app chrome and toast colours, including focus rings', () => {
+    const chrome = declarations(css.slice(css.indexOf('html,'), css.indexOf(AI_START)))
+      .filter((d) => !d.startsWith('mask-image'))
+      .filter((d) => /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?)\(|(^|[\s:(,])(white|black)([\s;,)]|$)/i.test(d))
+    expect(chrome).toEqual([])
+    const toast = readFileSync(new URL('./toast.css', import.meta.url), 'utf8')
+    expect(declarations(toast).filter((d) => /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?)\(/i.test(d))).toEqual([])
+    expect(css).toMatch(/html :is\(button, input, select, textarea, \[tabindex\]\):focus-visible\s*\{[^}]*outline:\s*2px solid var\(--focus\)/)
+  })
   it('uses only tokens: no hard-coded colour in the AI section', () => {
     expect(css).toContain(AI_START)
     const colours = declarations(css.slice(css.indexOf(AI_START)))

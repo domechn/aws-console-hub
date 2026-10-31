@@ -68,6 +68,10 @@ export class ToastOverlay {
     })
   }
 
+  setSystemDark(dark: boolean): void {
+    if (!this.view.webContents.isDestroyed()) this.view.webContents.send('app:system-dark-changed', dark)
+  }
+
   /** Back on top; call after adding any other child view to the window. */
   raise(): void {
     this.win.contentView.addChildView(this.view)

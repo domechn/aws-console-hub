@@ -10,6 +10,9 @@ function subscribe(channel: string) {
 }
 
 const api: Api = {
+  systemDark: ipcRenderer.sendSync('app:system-dark') as boolean,
+  onSystemDark: subscribe('app:system-dark-changed'),
+  setAppTheme: (preference, resolved) => ipcRenderer.send('app:theme', preference, resolved),
   platform: process.platform,
   listAccounts: () => ipcRenderer.invoke('accounts:list'),
   saveAccount: (input) => ipcRenderer.invoke('accounts:save', input),
@@ -54,9 +57,15 @@ const api: Api = {
     models: (provider) => ipcRenderer.invoke('ai:models', provider),
     test: () => ipcRenderer.invoke('ai:test'),
     conversations: (accountId) => ipcRenderer.invoke('ai:conversations', accountId),
+    pin: (accountId, conversationId, pinned) => ipcRenderer.invoke('ai:pin', accountId, conversationId, pinned),
+    search: (accountId, query) => ipcRenderer.invoke('ai:search', accountId, query),
     history: (accountId, conversationId) => ipcRenderer.invoke('ai:history', accountId, conversationId),
-    send: (accountId, conversationId, text, page) => ipcRenderer.invoke('ai:send', accountId, conversationId, text, page),
-    regenerate: (accountId, conversationId, userOrdinal, expectedText, text) => ipcRenderer.invoke('ai:regenerate', accountId, conversationId, userOrdinal, expectedText, text),
+    send: (accountId, conversationId, text, page, context) => ipcRenderer.invoke('ai:send', accountId, conversationId, text, page, context),
+    resourceCandidates: (accountId, query) => ipcRenderer.invoke('ai:resource-candidates', accountId, query),
+    queueCancel: (accountId, conversationId, queueId) => ipcRenderer.invoke('ai:queue-cancel', accountId, conversationId, queueId),
+    feedback: (accountId, conversationId, ordinal, value) => ipcRenderer.invoke('ai:feedback', accountId, conversationId, ordinal, value),
+    denyAll: (accountId, conversationId) => ipcRenderer.invoke('ai:deny-all', accountId, conversationId),
+    regenerate: (accountId, conversationId, userOrdinal, expectedText, text, context) => ipcRenderer.invoke('ai:regenerate', accountId, conversationId, userOrdinal, expectedText, text, context),
     pageContext: (accountId) => ipcRenderer.invoke('ai:page-context', accountId),
     setPageContext: (accountId, conversationId, on) => ipcRenderer.invoke('ai:page-toggle', accountId, conversationId, on),
     abort: (conversationId) => ipcRenderer.invoke('ai:abort', conversationId),

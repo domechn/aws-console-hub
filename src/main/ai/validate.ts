@@ -1,9 +1,10 @@
 /** Argument checks for the ai:* IPC channels. Pure. Everything from the renderer is untrusted input. */
-import { AI_PROVIDERS, APPROVAL_DECISIONS, RISK_LEVELS, type ApprovalDecision, type AuditFilter, type Risk } from '../../shared/ai'
+import { AI_PROVIDERS, APPROVAL_DECISIONS, RISK_LEVELS, MAX_PROMPT_CHARS, type ApprovalDecision, type AuditFilter, type Risk } from '../../shared/ai'
 import { MAX_TEXT_VALUE } from '../../shared/cardRules'
 import { ACTION_ID_RE, CARD_LIMITS, FIELD_NAME_RE, ROW_ID_RE, type FormValues } from '../../shared/cards'
+export { checkResourceContext } from './resources'
 
-export const MAX_PROMPT_CHARS = 8000
+export { MAX_PROMPT_CHARS }
 export const MAX_TITLE_CHARS = 100
 
 const ID_RE = /^[A-Za-z0-9-]{1,64}$/
@@ -27,6 +28,21 @@ export function checkPrompt(v: unknown): string {
 
 export function checkUserIndex(v: unknown): number {
   if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new Error('无效的消息位置')
+  return v
+}
+
+export function checkSearchQuery(v: unknown, allowEmpty = false): string {
+  if (typeof v !== 'string' || v.length > 100 || (!allowEmpty && !v.trim()) || /[\u0000-\u001f\u007f]|\p{Cf}/u.test(v)) throw new Error('无效的搜索词')
+  return v.trim()
+}
+
+export function checkFeedback(v: unknown): 'up' | 'down' | null {
+  if (v !== 'up' && v !== 'down' && v !== null) throw new Error('无效的反馈')
+  return v
+}
+
+export function checkQueueId(v: unknown): string {
+  if (typeof v !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v)) throw new Error('无效的排队消息 id')
   return v
 }
 

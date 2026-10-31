@@ -1,0 +1,87 @@
+import { describe, expect, it, vi } from 'vitest'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { observeTheme, resolveTheme, setThemePreference, ThemeSetting } from './theme'
+
+describe('theme preference', () => {
+  it('syncs the app and toast observers on preference and system changes', () => {
+    const values = new Map<string, string>()
+    const media = Object.assign(new EventTarget(), { matches: true })
+    const win = Object.assign(new EventTarget(), { matchMedia: () => media })
+    const doc = { documentElement: { dataset: {} as Record<string, string> } }
+    const channels = new Set<TestChannel>()
+    class TestChannel extends EventTarget {
+      constructor(_name: string) { super(); channels.add(this) }
+      postMessage(data: string): void { for (const other of channels) if (other !== this) other.dispatchEvent(new MessageEvent('message', { data })) }
+      close(): void { channels.delete(this) }
+    }
+    vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value) })
+    vi.stubGlobal('window', win)
+    vi.stubGlobal('document', doc)
+    vi.stubGlobal('BroadcastChannel', TestChannel)
+    const app: string[] = []
+    const toast: string[] = []
+    const stopApp = observeTheme((_, resolved) => app.push(resolved))
+    const stopToast = observeTheme((_, resolved) => toast.push(resolved))
+    expect([app.at(-1), toast.at(-1)]).toEqual(['dark', 'dark'])
+    setThemePreference('light')
+    expect([app.at(-1), toast.at(-1)]).toEqual(['light', 'light'])
+    setThemePreference('system')
+    media.matches = false
+    media.dispatchEvent(new Event('change'))
+    expect([app.at(-1), toast.at(-1)]).toEqual(['light', 'light'])
+    stopApp()
+    stopToast()
+    vi.unstubAllGlobals()
+  })
+  it('resolves system preference and explicit light or dark choices', () => {
+    expect(resolveTheme('system', true)).toBe('dark')
+    expect(resolveTheme('system', false)).toBe('light')
+    expect(resolveTheme('light', true)).toBe('light')
+    expect(resolveTheme('dark', false)).toBe('dark')
+  })
+  it('uses the OS theme supplied by main while Chromium stays light for consoles', () => {
+    const media = Object.assign(new EventTarget(), { matches: false })
+    let notify!: (dark: boolean) => void
+    const win = Object.assign(new EventTarget(), { matchMedia: () => media, api: { platform: 'darwin', systemDark: true, onSystemDark: (cb: (dark: boolean) => void) => { notify = cb; return () => {} } } })
+    const doc = { documentElement: { dataset: {} as Record<string, string> } }
+    vi.stubGlobal('localStorage', { getItem: () => 'system' })
+    vi.stubGlobal('window', win)
+    vi.stubGlobal('document', doc)
+    vi.stubGlobal('BroadcastChannel', class extends EventTarget { postMessage(): void {} close(): void {} })
+    const stop = observeTheme()
+    expect(doc.documentElement.dataset.theme).toBe('dark')
+    notify(false)
+    expect(doc.documentElement.dataset.theme).toBe('light')
+    stop()
+    vi.unstubAllGlobals()
+  })
+  it('uses main OS changes on Linux even when Chromium reports forced light', () => {
+    const media = Object.assign(new EventTarget(), { matches: false })
+    let notify!: (dark: boolean) => void
+    const win = Object.assign(new EventTarget(), { matchMedia: () => media, api: { platform: 'linux', systemDark: true, onSystemDark: (cb: (dark: boolean) => void) => { notify = cb; return () => {} } } })
+    const doc = { documentElement: { dataset: {} as Record<string, string> } }
+    vi.stubGlobal('localStorage', { getItem: () => 'system' })
+    vi.stubGlobal('window', win)
+    vi.stubGlobal('document', doc)
+    vi.stubGlobal('BroadcastChannel', class extends EventTarget { postMessage(): void {} close(): void {} })
+    const stop = observeTheme()
+    expect(doc.documentElement.dataset.theme).toBe('dark')
+    media.dispatchEvent(new Event('change'))
+    expect(doc.documentElement.dataset.theme).toBe('dark')
+    notify(false)
+    expect(doc.documentElement.dataset.theme).toBe('light')
+    notify(true)
+    expect(doc.documentElement.dataset.theme).toBe('dark')
+    stop()
+    vi.unstubAllGlobals()
+  })
+
+  it('renders the setting and the native console limitation', () => {
+    const html = renderToStaticMarkup(<ThemeSetting value="system" onChange={() => {}} />)
+    expect(html).toContain('主题')
+    expect(html).toContain('跟随系统')
+    expect(html).toContain('浅色')
+    expect(html).toContain('深色')
+    expect(html).toContain('AWS Console 页面')
+  })
+})

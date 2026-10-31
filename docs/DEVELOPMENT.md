@@ -13,6 +13,7 @@
 - **原生窗口体验** — 隐藏标题栏、前进/后退/刷新、一键重新登录（清凭证缓存后重新联邦，登录完回到当前标签页原来的页面）。
 - **无侧栏布局** — 顶栏从左到右：账号按钮、前进/后退/刷新、标签栏、最近访问开关（时钟图标，显示中为蓝色）、重新登录。console 和底部最近访问条占满整个窗口宽度。
 - **右下角提示（toast）** — 登录失败、缺凭证命令、保存 / 删除账号失败等提示显示在窗口右下角（最近访问条上方）：8 秒后自动消失，鼠标悬停时暂停计时，✕ 关闭，「复制」复制全文；最多叠 3 条，新的在上，相同内容不重复叠加而是计数（×N）并重新计时。长消息在框内滚动。错误为红色（`role="alert"`），缺凭证命令这类待办为蓝色提示（`role="status"`）。
+- **应用主题** — AI 设置里的「主题」可选跟随系统、浅色、深色，保存在 renderer 的 `localStorage.appTheme`，并同步到主进程的 `theme-preference` 文件，以便窗口创建时先设置背景颜色。默认跟随系统；`theme.tsx` 设置根元素的 `data-theme`。Electron 的 `nativeTheme.themeSource` 保持 P3 前的 `light`，所以内嵌 AWS Console 的 `prefers-color-scheme` 仍是浅色，不随应用主题切换。主进程在强制浅色前读取系统主题，两个 renderer 在所有平台均通过 `app:system-dark` 使用这个值，不从被强制浅色的 `matchMedia` 推断；macOS 使用系统外观通知即时更新，Windows/Linux 从本机系统设置读取并在窗口聚焦及每 10 秒刷新。macOS 重新创建窗口时从系统偏好重读外观。`tokens.css` 的浅深变量由两个 renderer 分别引入；原生窗口和 content view 的加载背景随应用主题更新；console view 保持 P3 前的白色背景 `#ffffff`。主题偏好文件仅在偏好变更时写入。主题偏好文件保存失败会留在当前窗口和 `localStorage`，下次启动前不会持久化。真实 AWS Console 会话未验证。
 - **账号切换器** — 顶栏最左的账号按钮（颜色点 + 名称，登录 / 加载中显示 spinner）或 `⌘⇧A` 打开 `AccountSwitcher.tsx` 下拉框：搜索框自动聚焦，用 `shared/fuzzy.ts` 匹配名称 / account id / role，有查询时组内按分数排序；「账号」「基础账号」两组，每行显示颜色点、名称、`accountId · role`、`⌘1-9` 提示（规则同快捷键：优先跳转账号，没有时是基础账号），悬停出 ✎ / ✕。底部是「＋ 添加账号」「＋ 添加基础账号」（走原来的 `AccountModal`）和当前账号的「重新登录」。下拉框和 ⌘K 面板互斥。没有账号时欢迎页按步骤引导添加；有账号但没选时欢迎页有「选择账号」按钮。
 - **底部最近访问条** — 固定项和最近访问在 console 下方的一行 30px 条里（`ResourceList.tsx` 的 `ResourceStrip`）：固定项（★）在前，细分隔线后是最近访问（新的在前）。每个条目是服务缩写 + 名称（过长截断）+ 账号颜色点，悬停提示完整名称 / 账号 / region / 类型 / 时间；悬停时 ★ / ✕ 按钮盖在条目尾部，不改变尺寸。条目横向滚动：滚动条隐藏，竖向滚轮转成横向，触控板横滑原生可用，两端有渐隐遮罩，溢出时显示左右翻页按钮。最前面的 ▾ 按钮或 `⌘J` 隐藏整条（存 `localStorage` 的 `recentsHidden`），隐藏后用顶栏的时钟按钮或 `⌘J` 恢复。没有记录时条里只剩 ▾ 按钮。条内不做过滤，⌘K 本来就能搜最近访问。
 - **⌘F 页内搜索** — 走 Chromium 自己的 `findInPage`，实时高亮、显示第几个 / 共几个，`↵` / `⇧↵` 上下跳，`esc` 关闭（焦点在搜索框或 console 页面里都行）。搜索条排在 console view 上方而不是浮在它上面（原生 view 画在 DOM 之上，浮层会被盖掉）。
@@ -148,7 +149,7 @@ src/
 - **标签页属于账号，窗口只有一个**。每个账号有自己的一组标签页和一个当前标签页；屏幕上只显示当前账号的当前标签页，切账号 / 切标签页都只是切显示。标签页 id 就是它的 `webContents.id`，通过 `nav:state` 里的 `tabs` / `activeTabId` 发给渲染进程。账号的最后一个标签页不能关：联邦登录总要有个落地的地方。
 - **单实例锁**。session 分区的 LevelDB LOCK 是独占的，第二个实例只会把已有窗口拉到前台。
 - **UA 清理**。`app.userAgentFallback` 去掉了 `Electron/…` 和 `aws-console-hub/…` 片段，避免部分认证流程拒绝非浏览器 UA。
-- **强制浅色**。`nativeTheme.themeSource = 'light'`，嵌入的 console 也跟着走浅色；样式是手写 CSS + `:root` 变量，没有深色模式。
+- **Console 强制浅色**。`nativeTheme.themeSource = 'light'` 保持内嵌 console 的原有浅色行为；应用外框由 renderer 的 `data-theme` 使用 `tokens.css` 独立着色。
 
 ### IPC 接口
 
@@ -336,10 +337,16 @@ system prompt（账号名、12 位 account id、role 名、账号类型、region
 | `ai:key-clear` | — | — |
 | `ai:models` | `provider` | `AiModelInfo[]`（id、名称、上下文、目录单价） |
 | `ai:test` | — | `{ ok, toolCalling, latencyMs, error? }`：一条「请调用 ping 工具」的测试请求，不含账号数据 |
-| `ai:conversations` | `accountId` | `ConversationSummary[]` |
+| `ai:conversations` | `accountId` | `ConversationSummary[]`（`pinned`、`status: { running, awaitingApproval, pendingProposals }`；置顶在前） |
 | `ai:history` | `accountId, conversationId` | `{ items: ChatItem[], usage, month, pageContext }`；对话必须属于这个账号 |
-| `ai:send` | `accountId, conversationId \| null, text`（≤ 8000）`, page?: boolean`（新对话的页面开关，默认 true） | `{ conversationId, runId, warning? }`；预算超出且阻止时 reject；接近或超出（不阻止）时带 `warning` |
-| `ai:regenerate` | `accountId, conversationId, fromUserIndex, expectedText, text?`（已存用户消息的 ordinal、原文校验；编辑文本 ≤ 8000） | `{ conversationId, runId, warning? }`；仅限本账号对话，运行中拒绝（等待审批时先中止该审批及运行）；重试和编辑都删除原用户消息及后续回复，并在保留的结果行之后写入新提问（重试使用原文）；拒绝主进程保留的 `[card_action]` / `[proposal_result]` / `[answer_request]` 前缀，遵守与 `ai:send` 相同的预算检查。截断后历史和事件有可见提示，说明之前的操作可能已执行；已执行变更不会撤销。待确认提案先取消，审批先安全中止；审计和已计费的月用量保留，另记 `conversation_regenerated`（位置、是否编辑，不记文本）。调用后重新加载 `ai:history`，以取得截断后的完整消息列表。 |
+| `ai:send` | `accountId, conversationId \| null, text`（≤ 8000）`, page?: boolean, context?: { resources: { type, id, region }[] }` | `{ conversationId, runId, warning?, queued?: { id } }`；运行中同一对话排队时返回 `queued.id`，尚未写入历史。最多 5 个资源引用，只认 `resources.ts` 的资源类型；主进程确认每个引用在本账号的最近访问或当前页面里。预算在每轮真正开始时检查。 |
+| `ai:resource-candidates` | `accountId, query`（≤ 100 字，可空） | `ResourceCandidate[]`（`type,id,region,label`），仅本账号当前页面与最近访问资源，最多 20 条；名称清理控制字符和凭证。 |
+| `ai:pin` | `accountId, conversationId, pinned: boolean` | —；置顶状态保存在 `conversations.pinned`，列表置顶优先。 |
+| `ai:search` | `accountId, query`（1–100 字） | `{ id, title, snippet }[]`，只搜本账号已存用户和助手正文；转义通配符后用 LIKE 匹配中英文子串，`[card_action]` 等内部消息的 `_` 也按字面匹配；每批读取最多 200 条 SQL 匹配，片段先脱敏，最新一条匹配若在 JS 校验中被排除则继续尝试更早的匹配，最多返回 20 个对话。标题匹配仅由弹层在客户端执行，优先显示并和正文匹配去重；正文搜索失败时仍保留标题结果。 |
+| `ai:feedback` | `accountId, conversationId, ordinal, value: 'up' \| 'down' \| null` | —；`ordinal` 为历史里助手正文/错误项的 `ordinal`。只写本机 `messages.feedback`，不会发给模型或上传。 |
+| `ai:queue-cancel` | `accountId, conversationId, queueId` | —；取消一条尚未开始的排队用户消息。 |
+| `ai:deny-all` | `accountId, conversationId` | `{ approvals, proposals }`；逐个拒绝当前对话的待处理审批、取消待确认提案，绝无批量允许。 |
+| `ai:regenerate` | `accountId, conversationId, fromUserIndex, expectedText, text?, context?`（已存用户消息的 ordinal、原文校验；编辑文本 ≤ 8000；`context.resources` 只能保留原消息的引用） | `{ conversationId, runId, warning? }`；仅限本账号对话，运行中拒绝（等待审批时先中止该审批及运行）；重试和编辑都删除原用户消息及后续回复，并在保留的结果行之后写入新提问（重试使用原文）；拒绝主进程保留的 `[card_action]` / `[proposal_result]` / `[answer_request]` 前缀，遵守与 `ai:send` 相同的预算检查。截断后历史和事件有可见提示，说明之前的操作可能已执行；已执行变更不会撤销。待确认提案先取消，审批先安全中止；审计和已计费的月用量保留，另记 `conversation_regenerated`（位置、是否编辑，不记文本）。调用后重新加载 `ai:history`，以取得截断后的完整消息列表。 |
 | `ai:page-context` | `accountId` | `PageContext \| null`：这个账号活动标签页会发给模型的页面信息（不是 Console 页面时 `null`） |
 | `ai:page-toggle` | `accountId, conversationId, on: boolean` | —；对话必须属于这个账号 |
 | `ai:abort` | `conversationId` | — |
@@ -356,7 +363,11 @@ system prompt（账号名、12 位 account id、role 名、账号类型、region
 | `ai:audit-list` | `AuditFilter`（普通对象，只认 `accountId?` `days?`（1–3650 整数） `risk?` `scope?: changes \| all`） | `AuditView[]`：摘要（时间、类型、账号、提案 id、service / action、风险、目标、actor、≤ 300 字的结果 / 原因、requestId），**没有 params、工具参数和结果**；最新的在前，最多 500 条 |
 | `ai:data-delete` | `audit: boolean, typed?: string`（≤ 50） | —；删除全部对话、消息和用量，`audit` 时还删审计，需要 `typed === '删除审计记录'`（在 `AiService.deleteAllData` 比较）；之后写一条 `ai_data_deleted` 审计并 `vacuum` |
 
-主进程 → 渲染进程：`ai:event { accountId, conversationId, runId, event }`，`event` 是 `text-delta` / `tool-start` / `tool-end` / `card-pending` / `card` / `card-state` / `user`（主进程替用户发起的一轮，即卡片回复，带显示文字） / `proposal`（`propose_change` 生成的提案，`ProposalView`） / `proposal-state`（提案状态变化，不属于任何运行，`runId: 0`） / `proposal-result`（结果卡，同上） / `approval`（审批卡出现或状态变化，`ApprovalView`，`runId: 0`） / `usage`（本对话 + 本月） / `error` / `done`；`assistant:toggle`（console 里按 ⌘I）。`ProposalView` 里没有 nonce，也没有 params。
+主进程 → 渲染进程：`ai:event { accountId, conversationId, runId, event }`，`event` 是 `text-delta` / `tool-start` / `tool-end` / `card-pending` / `card` / `card-state` / `user`（主进程替用户发起的一轮，即卡片回复或出队的用户消息，带显示文字和可选资源标签） / `queue`（`{ type: 'queue', items: { id, text, context? }[] }`，`runId: 0`，每次入队、取消、出队、Stop 时推送；`ai:history.queue` 可用于重载） / `queue-failed`（`{ id, text, context?, message }`，`runId: 0`；出队、Stop、超时或删对话时消息未发送，可将文字与资源引用还给草稿） / `proposal`（`propose_change` 生成的提案，`ProposalView`） / `proposal-state`（提案状态变化，不属于任何运行，`runId: 0`） / `proposal-result`（结果卡，同上） / `approval`（审批卡出现或状态变化，`ApprovalView`，`runId: 0`） / `usage`（本对话 + 本月） / `error` / `done`；`assistant:toggle`（console 里按 ⌘I）。`ProposalView` 里没有 nonce，也没有 params。
+
+P3 后端：资源引用在用户消息的 `resources` 元数据里显示；发送给模型时，把类型、id、region、名称放在对应用户轮次的不可信围栏中，JSON 中的 `<` 转义，system prompt 不包含资源名称。重新生成时已从本账号最近访问消失的引用会被移除，并显示系统通知。队列按入队顺序执行，用户消息最多 3 条；入队和开始时都检查长度、内部保留前缀和本账号资源归属，开始时重新检查预算与模型设置。审批暂停当前运行期间队列也暂停；Stop 清除排队用户消息和卡片回复、使卡片恢复可点，并为每条丢弃的用户消息发送 `queue-failed`；已产生的提案结果仍保留在历史和审计中。排队只在内存中，退出应用后消失。反馈随消息或对话删除；普通删除对话、截断历史不会删除用量或审计，只有「删除全部 AI 数据」显式删除用量，审计仍需额外确认文字。
+
+内容搜索从用户和助手消息的文本段提取可见文字后再匹配，排除 `[card_action]` / `[proposal_result]` / `[answer_request]` 内部轮次，最后才取最新 200 条匹配消息；JSON 的引号、反斜杠和元数据键不会改变搜索命中。编辑旧用户消息时原资源引用显示为可移除标签；重新生成只允许保留原引用，并逐个检查本账号当前资源，旧记录里格式已失效或已不可访问的引用会移除并写入通知。
 
 P2 元信息与渲染：`tool-start` / `tool-end` 携带毫秒时间戳 `t`；主进程从 `tool_execution_start` 计时，在 `message_end` 把 `durationMs` 写进工具结果；历史的工具项用它（旧记录回退到消息时间差）提供 `ms?`。Activity 显示每步耗时，全部步骤都有耗时时还显示总耗时。助手项提供本轮累计 `usage?: { input, output, costUsd? }` 和 `model?`，操作栏在有用量时显示模型、token、估算费用，费用按目录单价估算，价格未知时省略。助手回答可以复制 markdown 原文或重新生成；用户消息可以复制或行内编辑并重发（⌘↵ 提交、Esc 取消）。这些操作从已存用户项取稳定 ordinal 调用 `ai:regenerate`，未存的预览用户项不提供入口；若后续记录含待处理或已执行的提案，界面先提醒会删掉后续回复、已执行操作不会撤销。对话运行中或有待处理审批／提案时，编辑和重新生成禁用；复制仍可使用。provider 错误和已停止的回答在原位显示重试，发送前失败显示在输入框上方并保留草稿。面板内 Esc 在运行时停止回答，焦点在审批／提案卡时由卡片自行处理。审批和变更提案仍只能由主进程生成的 system 卡处理；模型文本及消息操作不能批准它们。
 
@@ -535,10 +546,18 @@ npm run -s activity | claude -p "这是我用 AWS console 的操作日志摘要�
 
 ### AI 面板 P2 前端交互
 
-对话标题打开搜索弹层，按本地日期分为今天、昨天、最近 7 天、最近 30 天及更早月份。弹层内 `↑` / `↓` 选中、`↵` 打开、`Esc` 关闭、`⌘⌫`（其他平台为 `Ctrl+Backspace`）删除并确认；行内可以重命名。主进程已拦截 `⌘K` / `Ctrl+K` 打开全局跳转，因此对话弹层使用 `⌘⇧K` / `Ctrl+Shift+K`，只有焦点在 AI 面板里时响应。当前对话和正在运行可由现有数据标记；置顶、提案计数与全文搜索待 B5/B6。
+对话标题打开搜索弹层，置顶对话排在第一组，其余按本地日期分为今天、昨天、最近 7 天、最近 30 天及更早月份。每行显示运行、等待审批和待处理提案状态。搜索输入先按标题即时过滤，250 ms 后用 `ai:search` 查询本账号消息正文；片段作为纯文本显示，查询期间继续使用标题结果。弹层内 `↑` / `↓` 选中、`↵` 打开、`Esc` 关闭、`⌘⌫`（其他平台为 `Ctrl+Backspace`）删除并确认；行内可以置顶、取消置顶和重命名。主进程已拦截 `⌘K` / `Ctrl+K` 打开全局跳转，因此对话弹层使用 `⌘⇧K` / `Ctrl+Shift+K`，只有焦点在 AI 面板里时响应。
 
 输入框支持本地 `/新对话`、`/只读`、`/清空`，也可以用命令菜单选择；未知 `/` 文本作为普通消息发给模型；只有完整匹配的本地命令留在界面。`/只读` 改权限和 `/清空` 删除记录前要求确认。命令没有审批能力。提案保留风险、完整请求、后果、预检和最终确认的原位展示；推断、依据、不确定项和提案 ID 可展开。只有后面出现新的用户消息，已处理的旧系统卡片才收成摘要，摘要区分允许、拒绝、执行成功和失败，待处理卡片始终展开。流式内容所在的消息列表没有 `aria-live`；隐藏状态区播报回答、等待状态和提案执行成功，预算提示保留 `role=status`。VoiceOver / NVDA、320 / 400 / 640px 的人工验收仍需完成。
 
 P2 修复：审批卡、提案卡和普通卡在一轮回答运行或等待审批时仍可操作；只有重新生成的短暂锁会禁用卡片。编辑和重发在运行或有待决定项时禁用；复制一直可用。重新生成返回后面板立即记录运行中的对话，Stop / Esc 可用；同一面板的重复点击由同步锁忽略，中止旧回答和模型配置解析各最多等 25 秒，IPC 最多等 35 秒。重新生成按主进程给已存用户消息的 ordinal 定位，未落盘的预览消息没有重发入口。截断消息时保留属于截断边界之前提案的 `[proposal_result]` 行，按原有顺序放在新提问之前；被删除回复对应的 `[card_action]` 行也删除，避免旧点击再次驱动模型；结果卡也触发变更提醒。用量和审计记录不因重新生成删除。`ai.sqlite` 的 v5 用量回填先建消息时间索引，并按写入用量时的四舍五入值匹配；v6 迁移把旧影响分析用量行的 `conversation_id` 从 `analysis_of` 补齐，可重复执行。工具 `durationMs` 排除等待用户审批的时间。排队轮次在模型配置失败时写入错误行，实时错误也作为独立项显示，不附在上一轮回复上，无法重试的排队错误不显示错误目标的「重试」。单独输入 `/` 后按 Enter 只发送普通文字；命令菜单要先用方向键明确选中一项，或输入完整的已定义命令。等待审批的状态行和隐藏播报区都有 `role="status"`；「提案执行成功」只在最近一次成功事件后短暂播报，等待审批和运行状态优先。
 
-P2 收尾：重新生成的短暂锁期间，确认和取消提案均由主进程拒绝。待确认提案的 AI 影响分析中「推断」和「不确定的地方」默认展开。等待审批时，输入框的停止按钮标明「停止回答（不会批准或拒绝审批）」并采用中性色；等待状态行与审批卡左右内边距一致，步骤摘要中的「卡片」不断字。真实 AWS Console 会话未验证。
+P2 收尾与 P3 调整：重新生成的短暂锁期间，确认和取消提案均由主进程拒绝。AI 影响分析中「推断」和「不确定的地方」始终默认折叠，包括待确认提案；摘要用警告色显示项数。事实、变化对比、风险、可撤销性和请求参数仍展开。等待审批时，输入框的停止按钮标明「停止回答（不会批准或拒绝审批）」并采用中性色；等待状态行与审批卡左右内边距一致，步骤摘要中的「卡片」不断字。真实 AWS Console 会话未验证。
+
+### AI 面板 P3 前端交互
+
+在输入框键入 `@` 会按本账号调用 `ai:resource-candidates`（200 ms 防抖）。候选菜单与输入框用 listbox / `aria-controls` / `aria-activedescendant` 关联；`↑` / `↓`、`↵`、`Esc` 可操作，输入法组字时不选取。选择后生成可移除的标签，最多 5 个；发送时只把这些由用户选中的引用作为 `ai:send` 的 `context.resources` 传给主进程。用户消息历史显示这些标签。模型正文只作为文字渲染，不能创建标签、审批或操作。
+
+运行中继续发送的用户消息显示在输入框上方的排队区，逐条可取消；排队列表以主进程 `queue` 事件和 `ai:history.queue` 为准。两轮交接期间主进程已开始下一轮时，新消息也按队列显示，开始后由主进程 `user` 事件按顺序加入正文；旧轮结束的异步历史加载不能覆盖新轮事件。`queue-failed` 把未发送文字接在已有草稿后（空行分隔，按失败事件原序），并恢复资源标签；停止、模型配置超时和对话已删除的原因会分别显示，删除对话或全部数据时，排队文字和资源引用直接丢弃，新对话输入框只显示丢弃通知。恢复的草稿超过 8000 字时截断并显示标记，资源芯片最多 5 个且保留已知名称。Stop 后队列随主进程事件清空；正在模型配置阶段的已出队轮次也按运行中处理：先结算该轮，再按原顺序结算后续队列。卡片回复释放卡片，提案结果仍写入历史，用户消息发 `queue-failed`。重新生成也会中止并等待这一阶段，丢弃的排队用户消息逐条通知；若重新生成随后失败，保留的提案结果仍写入历史。预算即使在模型配置后才变为阻止，卡片和结果也按相同规则处理；同一批被预算拦截的轮次只写一条错误记录。搜索结果在 SQL 中按对话取最新命中后再限制为 20 个。影响分析里的推断和不确定项默认收起，待确认提案仍显示带数量的摘要。助手每轮操作栏可赞 / 踩，再点一次取消；反馈只保存在本机，从历史恢复，不发送给模型。有至少两个尚未过期的审批或提案待处理时，输入框上方出现「全部拒绝」，经确认才调 `ai:deny-all`；没有「全部允许」。
+
+窄于等于 340px 的表格列表在数值旁显示原列名。变更表表头靠左。DynamoDB 预置容量超额的影响标为「限流」，不称「停机」；参考价注明 us-east-1 是参考区域，可能不同于资源所在区域。IAM 等预检失败在界面给简短原因，不展示 SDK/XML 详情；审计原因可保留经过字符限制的错误名称。已执行结果卡在同一历史里有对应应用生成提案卡的变化行时，附上提案时的当前值和执行目标；提案数据缺失时结果卡没有这张对比表，也不声称已核验实际值。

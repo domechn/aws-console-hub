@@ -20,6 +20,12 @@ describe('applyEvent', () => {
       { kind: 'assistant', text: '你好' }
     ])
   })
+  it('shows a dequeued user turn with its resource chips after the prior answer', () => {
+    const resources = [{ type: 'ec2/Instance', id: 'i-1', region: 'us-east-1', label: 'server' }]
+    expect(applyEvent([{ kind: 'user', text: 'A' }, { kind: 'assistant', text: 'answer A' }], { type: 'user', text: 'B', resources })).toEqual([
+      { kind: 'user', text: 'A' }, { kind: 'assistant', text: 'answer A' }, { kind: 'user', text: 'B', resources }
+    ])
+  })
 
   it('shows tool progress and starts a fresh reply after it', () => {
     let items: ChatItem[] = [{ kind: 'user', text: 'q' }]

@@ -7,6 +7,14 @@ import { redactSecrets } from './redact'
 
 type SqlValue = string | number | null
 
+function searchableText(message: unknown): string {
+  if (typeof message === 'string') return message
+  const content = (message as { content?: unknown } | null)?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.filter((p) => p && p.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('')
+}
+
 /** What this module needs from a driver. node:sqlite's DatabaseSync and better-sqlite3's Database both fit as-is. */
 export interface SqlDatabase {
   exec(sql: string): void
@@ -83,7 +91,9 @@ const MIGRATIONS = [
      limit 1
    ) where analysis_of is null;
    create index usage_by_conversation on usage (conversation_id);`,
-  `update usage set conversation_id = analysis_of where analysis_of is not null and conversation_id is null;`
+  `update usage set conversation_id = analysis_of where analysis_of is not null and conversation_id is null;`,
+  `alter table conversations add column pinned integer not null default 0;`,
+  `alter table messages add column feedback text check (feedback in ('up', 'down') or feedback is null);`
 ]
 
 const DAY = 86400_000
@@ -121,6 +131,8 @@ export function migrate(db: SqlDatabase): void {
       throw err
     }
   }
+  // P3's optional derived index may exist on developer databases.
+  db.exec('drop trigger if exists messages_fts_delete; drop table if exists messages_fts;')
 }
 
 export function openAiDb(file = path.join(app.getPath('userData'), 'ai.sqlite')): SqlDatabase {
@@ -143,6 +155,7 @@ export interface StoredMessage {
   tokensIn: number | null
   tokensOut: number | null
   createdAt: number
+  feedback: 'up' | 'down' | null
 }
 
 /** Chat history and audit log. Everything written passes redactSecrets first: no credentials or keys on disk. */
@@ -158,10 +171,67 @@ export class AiStore {
     return id
   }
 
-  conversations(accountId: string): { id: string; title: string; updatedAt: number }[] {
+  conversations(accountId: string): { id: string; title: string; updatedAt: number; pinned: boolean }[] {
     return this.db
-      .prepare('select id, title, updated_at as updatedAt from conversations where account_id = ? order by updated_at desc')
-      .all(accountId) as { id: string; title: string; updatedAt: number }[]
+      .prepare('select id, title, updated_at as updatedAt, pinned from conversations where account_id = ? order by pinned desc, updated_at desc')
+      .all(accountId).map((r) => ({ ...r as object, pinned: (r as { pinned: number }).pinned === 1 })) as { id: string; title: string; updatedAt: number; pinned: boolean }[]
+  }
+
+  setPinned(id: string, pinned: boolean): void {
+    this.db.prepare('update conversations set pinned = ? where id = ?').run(pinned ? 1 : 0, id)
+  }
+
+  setFeedback(conversationId: string, messageId: number, value: 'up' | 'down' | null): void {
+    const row = this.db.prepare("select id from messages where conversation_id = ? and id = ? and role = 'assistant'").get(conversationId, messageId)
+    if (!row) throw new Error('回答不存在')
+    this.db.prepare('update messages set feedback = ? where id = ?').run(value, messageId)
+  }
+
+  search(accountId: string, query: string): { id: string; title: string; snippet: string }[] {
+    const escaped = query.replace(/[\\%_]/g, '\\$&')
+    const search = this.db.prepare(
+      `with searchable as (
+         select c.id, c.title, m.content_json, m.id as message_id,
+         case json_type(m.content_json, '$.content')
+           when 'array' then (select group_concat(json_extract(p.value, '$.text'), '') from json_each(m.content_json, '$.content') p
+             where json_extract(p.value, '$.type') = 'text')
+           when 'text' then json_extract(m.content_json, '$.content')
+           else case when json_type(m.content_json) = 'text' then json_extract(m.content_json, '$') else '' end
+         end as text
+         from messages m join conversations c on c.id = m.conversation_id
+         where c.account_id = ? and m.role in ('user', 'assistant') and m.id < ?
+       )
+       , matched as (
+         select id, title, content_json, message_id from searchable
+         where text like ? escape '\\'
+           and ltrim(text) not like '[card\\_action]%' escape '\\'
+           and ltrim(text) not like '[proposal\\_result]%' escape '\\'
+           and ltrim(text) not like '[answer\\_request]%' escape '\\'
+       )
+       select id, title, content_json, message_id from matched
+       order by message_id desc limit 200`
+    )
+    const results: { id: string; title: string; snippet: string }[] = []
+    const seen = new Set<string>()
+    let before = Number.MAX_SAFE_INTEGER
+    while (results.length < 20) {
+      const rows = search.all(accountId, before, `%${escaped}%`) as { id: string; title: string; content_json: string; message_id: number }[]
+      if (!rows.length) break
+      before = rows.at(-1)!.message_id
+      for (const row of rows) {
+        if (seen.has(row.id)) continue
+        const text = searchableText(JSON.parse(row.content_json))
+        if (/^\s*\[(?:card_action|proposal_result|answer_request)\]/.test(text)) continue
+        const safe = redactSecrets(text)
+        const at = safe.toLocaleLowerCase().indexOf(query.toLocaleLowerCase())
+        if (at < 0) continue
+        seen.add(row.id)
+        results.push({ id: row.id, title: row.title, snippet: safe.slice(Math.max(0, at - 50), at + query.length + 80).slice(0, 180) })
+        if (results.length === 20) break
+      }
+      if (rows.length < 200) break
+    }
+    return results
   }
 
   /** Owner of a conversation; undefined when there is none with this id. */
@@ -188,9 +258,10 @@ export class AiStore {
 
   addMessage(conversationId: string, m: { role: string; content: unknown; tokensIn?: number; tokensOut?: number }): void {
     const now = Date.now()
+    const stored = redactSecrets(JSON.stringify(m.content))
     this.db
       .prepare('insert into messages (conversation_id, role, content_json, tokens_in, tokens_out, created_at) values (?, ?, ?, ?, ?, ?)')
-      .run(conversationId, m.role, redactSecrets(JSON.stringify(m.content)), m.tokensIn ?? null, m.tokensOut ?? null, now)
+      .run(conversationId, m.role, stored, m.tokensIn ?? null, m.tokensOut ?? null, now)
     this.db.prepare('update conversations set updated_at = ? where id = ?').run(now, conversationId)
     const c = m.content as { usage?: Partial<Record<keyof Omit<UsageRow, 'provider' | 'model'>, unknown>>; provider?: unknown; model?: unknown } | null
     if (m.role === 'assistant' && c?.usage) {
@@ -263,7 +334,7 @@ export class AiStore {
   messages(conversationId: string): StoredMessage[] {
     const rows = this.db
       .prepare(
-        'select id, role, content_json, tokens_in as tokensIn, tokens_out as tokensOut, created_at as createdAt from messages where conversation_id = ? order by id'
+        'select id, role, content_json, tokens_in as tokensIn, tokens_out as tokensOut, created_at as createdAt, feedback from messages where conversation_id = ? order by id'
       )
       .all(conversationId) as (Omit<StoredMessage, 'content'> & { content_json: string })[]
     return rows.map(({ content_json, ...r }) => ({ ...r, content: JSON.parse(content_json) }))

@@ -6,6 +6,7 @@ import type { AwsAccount } from '../../../../shared/types'
 import { formatRates, ipcError } from '../../ai'
 import { AiAudit } from './AiAudit'
 import { AiDataSettings } from './AiDataSettings'
+import { getThemePreference, setThemePreference, ThemeSetting, type ThemePreference } from '../../theme'
 
 interface Props {
   /** Candidates for the account Bedrock signs in with. */
@@ -27,6 +28,7 @@ const ai = window.api.ai
 export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'settings' }: Props & { initialView?: 'settings' | 'audit' }): React.JSX.Element {
   const [config, setConfig] = useState<AiConfigView | null>(null)
   const [view, setView] = useState<'settings' | 'audit'>(initialView)
+  const [theme, setTheme] = useState<ThemePreference>(getThemePreference)
   const [provider, setProvider] = useState('')
   const [model, setModel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
@@ -144,6 +146,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
         ) : (
           <>
         <h2>AI 设置</h2>
+        <ThemeSetting value={theme} onChange={(value) => { setTheme(value); setThemePreference(value) }} />
 
         <label>
           服务商

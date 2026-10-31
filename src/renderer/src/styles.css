@@ -1,37 +1,9 @@
+@import './tokens.css';
+
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
-}
-
-:root {
-  --bg: #ffffff;
-  --bg-sunken: #f7f8fa;
-  --bg-raised: #ffffff;
-  --bg-hover: #eef1f5;
-  --bg-active: #e4eaf2;
-  --border: #dde1e7;
-  --border-strong: #c6cdd6;
-  --text: #1b2027;
-  /* 5.4:1 on --bg, 5.1:1 on --bg-sunken (was #6b7684, 4.3:1 on --bg-sunken). */
-  --text-dim: #5f6b7a;
-  --accent: #0972d3;
-  --danger: #d13212;
-  --ok: #037f0c;
-  --pin: #e08c00;
-  --shadow: 0 16px 48px rgba(20, 30, 45, 0.18);
-  /* Semantic aliases (plan ai-ux-redesign §3.18): the AI panel uses only tokens, so a dark theme swaps this block. */
-  --warn: var(--pin);
-  --warn-ink: #8a5300;
-  --warn-bg: #fdf3e1;
-  --warn-border: #f0c98a;
-  --danger-bg: #fbeae6;
-  --ok-bg: #e5f2e6;
-  --on-accent: #ffffff;
-  --rule: #eceff3;
-  --focus: var(--accent);
-  --popover-shadow: 0 8px 24px rgba(20, 30, 45, 0.14);
-  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 html,
@@ -521,7 +493,7 @@ body {
   border-radius: 4px;
   font-size: 8px;
   font-weight: 700;
-  color: #fff;
+  color: var(--on-account);
 }
 
 .dot.small {
@@ -561,7 +533,7 @@ body {
   justify-content: center;
   font-size: 10px;
   font-weight: 700;
-  color: #fff;
+  color: var(--on-account);
 }
 
 .empty-hint {
@@ -625,7 +597,7 @@ body {
 
 button.primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   border-radius: 7px;
   padding: 9px 18px;
@@ -692,7 +664,7 @@ button.primary:disabled {
 .backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(22, 30, 42, 0.28);
+  background: var(--backdrop);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -935,7 +907,7 @@ button.primary:disabled {
 .modal-actions button.primary {
   background: var(--accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--on-accent);
 }
 
 /* ---------- misc ---------- */
@@ -1187,6 +1159,7 @@ button.primary:disabled {
 .ai-conversation-main { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .ai-conversation-main > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-conversation-main small, .ai-conversation-pick time { color: var(--text-dim); font-size: 11px; }
+.ai-conversation-snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-conversation-pick time { flex: none; }
 .ai-conversation-actions { display: flex; flex: none; }
 .ai-conversation-actions button {
@@ -1599,6 +1572,12 @@ button.primary:disabled {
   cursor: default;
   opacity: .5;
 }
+
+.ai-message-actions button[aria-pressed='true'] { color: var(--accent); background: var(--bg-active); }
+.ai-msg-resources { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.ai-msg-resources button { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 0 0 5px; }
+.ai-msg-resources button:hover { color: var(--danger); }
+.ai-msg-resources button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 .ai-message-meta,
 .ai-act-duration {
@@ -2347,6 +2326,9 @@ button.ai-card-btn:focus-visible,
   text-align: left;
 }
 
+.ai-change-table th[scope='col'] { text-align: left; }
+.ai-table-list-label { color: var(--text-dim); font-size: 10px; margin-right: 3px; }
+
 .ai-change-table td,
 .ai-change-table th {
   white-space: normal;
@@ -2499,6 +2481,16 @@ button.ai-card-btn:focus-visible,
   gap: 4px;
   padding: 6px 6px 0;
 }
+
+.ai-composer-chips .ai-chip { max-width: 100%; overflow-wrap: anywhere; }
+.ai-resource-menu { bottom: calc(100% + 6px); max-height: 260px; overflow-y: auto; }
+.ai-mention { border: 0; background: none; color: var(--text-dim); font: inherit; font-weight: 600; cursor: pointer; }
+.ai-queued-user { display: flex; gap: 8px; justify-content: space-between; align-items: start; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 6px; overflow-wrap: anywhere; font-size: 12px; }
+.ai-queued-user > span { min-width: 0; }
+.ai-queued-user button, .ai-deny-all { flex: none; border: 0; background: none; color: var(--danger); cursor: pointer; }
+.ai-queue { display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto; }
+.ai-deny-all { align-self: flex-start; padding: 3px 0; }
+.ai-analysis-inferences summary.ai-tone.warn, .ai-analysis-uncertain summary.ai-tone.warn { color: var(--warn-ink); }
 
 /* Grows with its text from 1 to 8 lines, then scrolls inside. */
 .ai-composer textarea {
@@ -3555,4 +3547,9 @@ button.ai-badge.write {
 button.ai-badge:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+html :is(button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }

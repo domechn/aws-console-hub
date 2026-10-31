@@ -2,7 +2,7 @@ import { createRef } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { AiConfigView, AiModelInfo, MonthUsage, UsageTotals } from '../../../../shared/ai'
-import { Composer, composerKey, draftKey, draftStore, modelLabel, recall, scopedContent, restoreFailedSend, recallForScope } from './Composer'
+import { Composer, composerKey, draftKey, draftStore, modelLabel, recall, scopedContent, restoreFailedSend, recallForScope, resourceToken, insertResource } from './Composer'
 
 const key = (k: string, patch: Partial<Parameters<typeof composerKey>[0]> = {}): Parameters<typeof composerKey>[0] => ({
   key: k,
@@ -124,7 +124,14 @@ describe('drafts', () => {
 
   it('a failed send restores empty draft but preserves newer typing', () => {
     expect(restoreFailedSend('', 'failed text')).toBe('failed text')
-    expect(restoreFailedSend('newer typing', 'failed text')).toBe('newer typing')
+    expect(restoreFailedSend('newer typing', 'failed text')).toBe('newer typing\n\nfailed text')
+    expect(restoreFailedSend(restoreFailedSend('draft', 'first'), 'second')).toBe('draft\n\nfirst\n\nsecond')
+    expect(restoreFailedSend('  draft ', ' next  ')).toBe('  draft \n\n next  ')
+  })
+  it('caps a restored draft within the send limit with a visible truncation notice', () => {
+    const restored = restoreFailedSend('x'.repeat(7_990), 'queued message')
+    expect(restored.length).toBeLessThanOrEqual(8_000)
+    expect(restored).toContain('已截断')
   })
 
   it('scope changes reset recall without changing the textarea or its focus', () => {
@@ -135,6 +142,21 @@ describe('drafts', () => {
 })
 
 describe('Composer', () => {
+  it('recognizes @ only at the caret and removes only the chosen token', () => {
+    expect(resourceToken('why @web now', 8)).toEqual({ query: 'web', start: 4, end: 8 })
+    expect(resourceToken('a@web', 5)).toBeNull()
+    expect(resourceToken('@', 1)).toEqual({ query: '', start: 0, end: 1 })
+    expect(resourceToken('why @web now', 7)).toEqual({ query: 'we', start: 4, end: 8 })
+    expect(insertResource('why @web now', { start: 4, end: 8 })).toBe('why  now')
+  })
+  it('links resource suggestions to textarea and renders removable trusted chips', () => {
+    const html = render({ value: '@web', resources: [{ type: 'ec2', id: 'i-1', region: 'us-east-1', label: 'web-1' }], candidates: [{ type: 'ec2', id: 'i-2', region: 'us-east-1', label: 'web-2' }], onRemoveResource: () => {}, onSelectResource: () => {}, onResourceQuery: () => {} })
+    expect(html).toContain('role="listbox"')
+    expect(html).toContain('aria-label="资源上下文候选"')
+    expect(html).toMatch(/<textarea[^>]*aria-controls="[^"]+-resources"/)
+    expect(html).toContain('移除资源 web-1')
+    expect(html).toContain('web-2')
+  })
   it('one line to start, the page chip inside the box, a send button that is off while empty', () => {
     const html = render()
     expect(html).toMatch(/<textarea[^>]*rows="1"/)

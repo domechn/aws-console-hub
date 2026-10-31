@@ -18,9 +18,13 @@ import type {
   ApprovalView,
   SessionAllowView,
   SetKeyResult,
-  UsageTotals
+  UsageTotals,
+  ResourceContext,
+  ResourceCandidate,
+  QueuedMessage,
+  ConversationSearchResult
 } from '../../shared/ai'
-import type { AwsAccount } from '../../shared/types'
+import type { AwsAccount, RecentResource } from '../../shared/types'
 import type { AwsCredentials } from '../credentialCommand'
 import { runImpactAnalysis } from './analysis'
 import { createdIndex, filterAudit, summarize } from './auditDigest'
@@ -40,10 +44,11 @@ import { pageContext, type PageRead } from './page'
 import { buildSystemPrompt } from './prompt'
 import { createAppAgent, listModels, resolveModel, testModel } from './providers'
 import { redactSecrets } from './redact'
+import { resourceCandidates, resolveResources, resourcePromptSection } from './resources'
 import { checkReplies } from './replies'
 import { displayParams } from './shape'
 import { buildCardTool, buildPageTool, buildProposeTool, buildReadTools, buildRepliesTool, MAX_COST_CALLS } from './tools'
-import { checkPrompt, checkUserIndex } from './validate'
+import { checkPrompt, checkUserIndex, checkResourceContext, checkSearchQuery } from './validate'
 
 /** Per user message (plan §9.8). */
 export const LIMITS = {
@@ -83,6 +88,7 @@ export interface AiServiceDeps {
   regionFor: (accountId: string) => string
   /** The account's active tab: URL and title only (page.ts decides what of it the model gets). */
   activePage: (accountId: string) => { url: string; title: string } | null
+  recents?: () => RecentResource[]
   /** read_current_page: the on-screen tab's text, refused unless it is a console page of this account. */
   readPage: (accountId: string) => Promise<PageRead>
   emit: (e: AiEventEnvelope) => void
@@ -113,7 +119,7 @@ interface Resolved {
  * A turn main starts itself, waiting for the run in progress. card: a card button's reply (`label` is how the panel
  * shows it). result: a proposal's [proposal_result]; `silent` ones are only stored (the model reads them next time).
  */
-type QueuedTurn = { kind: 'card'; cardId: string; text: string; label: string } | { kind: 'result'; text: string; silent: boolean }
+type QueuedTurn = { kind: 'card'; cardId: string; text: string; label: string } | { kind: 'result'; text: string; silent: boolean } | { kind: 'user'; id: string; text: string; context?: ResourceContext; resources?: ResourceCandidate[] }
 type CardTurn = Extract<QueuedTurn, { kind: 'card' }>
 
 const titleFrom = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, 40)
@@ -156,6 +162,8 @@ export class AiService {
   private pendingCards = new Map<string, Set<string>>()
   /** Per conversation: card replies clicked while a run was going; each becomes the next turn. */
   private queued = new Map<string, QueuedTurn[]>()
+  private queueEpoch = new Map<string, number>()
+  private pendingSetup = new Map<string, { cancel: (reason: string) => void; finished: Promise<void> }>()
   private regenerating = new Set<string>()
 
   constructor(private d: AiServiceDeps) {
@@ -268,7 +276,36 @@ export class AiService {
   }
 
   conversations(accountId: string): ConversationSummary[] {
-    return this.d.store.conversations(accountId)
+    return this.d.store.conversations(accountId).map((c) => {
+      const status = { running: this.isRunning(c.id), awaitingApproval: this.approvals.pendingIds(c.id).length > 0, pendingProposals: this.engine.pendingCount(c.id) }
+      return { ...c, status }
+    })
+  }
+
+  search(accountId: string, query: string): ConversationSearchResult[] {
+    if (!this.d.account(accountId)) throw new Error('账号不存在')
+    return this.d.store.search(accountId, checkSearchQuery(query))
+  }
+
+  pin(accountId: string, conversationId: string, pinned: boolean): void {
+    this.owned(accountId, conversationId)
+    this.d.store.setPinned(conversationId, pinned)
+  }
+
+  feedback(accountId: string, conversationId: string, ordinal: number, value: 'up' | 'down' | null): void {
+    this.owned(accountId, conversationId)
+    const row = this.d.store.messages(conversationId).filter((m) => m.role === 'assistant' && (textOf((m.content as StoredAgentMessage).content) || ['error', 'aborted'].includes((m.content as StoredAgentMessage).stopReason ?? '')))[ordinal]
+    if (!row) throw new Error('回答不存在')
+    this.d.store.setFeedback(conversationId, row.id, value)
+  }
+
+  resourceCandidates(accountId: string, query: string): ResourceCandidate[] {
+    if (!this.d.account(accountId)) throw new Error('账号不存在')
+    return resourceCandidates(accountId, checkSearchQuery(query, true), this.d.recents?.() ?? [], this.pageContext(accountId))
+  }
+
+  private resolveResources(accountId: string, context?: ResourceContext): ResourceCandidate[] {
+    return resolveResources(accountId, this.d.recents?.() ?? [], context?.resources ?? [], this.pageContext(accountId))
   }
 
   private transcript(conversationId: string): StoredAgentMessage[] {
@@ -298,7 +335,7 @@ export class AiService {
     const quickReplies = this.d.config.get().quickReplies
     return {
       items: toChatItems(
-        this.d.store.messages(conversationId).map((m) => ({ ...(m.content as StoredAgentMessage), rowId: m.id })),
+        this.d.store.messages(conversationId).map((m) => ({ ...(m.content as StoredAgentMessage), rowId: m.id, feedback: m.feedback })),
         this.now(),
         this.pendingCards.get(conversationId),
         (id) => this.engine.view(id),
@@ -307,7 +344,8 @@ export class AiService {
       ).filter((i) => quickReplies || i.kind !== 'replies'),
       usage: this.usage(conversationId),
       month: this.monthUsage(),
-      pageContext: this.d.store.pageContext(conversationId)
+      pageContext: this.d.store.pageContext(conversationId),
+      queue: this.queueView(conversationId)
     }
   }
 
@@ -350,7 +388,7 @@ export class AiService {
    */
   deleteAllData(audit: boolean, typed?: string): void {
     if (audit && typed !== DELETE_AUDIT_PHRASE) throw new Error(`删除审计记录需要输入「${DELETE_AUDIT_PHRASE}」`)
-    for (const id of [...this.runs.keys()]) this.abort(id)
+    for (const id of new Set([...this.runs.keys(), ...this.pendingSetup.keys()])) this.abort(id, '对话已删除')
     this.engine.forgetAll()
     this.approvals.forgetAll()
     this.costBudgets.clear()
@@ -382,14 +420,15 @@ export class AiService {
 
   delete(accountId: string, conversationId: string): void {
     this.owned(accountId, conversationId)
-    this.abort(conversationId)
+    this.abort(conversationId, '对话已删除')
     this.forget(conversationId)
     this.d.store.deleteConversation(conversationId)
   }
 
   /** Every conversation of the account (the account was deleted, or the user cleared them). */
   clearAccount(accountId: string): void {
-    for (const [id, run] of this.runs) if (run.accountId === accountId) this.abort(id)
+    for (const [id, run] of this.runs) if (run.accountId === accountId) this.abort(id, '对话已删除')
+    for (const id of this.pendingSetup.keys()) if (this.d.store.conversationAccount(id) === accountId) this.abort(id, '对话已删除')
     for (const c of this.d.store.conversations(accountId)) this.forget(c.id)
     this.d.store.clearAccount(accountId)
   }
@@ -399,6 +438,7 @@ export class AiService {
     this.costBudgets.delete(conversationId)
     this.pendingCards.delete(conversationId)
     this.queued.delete(conversationId)
+    this.queueEpoch.delete(conversationId)
     this.engine.forgetConversation(conversationId)
     this.approvals.forgetConversation(conversationId)
   }
@@ -407,19 +447,89 @@ export class AiService {
    * Stops the run and drops queued card replies; their cards can be clicked again. Queued proposal results stay, to be
    * stored without a run once this one has wound down: they are the record of what was executed.
    */
-  abort(conversationId: string): void {
+  abort(conversationId: string, reason = '已停止'): void {
+    this.queueEpoch.set(conversationId, (this.queueEpoch.get(conversationId) ?? 0) + 1)
+    this.pendingSetup.get(conversationId)?.cancel(reason)
     const accountId = this.d.store.conversationAccount(conversationId)
     const queued = this.queued.get(conversationId) ?? []
     for (const turn of queued) if (turn.kind === 'card' && accountId) this.release(accountId, conversationId, turn.cardId)
+    for (const turn of queued) if (turn.kind === 'user' && accountId) this.failQueued(accountId, conversationId, turn, reason)
     const results = queued.flatMap((t) => (t.kind === 'result' ? [{ ...t, silent: true }] : []))
     if (results.length) this.queued.set(conversationId, results)
     else this.queued.delete(conversationId)
+    if (accountId) this.emitQueue(accountId, conversationId)
     // The run's signal ends its pending approval too; this does it even before pi has passed the abort on.
     this.approvals.abortConversation(conversationId)
     const run = this.runs.get(conversationId)
     if (!run) return
     run.aborted = true
     run.agent?.abort()
+  }
+
+  private queueView(conversationId: string): QueuedMessage[] {
+    return (this.queued.get(conversationId) ?? []).filter((t): t is Extract<QueuedTurn, { kind: 'user' }> => t.kind === 'user')
+      .map(({ id, text, context }) => ({ id, text, ...(context && { context }) }))
+  }
+
+  private emitQueue(accountId: string, conversationId: string): void {
+    this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'queue', items: this.queueView(conversationId) } })
+  }
+
+  private failQueued(accountId: string, conversationId: string, turn: Extract<QueuedTurn, { kind: 'user' }>, err: unknown): void {
+    this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'queue-failed', id: turn.id, text: turn.text, ...(turn.context && { context: turn.context }), ...(turn.resources && { resources: turn.resources }), message: this.clean(err instanceof Error ? err.message : String(err)) } })
+  }
+
+  private dropTurn(accountId: string, conversationId: string, turn: QueuedTurn, err: unknown, emit: (event: AiEvent) => void, note = true): void {
+    if (turn.kind === 'card') this.release(accountId, conversationId, turn.cardId)
+    else if (turn.kind === 'result') this.storeTurn(conversationId, turn.text)
+    else this.failQueued(accountId, conversationId, turn, err)
+    if (!note || err === '已停止' || err === '对话已删除' || turn.kind === 'user' || this.d.store.conversationAccount(conversationId) === undefined) return
+    const message = this.clean(err instanceof Error ? err.message : String(err))
+    this.d.store.addMessage(conversationId, { role: 'note', content: { role: 'note', content: '', error: message, retryable: false, timestamp: this.now() } })
+    emit({ type: 'error', message, retryable: false })
+  }
+
+  private enqueueUser(accountId: string, conversationId: string, text: string, context?: ResourceContext, resources?: ResourceCandidate[]): AiSendResult {
+    const queue = this.queued.get(conversationId) ?? []
+    if (queue.filter((t) => t.kind === 'user').length >= 3) throw new Error('最多排队 3 条消息')
+    const id = randomUUID()
+    this.queued.set(conversationId, [...queue, { kind: 'user', id, text, ...(context && { context }), ...(resources && { resources }) }])
+    this.emitQueue(accountId, conversationId)
+    return { conversationId, runId: this.runs.get(conversationId)?.runId ?? 0, queued: { id } }
+  }
+
+  queueCancel(accountId: string, conversationId: string, queueId: string): void {
+    this.owned(accountId, conversationId)
+    const queue = this.queued.get(conversationId) ?? []
+    const at = queue.findIndex((t) => t.kind === 'user' && t.id === queueId)
+    if (at < 0) throw new Error('排队消息不存在')
+    queue.splice(at, 1)
+    if (!queue.length) this.queued.delete(conversationId)
+    this.emitQueue(accountId, conversationId)
+  }
+
+  denyAll(accountId: string, conversationId: string): { approvals: number; proposals: number } {
+    this.owned(accountId, conversationId)
+    if (this.regenerating.has(conversationId)) throw new Error('对话正在重新生成')
+    const account = this.d.account(accountId)
+    if (!account) throw new Error('账号不存在')
+    const approvals = this.approvals.pendingIds(conversationId)
+    const proposals = this.engine.pendingIds(conversationId)
+    let denied = 0
+    let cancelled = 0
+    for (const id of approvals) {
+      try { this.approvals.decide(accountId, conversationId, id, 'deny'); denied++ }
+      catch { /* decide already denies a tampered or expired request */ }
+    }
+    for (const id of proposals) {
+      try {
+        const p = this.engine.cancel(accountId, conversationId, id)
+        void this.deliverResult(account, conversationId, { proposalId: id, status: 'cancelled', title: p.plan.title }, false)
+        cancelled++
+      }
+      catch { /* a proposal may expire while the batch is being processed */ }
+    }
+    return { approvals: denied, proposals: cancelled }
   }
 
   /** A reply click that will not be sent after all: the card is active again (unless it expired meanwhile). */
@@ -449,7 +559,7 @@ export class AiService {
     this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'card-state', cardId, state: 'resolved' } })
     const message = { cardId, action: actionId, label: checked.action.label, ...(rowId !== undefined && { row: rowId }), ...(checked.values && { values: checked.values }) }
     const turn: CardTurn = { kind: 'card', cardId, text: cardActionText(message), label: cardActionLabel(message) }
-    if (this.runs.has(conversationId)) {
+    if (this.runs.has(conversationId) || this.pendingSetup.has(conversationId)) {
       this.queued.set(conversationId, [...(this.queued.get(conversationId) ?? []), turn])
       return
     }
@@ -473,12 +583,16 @@ export class AiService {
     }
     if (this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
     // A typed message got in during the await: go after it.
-    if (this.runs.has(conversationId)) this.queued.set(conversationId, [turn, ...(this.queued.get(conversationId) ?? [])])
-    else this.start(account, conversationId, turn.text, resolved, turn.label)
+    if (this.runs.has(conversationId) || this.pendingSetup.has(conversationId)) this.queued.set(conversationId, [...(this.queued.get(conversationId) ?? []), turn])
+    else {
+      const blockedNow = this.blocked()
+      if (blockedNow) throw new Error(blockedNow)
+      this.start(account, conversationId, turn.text, resolved, turn.label)
+    }
   }
 
   isRunning(conversationId: string): boolean {
-    return this.runs.has(conversationId)
+    return this.runs.has(conversationId) || this.pendingSetup.has(conversationId)
   }
 
   /**
@@ -543,7 +657,7 @@ export class AiService {
     const text = proposalResultText(r)
     this.d.emit({ accountId: account.id, conversationId, runId: 0, event: { type: 'proposal-result', id: `r-${r.proposalId}`, card: resultCard(r, this.now()) } })
     const turn: QueuedTurn = { kind: 'result', text, silent: !followUp }
-    if (this.runs.has(conversationId)) return void this.queued.set(conversationId, [...(this.queued.get(conversationId) ?? []), turn])
+    if (this.runs.has(conversationId) || this.pendingSetup.has(conversationId) || this.regenerating.has(conversationId)) return void this.queued.set(conversationId, [...(this.queued.get(conversationId) ?? []), turn])
     // Over a blocking budget the outcome is still recorded; the model reads it on the next turn the user can start.
     if (!followUp || this.blocked()) return this.storeTurn(conversationId, text)
     let resolved
@@ -553,8 +667,11 @@ export class AiService {
       // No model to answer (settings changed): the record is kept, the model reads it next time.
       return this.storeTurn(conversationId, text)
     }
-    if (this.runs.has(conversationId)) this.queued.set(conversationId, [...(this.queued.get(conversationId) ?? []), turn])
-    else if (this.d.store.conversationAccount(conversationId) === account.id) this.start(account, conversationId, text, resolved)
+    if (this.runs.has(conversationId) || this.pendingSetup.has(conversationId) || this.regenerating.has(conversationId)) this.queued.set(conversationId, [...(this.queued.get(conversationId) ?? []), turn])
+    else if (this.d.store.conversationAccount(conversationId) === account.id) {
+      if (this.blocked()) this.storeTurn(conversationId, text)
+      else this.start(account, conversationId, text, resolved)
+    }
   }
 
   /**
@@ -618,16 +735,19 @@ export class AiService {
 
   /** Resolves once the run has started; its progress comes as ai:event. Config problems reject here. */
   /** `page`: a new conversation's page toggle (an existing one keeps its own). */
-  async send(accountId: string, conversationId: string | null, text: string, page = true): Promise<AiSendResult> {
+  async send(accountId: string, conversationId: string | null, text: string, page = true, context?: ResourceContext): Promise<AiSendResult> {
     text = checkPrompt(text)
+    context = checkResourceContext(context)
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
     if (conversationId) {
       this.owned(accountId, conversationId)
-      if (this.runs.has(conversationId) || this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
+      if (this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
     }
     // Those prefixes mark turns main composed (a card click, a proposal's outcome); a typed one would pass for one.
     this.checkUserPrompt(text)
+    const resources = this.resolveResources(accountId, context)
+    if (conversationId && (this.runs.has(conversationId) || this.pendingSetup.has(conversationId))) return this.enqueueUser(accountId, conversationId, text, context, resources)
     const month = this.monthUsage()
     if (month.blocked) throw new Error(month.budget ?? '本月 AI 预算已用完')
     let resolved
@@ -638,20 +758,26 @@ export class AiService {
       this.d.toast(message)
       throw new Error(message)
     }
+    const freshResources = context ? this.resolveResources(accountId, context) : resources
+    const laterBudget = this.monthUsage()
+    if (laterBudget.blocked) throw new Error(laterBudget.budget ?? '本月 AI 预算已用完')
     const id = conversationId ?? this.d.store.createConversation(accountId, this.clean(titleFrom(text), resolved.apiKey), page)
     // Re-checked after the await: a second send may have started meanwhile.
-    if (this.runs.has(id) || this.regenerating.has(id)) throw new Error('上一条消息还在处理中')
-    return { ...this.start(account, id, text, resolved), ...(month.budget && { warning: month.budget }) }
+    if (conversationId) this.owned(accountId, id)
+    if (this.regenerating.has(id)) throw new Error('上一条消息还在处理中')
+    if (conversationId && (this.runs.has(id) || this.pendingSetup.has(id))) return this.enqueueUser(accountId, id, text, context, freshResources)
+    return { ...this.start(account, id, text, resolved, undefined, undefined, freshResources), ...(month.budget && { warning: month.budget }) }
   }
 
   /** A user turn ordinal and its displayed original text. Keeps audit and billed usage. */
-  async regenerate(accountId: string, conversationId: string, fromUserIndex: number, expectedText: string, text?: string): Promise<AiSendResult> {
+  async regenerate(accountId: string, conversationId: string, fromUserIndex: number, expectedText: string, text?: string, context?: ResourceContext): Promise<AiSendResult> {
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
     this.owned(accountId, conversationId)
     checkUserIndex(fromUserIndex)
     if (this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
     const running = this.runs.get(conversationId)
+    const settingUp = this.pendingSetup.get(conversationId)
     const waiting = running && this.view(accountId, conversationId).items.some((i) => i.kind === 'approval' && i.approval.state === 'pending')
     if (running && !waiting) throw new Error('上一条消息还在处理中')
     const candidates = (rows: ReturnType<AiStore['messages']>) => rows.filter((m) => {
@@ -669,6 +795,22 @@ export class AiService {
     const initialRows = this.d.store.messages(conversationId)
     const selected = select(initialRows)
     const originalText = textOf((selected.content as StoredAgentMessage).content)
+    const originalResources = (selected.content as StoredAgentMessage).resources
+    const storedResources: unknown[] = Array.isArray(originalResources) ? originalResources : originalResources === undefined ? [] : [originalResources]
+    const seenResources = new Set<string>()
+    const validOriginalResources = storedResources.flatMap((value) => {
+      try {
+        const { type, id, region } = value as { type: string; id: string; region: string }
+        const ref = checkResourceContext({ resources: [{ type, id, region }] })!.resources[0]
+        const key = `${ref.type}|${ref.id}|${ref.region}`
+        if (seenResources.has(key)) return []
+        seenResources.add(key)
+        return [ref]
+      }
+      catch { return [] }
+    })
+    const resourceContext = context === undefined ? { resources: validOriginalResources } : checkResourceContext(context)!
+    if (resourceContext.resources.some((ref) => !validOriginalResources.some((r) => r.type === ref.type && r.id === ref.id && r.region === ref.region))) throw new Error('只能保留原消息的资源引用')
     if (originalText.startsWith(CARD_ACTION_PREFIX.trim())) throw new Error('不能重新发送卡片操作')
     const prompt = checkPrompt(text ?? originalText)
     this.checkUserPrompt(prompt)
@@ -683,11 +825,11 @@ export class AiService {
     checkExecuting(affected(initialRows, selected.id))
     this.regenerating.add(conversationId)
     try {
-      if (running) {
+      if (running || settingUp) {
         this.abort(conversationId)
         let stopTimer: ReturnType<typeof setTimeout> | undefined
         await Promise.race([
-          running.finished,
+          running?.finished ?? settingUp!.finished,
           new Promise<never>((_, reject) => { stopTimer = setTimeout(() => reject(new Error('停止上一条回答超时，请重试')), 25_000) })
         ]).finally(() => clearTimeout(stopTimer))
       }
@@ -696,11 +838,21 @@ export class AiService {
         this.resolve(),
         new Promise<never>((_, reject) => { setupTimer = setTimeout(() => reject(new Error('模型配置超时，请重试')), 25_000) })
       ]).finally(() => clearTimeout(setupTimer))
-      if (this.runs.has(conversationId) || this.d.store.conversationAccount(conversationId) !== accountId) throw new Error('上一条消息还在处理中')
+      if (this.runs.has(conversationId) || this.pendingSetup.has(conversationId) || this.d.store.conversationAccount(conversationId) !== accountId) throw new Error('上一条消息还在处理中')
+      const queued = this.queued.get(conversationId) ?? []
+      for (const turn of queued) if (turn.kind === 'result') this.storeTurn(conversationId, turn.text)
+      this.queued.set(conversationId, queued.filter((turn) => turn.kind !== 'result'))
       const rows = this.d.store.messages(conversationId)
       const fresh = select(rows)
+      const resources = resourceContext.resources.flatMap((ref) => {
+        try { return this.resolveResources(accountId, { resources: [ref] }) }
+        catch { return [] }
+      })
+      const droppedResources = storedResources.length - resources.length
       const proposalIds = affected(rows, fresh.id)
       checkExecuting(proposalIds)
+      const blockedNow = this.blocked()
+      if (blockedNow) throw new Error(blockedNow)
       // Cancel pending cards in the removed suffix. Finished changes remain in audit and usage stays billed.
       let cancelled = 0
       for (const proposalId of proposalIds) if (this.engine.view(proposalId)?.state === 'pending') {
@@ -709,7 +861,13 @@ export class AiService {
       }
       this.approvals.abortConversation(conversationId)
       this.pendingCards.delete(conversationId)
+      for (const turn of this.queued.get(conversationId) ?? []) {
+        if (turn.kind === 'user') this.failQueued(accountId, conversationId, turn, '已停止')
+        else if (turn.kind === 'card') this.release(accountId, conversationId, turn.cardId)
+        else this.storeTurn(conversationId, turn.text)
+      }
       this.queued.delete(conversationId)
+      this.emitQueue(accountId, conversationId)
       const retry = text === undefined
       const fromId = fresh.id
       const earlier = rows.filter((r) => r.id < fromId)
@@ -723,12 +881,18 @@ export class AiService {
       }).map((r) => r.id)
       this.d.store.truncateMessages(conversationId, fromId, keepIds)
       this.d.store.audit('conversation_regenerated', accountId, { conversationId, fromUserIndex, edited: !retry, actor: 'user' })
-      const notice = `${waiting ? '已取消待处理审批。' : ''}${cancelled ? `已取消 ${cancelled} 个待确认提案。` : ''}之前的操作可能已经执行；重新生成不会撤销已完成的查询或变更，请查看审计记录。`
+      const notice = `${waiting ? '已取消待处理审批。' : ''}${cancelled ? `已取消 ${cancelled} 个待确认提案。` : ''}${droppedResources ? `${droppedResources} 个资源引用无效、已手动移除或不在本账号最近访问记录中，重新生成时已移除。` : ''}之前的操作可能已经执行；重新生成不会撤销已完成的查询或变更，请查看审计记录。`
       this.d.store.addMessage(conversationId, { role: 'note', content: { role: 'note', content: notice, timestamp: this.now() } })
       this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'note', text: notice } })
-      return { ...this.start(account, conversationId, prompt, resolved, undefined, notice), ...(month.budget && { warning: month.budget }) }
+      return { ...this.start(account, conversationId, prompt, resolved, undefined, notice, resources), ...(month.budget && { warning: month.budget }) }
     } finally {
       this.regenerating.delete(conversationId)
+      const retained = this.queued.get(conversationId) ?? []
+      if (!this.isRunning(conversationId) && retained.length && retained.every((turn) => turn.kind === 'result')) {
+        for (const turn of retained) this.storeTurn(conversationId, turn.text)
+        this.queued.delete(conversationId)
+        this.emitQueue(accountId, conversationId)
+      }
     }
   }
 
@@ -739,17 +903,23 @@ export class AiService {
   }
 
   /** `shown`: main started this turn (a card reply), so the panel gets the user item from here. */
-  private start(account: AwsAccount, id: string, text: string, resolved: Resolved, shown?: string, runNotice?: string): AiSendResult {
+  private start(account: AwsAccount, id: string, text: string, resolved: Resolved, shown?: string, runNotice?: string, resources: ResourceCandidate[] = []): AiSendResult {
     let finish = (): void => {}
     const finished = new Promise<void>((resolve) => { finish = resolve })
     const run: Run = { runId: this.nextRunId++, accountId: account.id, aborted: false, finished, finish }
     this.runs.set(id, run)
     const emit = (event: AiEvent): void => this.d.emit({ accountId: account.id, conversationId: id, runId: run.runId, event })
-    if (shown) emit({ type: 'user', text: shown })
-    void this.execute(account, id, run, text, resolved, emit, runNotice).finally(() => {
+    try {
+      if (shown) emit({ type: 'user', text: shown, ...(resources.length && { resources }) })
+    } catch (err) {
       this.runs.delete(id)
-      this.next(account, id, emit)
       run.finish()
+      throw err
+    }
+    void this.execute(account, id, run, text, resolved, emit, runNotice, resources).finally(() => {
+      this.runs.delete(id)
+      try { this.next(account, id, emit) }
+      finally { run.finish() }
     })
     return { conversationId: id, runId: run.runId }
   }
@@ -758,7 +928,8 @@ export class AiService {
    * After a run: stored-only results are stored, then the next queued turn goes on (one busy stretch, one done, for
    * the panel). The model and key are resolved again, and the budget checked: settings may have changed meanwhile.
    */
-  private next(account: AwsAccount, id: string, emit: (event: AiEvent) => void): void {
+  private next(account: AwsAccount, id: string, emit: (event: AiEvent) => void, budgetNoted = false): void {
+    if (this.regenerating.has(id)) return emit({ type: 'done' })
     const queue = this.queued.get(id) ?? []
     let turn = queue.shift()
     while (turn?.kind === 'result' && turn.silent) {
@@ -766,25 +937,90 @@ export class AiService {
       turn = queue.shift()
     }
     if (!queue.length) this.queued.delete(id)
-    if (!turn || this.d.store.conversationAccount(id) === undefined) return emit({ type: 'done' })
+    this.emitQueue(account.id, id)
+    if (!turn) return emit({ type: 'done' })
     const t = turn
+    if (this.d.store.conversationAccount(id) === undefined) {
+      this.dropTurn(account.id, id, t, '对话已删除', emit)
+      return emit({ type: 'done' })
+    }
+    const epoch = this.queueEpoch.get(id) ?? 0
+    if (t.kind === 'user') {
+      try { t.text = checkPrompt(t.text); this.checkUserPrompt(t.text); this.resolveResources(account.id, t.context) }
+      catch (err) { this.dropTurn(account.id, id, t, err, emit); return this.next(account, id, emit, budgetNoted) }
+    }
     const blocked = this.blocked()
-    ;(blocked ? Promise.reject(new Error(blocked)) : this.resolve()).then(
+    let budgetDrop = Boolean(blocked)
+    let setupTimer: ReturnType<typeof setTimeout> | undefined
+    let cancelSetup!: (reason: string) => void
+    const cancelled = new Promise<never>((_, reject) => { cancelSetup = (reason) => reject(new Error(reason)) })
+    let finishSetup!: () => void
+    const finished = new Promise<void>((resolve) => { finishSetup = resolve })
+    let settled = false
+    const setupWait = { cancel: (reason: string) => {
+      if (settled) return
+      settled = true
+      this.dropTurn(account.id, id, t, reason, emit)
+      cancelSetup(reason)
+    }, finished }
+    if (!blocked) this.pendingSetup.set(id, setupWait)
+    const setup = blocked ? Promise.reject<Resolved>(new Error(blocked)) : Promise.race([
+      this.resolve(),
+      new Promise<never>((_, reject) => { setupTimer = setTimeout(() => reject(new Error('模型配置超时，请重试')), 25_000) }),
+      cancelled
+    ])
+    void setup.finally(() => {
+      clearTimeout(setupTimer)
+      if (this.pendingSetup.get(id) === setupWait) this.pendingSetup.delete(id)
+    }).then(
       (fresh) => {
-        if (this.d.store.conversationAccount(id) === undefined) return emit({ type: 'done' })
+        if (settled) return this.next(account, id, emit)
+        if (this.d.store.conversationAccount(id) === undefined) {
+          settled = true
+          this.dropTurn(account.id, id, t, '对话已删除', emit)
+          return emit({ type: 'done' })
+        }
+        if (epoch !== (this.queueEpoch.get(id) ?? 0)) {
+          settled = true
+          this.dropTurn(account.id, id, t, '已停止', emit)
+          return this.next(account, id, emit)
+        }
         // A typed message started in the gap: this turn waits for it.
-        if (this.runs.has(id)) return void this.queued.set(id, [t, ...(this.queued.get(id) ?? [])])
-        this.start(account, id, t.text, fresh, t.kind === 'card' ? t.label : undefined)
+        if (this.runs.has(id) || this.regenerating.has(id)) {
+          this.queued.set(id, [t, ...(this.queued.get(id) ?? [])])
+          this.emitQueue(account.id, id)
+          return
+        }
+        try {
+          if (t.kind === 'user') { t.text = checkPrompt(t.text); this.checkUserPrompt(t.text) }
+          const resources = t.kind === 'user' ? this.resolveResources(account.id, t.context) : []
+          const blockedNow = this.blocked()
+          if (blockedNow) { budgetDrop = true; throw new Error(blockedNow) }
+          settled = true
+          try {
+            this.start(account, id, t.text, fresh, t.kind === 'card' ? t.label : t.kind === 'user' ? t.text : undefined, undefined, resources)
+          } catch (err) {
+            if (!this.runs.has(id)) settled = false
+            throw err
+          }
+        } catch (err) {
+          if (!settled) {
+            settled = true
+            this.dropTurn(account.id, id, t, err, emit, !budgetDrop || !budgetNoted)
+            this.next(account, id, emit, budgetNoted || (budgetDrop && t.kind !== 'user'))
+          }
+        }
       },
       (err: unknown) => {
-        if (t.kind === 'card') this.release(account.id, id, t.cardId)
-        else this.storeTurn(id, t.text)
-        const message = this.clean(err instanceof Error ? err.message : String(err))
-        this.d.store.addMessage(id, { role: 'note', content: { role: 'note', content: '', error: message, retryable: false, timestamp: this.now() } })
-        emit({ type: 'error', message, retryable: false })
-        this.next(account, id, emit)
+        if (!settled) {
+          settled = true
+          const reason = this.d.store.conversationAccount(id) === undefined ? '对话已删除'
+            : epoch !== (this.queueEpoch.get(id) ?? 0) ? '已停止' : err
+          this.dropTurn(account.id, id, t, reason, emit, !budgetDrop || !budgetNoted)
+        }
+        this.next(account, id, emit, budgetNoted || (budgetDrop && t.kind !== 'user'))
       }
-    )
+    ).finally(finishSetup)
   }
 
   private async execute(
@@ -794,7 +1030,8 @@ export class AiService {
     text: string,
     { model, apiKey, explain }: Resolved,
     emit: (event: AiEvent) => void,
-    runNotice?: string
+    runNotice?: string,
+    resources: ResourceCandidate[] = []
   ): Promise<void> {
     const reportError = (message: string): void => {
       const clean = this.clean(message, apiKey)
@@ -875,6 +1112,7 @@ export class AiService {
       const page = pageOn ? pageContext(this.d.activePage(account.id)) : null
       const readable = pageOn && this.d.config.get().readPage
       const quickReplies = this.d.config.get().quickReplies
+      const modelText = text + resourcePromptSection(resources)
       // The latest assistant message has answer text.
       let answered = false
       const tools = [
@@ -904,7 +1142,9 @@ export class AiService {
           tools,
           // The page a turn was asked on is the app's record, not something to send again.
           messages: this.transcript(conversationId).filter((m) => m.role !== 'note')
-            .map(({ page: _page, ...m }) => m) as AgentMessage[]
+            .map(({ page: _page, resources: priorResources, feedback: _feedback, ...m }) => m.role === 'user' && priorResources?.length
+              ? { ...m, content: [{ type: 'text', text: textOf(m.content) + resourcePromptSection(priorResources) }] }
+              : m) as AgentMessage[]
         },
         getApiKey: () => apiKey,
         toolExecution: 'sequential',
@@ -969,8 +1209,8 @@ export class AiService {
           let m =
             live.stopReason === 'error' && live.errorMessage
               ? { ...live, errorMessage: explain(live.errorMessage) }
-              : live.role === 'user' && page
-                ? { ...live, page: { label: page.label, url: page.url } }
+              : live.role === 'user' && textOf(live.content) === modelText
+                ? { ...live, content: [{ type: 'text' as const, text }], ...(page && { page: { label: page.label, url: page.url } }), ...(resources.length && { resources }) }
                 : live
           if (m.role === 'toolResult' && m.toolCallId && toolStarted.has(m.toolCallId)) {
             const started = toolStarted.get(m.toolCallId)!
@@ -985,7 +1225,7 @@ export class AiService {
           if (m.role === 'assistant') emit({ type: 'usage', usage: this.usage(conversationId), month: this.monthUsage() })
         }
       })
-      await agent.prompt(text)
+      await agent.prompt(modelText)
       const reply = (): StoredAgentMessage | undefined => agent.state.messages.findLast((m) => m.role === 'assistant') as StoredAgentMessage | undefined
       const stopped = (): boolean => run.aborted || notice !== null || reply()?.stopReason === 'error' || reply()?.stopReason === 'aborted'
       // Hit a cap, or ended on tool calls alone or an empty reply: one hidden nudge per turn to answer from what it

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ToastApi } from '../../shared/api'
+import { observeTheme } from './theme'
 import {
   EMPTY_TOASTS,
   addToast,
@@ -10,6 +11,7 @@ import {
   pauseToasts,
   resumeToasts
 } from './toasts'
+import './tokens.css'
 import './toast.css'
 
 /**
@@ -25,6 +27,7 @@ declare global {
 }
 
 const api = window.toastApi
+observeTheme()
 
 function ToastStack(): React.JSX.Element {
   const [state, setState] = useState(EMPTY_TOASTS)

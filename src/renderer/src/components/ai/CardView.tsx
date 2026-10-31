@@ -245,7 +245,7 @@ function BlockView({ block: b, ctx }: { block: Block; ctx: Ctx }): React.JSX.Ele
     case 'change':
       return <ChangeView block={b} />
     case 'analysis':
-      return <AnalysisView block={b} pendingProposal={ctx.pendingProposal} />
+      return <AnalysisView block={b} />
     case 'diff':
       // Card v1 (stored history): the older line-by-line view.
       return (
@@ -277,7 +277,7 @@ function BlockView({ block: b, ctx }: { block: Block; ctx: Ctx }): React.JSX.Ele
         <ul className="ai-consequences" aria-label="影响">
           {b.items.map((c, i) => (
             <li key={i} className={c.kind}>
-              <span className="ai-consequence-kind">{CONSEQUENCE[c.kind]}</span> {c.text}
+              <span className="ai-consequence-kind">{CONSEQUENCE[c.kind]}</span> {c.text}{c.kind === 'cost' && c.text.includes('us-east-1') && !c.text.includes('可能与资源所在区域不同') && '（us-east-1 为参考区域，可能与资源所在区域不同）'}
             </li>
           ))}
         </ul>
@@ -437,7 +437,7 @@ const REVERSIBILITY: Record<string, string> = { reversible: '可撤销', partly:
 const CONFIDENCE: Record<string, string> = { low: '低', medium: '中', high: '高' }
 
 /** The AI impact analysis (analysis.ts): advisory and labelled so; facts with their evidence, inferences as such. Plain text. */
-function AnalysisView({ block: b, pendingProposal }: { block: AnalysisBlock; pendingProposal: boolean }): React.JSX.Element {
+function AnalysisView({ block: b }: { block: AnalysisBlock }): React.JSX.Element {
   if (b.status === 'running') {
     return (
       <div className="ai-analysis running">
@@ -520,8 +520,8 @@ function AnalysisView({ block: b, pendingProposal }: { block: AnalysisBlock; pen
         </details>
       )}
       {inferences.length > 0 && (
-        <details className="ai-analysis-inferences" open={pendingProposal}>
-          <summary>推断（{inferences.length} 条）</summary>
+        <details className="ai-analysis-inferences">
+          <summary className="ai-tone warn">推断 · {inferences.length} 项</summary>
           <ul>
           {inferences.map((f, i) => (
             <li key={i}>
@@ -532,8 +532,8 @@ function AnalysisView({ block: b, pendingProposal }: { block: AnalysisBlock; pen
         </details>
       )}
       {r.uncertainties.length > 0 && (
-        <details className="ai-analysis-uncertain" open={pendingProposal}>
-          <summary>不确定的地方（{r.uncertainties.length} 处）</summary>
+        <details className="ai-analysis-uncertain">
+          <summary className="ai-tone warn">不确定的地方 · {r.uncertainties.length} 项</summary>
           <ul>
             {r.uncertainties.map((u, i) => (
               <li key={i}>{u}</li>
@@ -545,7 +545,7 @@ function AnalysisView({ block: b, pendingProposal }: { block: AnalysisBlock; pen
   )
 }
 
-const CONSEQUENCE: Record<string, string> = { downtime: '停机', irreversible: '不可恢复', cost: '费用', dependency: '依赖', 'blast-radius': '影响范围', data: '数据' }
+const CONSEQUENCE: Record<string, string> = { downtime: '停机', throttling: '限流', irreversible: '不可恢复', cost: '费用', dependency: '依赖', 'blast-radius': '影响范围', data: '数据' }
 const RISK: Record<string, string> = { low: '低', medium: '中', high: '高', destructive: '破坏性' }
 
 function ClampedMarkdown({ text, onLink }: { text: string; onLink: (url: string) => void }): React.JSX.Element {
@@ -646,7 +646,7 @@ function TableView({ block: b, ctx }: { block: TableBlock; ctx: Ctx }): React.JS
                 <span className="ai-table-list-name">{r.cells[first.key] ?? ''}</span>
                 {numbers.map((c) => (
                   <span key={c.key} className="ai-table-list-num">
-                    {r.cells[c.key] ?? ''}
+                    <span className="ai-table-list-label">{c.label}</span>{r.cells[c.key] ?? ''}
                   </span>
                 ))}
               </div>

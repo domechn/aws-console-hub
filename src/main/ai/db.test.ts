@@ -21,7 +21,7 @@ describe('ai.sqlite', () => {
     db.close()
 
     const again = openAiDb()
-    expect(again.prepare('pragma user_version').get()).toEqual({ user_version: 6 })
+    expect(again.prepare('pragma user_version').get()).toEqual({ user_version: 8 })
     expect(new AiStore(again).conversations('a1').map((c) => c.title)).toEqual(['first'])
     again.close()
   })
@@ -73,6 +73,57 @@ describe('ai.sqlite', () => {
   const DAY = 86400_000
   const NOW = Date.parse('2026-10-29T12:00:00Z')
 
+  it('finds Chinese substrings and English word prefixes without exposing internal turns', () => {
+    const { store } = fresh()
+    const id = store.createConversation('a1', 'search')
+    store.addMessage(id, { role: 'user', content: '列出运行中的 EC2' })
+    store.addMessage(id, { role: 'assistant', content: 'Instances are running' })
+    store.addMessage(id, { role: 'user', content: '[card_action] internal action' })
+    store.addMessage(id, { role: 'user', content: '[proposal_result] internal result' })
+    store.addMessage(id, { role: 'user', content: '[answer_request] internal request' })
+    expect(store.search('a1', '运行')).toMatchObject([{ id, snippet: expect.stringContaining('运行') }])
+    expect(store.search('a1', 'runn')).toMatchObject([{ id, snippet: expect.stringContaining('running') }])
+    expect(store.search('a1', 'internal action')).toEqual([])
+    expect(store.search('a1', 'internal result')).toEqual([])
+    expect(store.search('a1', 'internal request')).toEqual([])
+  })
+  it('excludes internal turns with an underscore and falls back to an older visible match', () => {
+    const { db, store } = fresh()
+    const id = store.createConversation('a1', 'search')
+    store.addMessage(id, { role: 'user', content: 'visible EXAMPLE' })
+    store.addMessage(id, { role: 'user', content: '[card_action] EXAMPLE' })
+    // A legacy unredacted row can match SQL but must be dropped after snippet redaction.
+    db.prepare('insert into messages (conversation_id, role, content_json, created_at) values (?, ?, ?, ?)').run(
+      id, 'assistant', JSON.stringify({ role: 'assistant', content: 'AKIAEXAMPLE123456789' }), Date.now()
+    )
+    expect(store.search('a1', 'EXAMPLE')).toMatchObject([{ id, snippet: expect.stringContaining('visible EXAMPLE') }])
+  })
+
+  it('returns another conversation after 250 newer matches in one conversation', () => {
+    const { store } = fresh()
+    const older = store.createConversation('a1', 'older')
+    const noisy = store.createConversation('a1', 'noisy')
+    store.addMessage(older, { role: 'user', content: 'needle older' })
+    for (let i = 0; i < 250; i++) store.addMessage(noisy, { role: 'user', content: `needle ${i}` })
+    expect(store.search('a1', 'needle').map((r) => r.id)).toEqual([noisy, older])
+  })
+  it('searches visible text containing JSON escapes beyond 200 metadata matches', () => {
+    const { store } = fresh()
+    const id = store.createConversation('a1', 'search')
+    store.addMessage(id, { role: 'user', content: { role: 'user', content: [{ type: 'text', text: 'quote " and slash \\ here' }] } })
+    for (let i = 0; i < 205; i++) store.addMessage(id, { role: 'user', content: { role: 'user', content: [{ type: 'text', text: 'other' }], text: 'needle' } })
+    expect(store.search('a1', 'quote "')).toMatchObject([{ id, snippet: expect.stringContaining('quote "') }])
+    expect(store.search('a1', 'slash \\')).toMatchObject([{ id, snippet: expect.stringContaining('slash \\') }])
+    expect(store.search('a1', 'needle')).toEqual([])
+  })
+  it('applies the result window after ignoring internal control turns', () => {
+    const { store } = fresh()
+    const id = store.createConversation('a1', 'search')
+    store.addMessage(id, { role: 'user', content: { role: 'user', content: [{ type: 'text', text: 'visible needle' }] } })
+    for (let i = 0; i < 205; i++) store.addMessage(id, { role: 'user', content: { role: 'user', content: [{ type: 'text', text: '[proposal_result] needle' }] } })
+    expect(store.search('a1', 'needle')).toMatchObject([{ id, snippet: expect.stringContaining('visible needle') }])
+  })
+
   it('keeps token usage per reply, beyond its conversation, and backfills replies stored before v2', () => {
     const old = new DatabaseSync(':memory:')
     old.exec('pragma foreign_keys = on')
@@ -84,8 +135,9 @@ describe('ai.sqlite', () => {
     const c = v1.createConversation('a1')
     old.prepare("insert into messages (conversation_id, role, content_json, created_at) values (?, 'assistant', ?, ?)").run(c, JSON.stringify({ role: 'assistant', provider: 'deepseek', model: 'm', usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0 } }), NOW)
     old.exec('alter table conversations drop column page_context')
+    old.exec('alter table conversations drop column pinned; alter table messages drop column feedback')
     migrate(old)
-    expect(old.prepare('pragma user_version').get()).toEqual({ user_version: 6 })
+    expect(old.prepare('pragma user_version').get()).toEqual({ user_version: 8 })
     // v3: conversations from before it send the current page (the default).
     expect(v1.pageContext(c)).toBe(true)
     v1.setPageContext(c, false)
@@ -109,6 +161,7 @@ describe('ai.sqlite', () => {
     const db = new DatabaseSync(':memory:')
     migrate(db)
     db.exec('pragma user_version = 5')
+    db.exec('alter table conversations drop column pinned; alter table messages drop column feedback')
     db.prepare("insert into usage (t, account_id, provider, model, input, output, analysis_of) values (?, ?, ?, ?, ?, ?, ?)").run(NOW, 'a1', 'deepseek', 'm', 7, 3, 'conversation-1')
     migrate(db)
     migrate(db)
@@ -125,6 +178,7 @@ describe('ai.sqlite', () => {
       id, JSON.stringify({ role: 'assistant', model: 'm', usage: { input: 1.6, output: 2.6 } }), NOW
     )
     db.exec('drop index usage_by_conversation; alter table usage drop column conversation_id; pragma user_version = 4')
+    db.exec('alter table conversations drop column pinned; alter table messages drop column feedback')
     db.prepare("insert into usage (t, account_id, provider, model, input, output) values (?, 'a1', '', 'm', 2, 3)").run(NOW)
     migrate(db)
     expect(db.prepare("select conversation_id from usage where model = 'm'").get()).toEqual({ conversation_id: id })
@@ -179,6 +233,55 @@ describe('ai.sqlite', () => {
     store.deleteConversation(a)
     expect(store.conversations('a1')).toEqual([])
     expect(store.messages(a)).toEqual([])
+  })
+
+  it('pins per account and keeps feedback local to a message', () => {
+    const { store } = fresh()
+    const a = store.createConversation('a1', 'first')
+    const b = store.createConversation('a1', 'second')
+    const other = store.createConversation('a2', 'other')
+    store.setPinned(a, true)
+    expect(store.conversations('a1').map((c) => [c.id, c.pinned])).toEqual([[a, true], [b, false]])
+    store.addMessage(a, { role: 'assistant', content: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] } })
+    const row = store.messages(a)[0]
+    store.setFeedback(a, row.id, 'up')
+    expect(store.messages(a)[0].feedback).toBe('up')
+    expect(() => store.setFeedback(other, row.id, 'down')).toThrow()
+    store.deleteConversation(a)
+    expect(store.messages(a)).toEqual([])
+    const keep = store.createConversation('a1')
+    store.addMessage(keep, { role: 'assistant', content: { role: 'assistant', content: 'answer' } })
+    store.setFeedback(keep, store.messages(keep)[0].id, 'down')
+    store.deleteAll({ audit: false, now: Date.now() })
+    expect(store.messages(keep)).toEqual([])
+    expect(store.conversations('a1')).toEqual([])
+  })
+
+  it('searches stored user and assistant text within one account with literal wildcards', () => {
+    const { store } = fresh()
+    const a = store.createConversation('a1', 'one')
+    const b = store.createConversation('a2', 'two')
+    store.addMessage(a, { role: 'user', content: { role: 'user', content: [{ type: 'text', text: 'find 100% usage' }] } })
+    store.addMessage(b, { role: 'assistant', content: { role: 'assistant', content: [{ type: 'text', text: 'find 100% usage' }] } })
+    expect(store.search('a1', '100%')).toMatchObject([{ id: a, title: 'one' }])
+    expect(store.search('a1', '%')).toHaveLength(1)
+    expect(store.search('a1', 'no match')).toEqual([])
+    expect(store.search('a1', '100%')).toMatchObject([{ id: a }])
+    expect(store.search('a1', '_')).toEqual([])
+  })
+
+  it('drops a P3 FTS index safely and searches only visible text', () => {
+    const { db, store } = fresh()
+    db.exec("create virtual table messages_fts using fts5(content); create trigger messages_fts_delete after delete on messages begin delete from messages_fts where rowid = old.id; end;")
+    migrate(db)
+    expect(db.prepare("select name from sqlite_master where name = 'messages_fts'").get()).toBeUndefined()
+    const id = store.createConversation('a1')
+    store.addMessage(id, { role: 'assistant', content: { role: 'assistant', content: [{ type: 'text', text: 'regional latency trend' }] } })
+    store.addMessage(id, { role: 'assistant', content: { role: 'assistant', content: [{ type: 'toolCall', name: 'aws_read', arguments: { note: 'private-marker' } }] } })
+    expect(store.search('a1', 'latency')).toHaveLength(1)
+    expect(store.search('a1', 'private-marker')).toEqual([])
+    store.deleteConversation(id)
+    expect(store.search('a1', 'latency')).toEqual([])
   })
 
   it('never writes credentials to disk', () => {

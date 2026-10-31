@@ -86,8 +86,8 @@ describe('CardView', () => {
     expect(done).toContain('风险已由「高」提高到「破坏性」：Principal * 且没有 Condition')
     expect(done).toContain('事实（1 条，展开看依据）')
     expect(done).toContain('<details class="ai-analysis-evidence"><summary>依据：s3:GetBucketPolicy</summary>')
-    expect(done).toContain('<details class="ai-analysis-inferences"><summary>推断（1 条）</summary>')
-    expect(done).toContain('<details class="ai-analysis-uncertain"><summary>不确定的地方（1 处）</summary>')
+    expect(done).toContain('<details class="ai-analysis-inferences"><summary class="ai-tone warn">推断 · 1 项</summary>')
+    expect(done).toContain('<details class="ai-analysis-uncertain"><summary class="ai-tone warn">不确定的地方 · 1 项</summary>')
     const pending = renderToStaticMarkup(<CardView card={card({ v: 3, origin: 'system', blocks: [{
       type: 'analysis', status: 'done', calls: 2, result: {
         summary: '可能受影响', changes: [], impact: [{ kind: 'inference', text: '可能中断' }],
@@ -95,8 +95,10 @@ describe('CardView', () => {
         risk: { level: 'high', reasons: [] }, uncertainties: ['未查到依赖'], confidence: 'low'
       }
     }] })} pendingProposal onAction={async () => ({ ok: true })} onLink={() => {}} />)
-    expect(pending).toContain('<details class="ai-analysis-inferences" open="">')
-    expect(pending).toContain('<details class="ai-analysis-uncertain" open="">')
+    expect(pending).toContain('<details class="ai-analysis-inferences"><summary')
+    expect(pending).toContain('<details class="ai-analysis-uncertain"><summary')
+    expect(pending).toContain('推断 · 1 项')
+    expect(pending).toContain('不确定的地方 · 1 项')
     expect(done).toContain('依据：s3:GetBucketPolicy')
     expect(done).toContain('Principal.AWS = …:root')
     expect(done).toContain('推断</span>')
@@ -107,6 +109,19 @@ describe('CardView', () => {
     expect(done).toContain('class="ai-table-scroll"><table class="ai-table ai-change-table"')
     // A model card never draws one.
     expect(render(card({ blocks: [{ type: 'analysis', status: 'done', calls: 0 }] }))).not.toContain('ai-analysis')
+  })
+
+  it('labels narrow table values and keeps before/after headers left aligned', () => {
+    const html = render(card({ origin: 'system', blocks: [
+      { type: 'table', columns: [{ key: 'name', label: '名称' }, { key: 'cpu', label: 'CPU 1h', align: 'right' }], rows: [{ id: 'i-1', cells: { name: 'web', cpu: '9%' } }] },
+      { type: 'change', kind: 'modify', summary: '修改', rows: [{ item: '容量', before: '1', after: '2' }] }
+    ] }))
+    expect(html).toContain('class="ai-table-list-num"><span class="ai-table-list-label">CPU 1h</span>9%')
+    expect(html).toContain('class="ai-table ai-change-table"')
+  })
+  it('marks the region used by a reference cost as possibly different from the resource region', () => {
+    const html = render(card({ origin: 'system', blocks: [{ type: 'consequences', items: [{ kind: 'cost', text: '按需参考价 $70/月（us-east-1 Linux）' }] }] }))
+    expect(html).toContain('us-east-1 为参考区域，可能与资源所在区域不同')
   })
 
   it('change blocks (card v2) read as text, not a diff: fields, a 项目 / 当前 / 改为 table, state chips, removals with what stays', () => {
@@ -249,7 +264,7 @@ describe('CardView', () => {
     expect(linkOnly).not.toContain('更多操作')
     // The narrow (≤ 340px) list: name and the right-aligned number on line 1, the rest joined on line 2.
     expect(html).toContain(
-      '<div class="ai-table-list-l1"><span class="ai-table-list-name">worker-1</span><span class="ai-table-list-num">71%</span></div><div class="ai-table-list-l2">c6g.large · 1a</div>'
+      '<div class="ai-table-list-l1"><span class="ai-table-list-name">worker-1</span><span class="ai-table-list-num"><span class="ai-table-list-label">CPU · 1h</span>71%</span></div><div class="ai-table-list-l2">c6g.large · 1a</div>'
     )
   })
 

@@ -39,6 +39,20 @@ export const PROPOSAL_LIMITS = {
 export const READ_ONLY_MESSAGE =
   '当前账号是只读模式，不能提出变更。请告诉用户：可以在 AI 面板顶部点「只读」开启「允许 AI 助手提出变更」（每个变更仍需用户确认），或在账号设置里打开。'
 
+/** Pre-check failures are shown on system cards and in audit; never include SDK response bodies. */
+export function precheckCause(err: unknown): string {
+  const name = (err as { name?: string } | null)?.name ?? ''
+  const message = err instanceof Error ? err.message : ''
+  if (message.startsWith('内部错误：确认之前不能发送写请求（')) return message
+  if (message.startsWith('模板不能由助手提交：') || message === 'TemplateBody 和 UsePreviousTemplate: true 必须二选一') return message
+  if (/^stack [a-zA-Z0-9-]{1,128} 使用服务角色部署，助手只能改参数/.test(message)) return message
+  if (message.startsWith('change set 创建失败：') && message.includes("didn't contain changes")) return '变更集没有实际变更'
+  if (/AccessDenied|Unauthorized|Forbidden/i.test(name)) return '没有权限'
+  if (/Invalid|Validation|BadRequest/i.test(name)) return '请求参数未通过服务校验'
+  if (/Timeout|Throttl|ServiceUnavailable|InternalError/i.test(name)) return '服务暂时不可用'
+  return '服务响应异常'
+}
+
 const REGION_IDS = new Set(REGIONS.map((r) => r.id))
 /** Writes allowed before confirmation: they create or delete a plan, not a resource. EC2 DryRun requests also pass. */
 const PLAN_CALLS = new Set(['cloudformation:CreateChangeSet', 'cloudformation:DeleteChangeSet'])
@@ -205,7 +219,8 @@ const STATE_ERRORS: Record<Exclude<ProposalState, 'pending'>, string> = {
 class Refused extends Error {
   constructor(
     message: string,
-    readonly why = 'precheck'
+    readonly why = 'precheck',
+    readonly auditName = ''
   ) {
     super(message)
   }
@@ -409,8 +424,10 @@ export class ProposalEngine {
       return { view: record.view, reused: false }
     } catch (err) {
       if (prepared && a.discard) await a.discard(p, ctx).catch(() => {})
-      const message = err instanceof Refused ? err.message : `预检失败，没有生成提案：${awsError(err)}`
-      this.audit(base, 'proposal_refused', { service, action, actor: 'model', cause: err instanceof Refused ? err.why : 'aws', reason: message.slice(0, 300) })
+      const message = err instanceof Refused ? err.message : `预检失败，没有生成提案：${precheckCause(err)}`
+      const rawName = err instanceof Refused ? err.auditName : (err as { name?: unknown } | null)?.name
+      const safeName = typeof rawName === 'string' && /^[A-Za-z][A-Za-z0-9._-]{0,79}$/.test(rawName) ? rawName : ''
+      this.audit(base, 'proposal_refused', { service, action, actor: 'model', cause: err instanceof Refused ? err.why : 'aws', reason: `${message}${safeName ? ` (${safeName})` : ''}`.slice(0, 300) })
       throw new Error(message)
     }
   }
@@ -424,8 +441,8 @@ export class ProposalEngine {
     } catch (err) {
       const name = (err as { name?: string }).name
       if (name === 'DryRunOperation') return 'DryRun 通过：权限和参数有效'
-      if (name === 'UnauthorizedOperation') throw new Refused(`当前 role 没有 ${a.service}:${a.action} 权限（DryRun 被拒绝）`)
-      throw new Refused(`DryRun 失败：${awsError(err)}`)
+      if (name === 'UnauthorizedOperation') throw new Refused(`当前 role 没有 ${a.service}:${a.action} 权限（DryRun 被拒绝）`, 'precheck', name)
+      throw new Refused(`DryRun 失败：${precheckCause(err)}`, 'precheck', name)
     }
     // A DryRun that "succeeded" was not a dry run: stop rather than guess what happened.
     throw new Refused('DryRun 没有返回预期结果，已停止')
@@ -455,7 +472,7 @@ export class ProposalEngine {
         : `权限预检通过（IAM 策略模拟：${actions.join('、')}）；这个服务没有 DryRun，参数在执行时才由 AWS 校验`
     } catch (err) {
       const name = (err as { name?: string }).name
-      return `${fallback}；无法预检权限（${name === 'AccessDenied' || name === 'AccessDeniedException' ? '没有 iam:SimulatePrincipalPolicy 权限' : awsError(err).slice(0, 120)}）`
+      return `${fallback}；无法预检权限（${name === 'AccessDenied' || name === 'AccessDeniedException' ? '没有 iam:SimulatePrincipalPolicy 权限' : precheckCause(err)}）`
     }
   }
 
@@ -685,6 +702,10 @@ export class ProposalEngine {
 
   pendingCount(conversationId: string): number {
     return [...this.proposals.values()].filter((p) => p.conversationId === conversationId && p.state === 'pending').length
+  }
+
+  pendingIds(conversationId: string): string[] {
+    return [...this.proposals.values()].filter((p) => p.conversationId === conversationId && p.state === 'pending').map((p) => p.id)
   }
 
   /** The conversation is gone: its pending proposals with it (an executing one finishes; its result has nowhere to go). */

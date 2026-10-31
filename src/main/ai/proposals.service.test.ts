@@ -110,6 +110,42 @@ const kinds = (items: ChatItem[]) => items.map((i) => (i.kind === 'proposal' ? `
 const lastToolResult = (context: { messages: { role: string; content?: unknown }[] }): string => JSON.stringify(context.messages.filter((m) => m.role === 'toolResult').at(-1))
 
 describe('propose_change through the service', () => {
+  it.each([
+    { from: 1, expected: 'pause for approval', kept: true },
+    { from: 0, expected: 'stop web', kept: false }
+  ])('regenerates after confirming an earlier proposal during a paused approval (from $from)', async ({ from, expected, kept }) => {
+    let seen = ''
+    const s = setup([
+      proposeStop(),
+      fauxAssistantMessage('请确认。'),
+      fauxAssistantMessage([fauxToolCall('aws_read', { service: 'secretsmanager', action: 'GetSecretValue', params: { SecretId: 'db' } })], { stopReason: 'toolUse' }),
+      (ctx) => { seen = JSON.stringify(ctx.messages.filter((m) => m.role === 'user')); return fauxAssistantMessage('新回答') }
+    ])
+    const { conversationId } = await s.service.send('acc-1', null, 'stop web')
+    await s.waitDone(1)
+    const proposalId = s.proposalId()
+    await s.service.send('acc-1', conversationId, 'pause for approval')
+    await s.pendingApproval()
+    await s.service.confirmProposal('acc-1', conversationId, proposalId)
+    await s.service.regenerate('acc-1', conversationId, from, expected, 'edited')
+    await vi.waitFor(() => expect(seen).not.toBe(''))
+    const resultStored = s.store.messages(conversationId).some((m) => m.role === 'user' && JSON.stringify(m.content).includes('[proposal_result]'))
+    expect(resultStored).toBe(kept)
+    expect(seen.includes(proposalId)).toBe(kept)
+    expect(s.service.engine.view(proposalId)?.state).toBe('succeeded')
+  })
+
+  it('deny-all cancels pending proposals without writing to AWS', async () => {
+    const s = setup([proposeStop(), fauxAssistantMessage('提案等待确认')])
+    const { conversationId } = await s.service.send('acc-1', null, '停止 web')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    expect(s.service.conversations('acc-1')[0].status).toMatchObject({ pendingProposals: 1 })
+    expect(s.service.denyAll('acc-1', conversationId)).toEqual({ approvals: 0, proposals: 1 })
+    expect(s.service.engine.view(id)?.state).toBe('cancelled')
+    expect(s.fake.calls.some((c) => c.action === 'StopInstances' && !('DryRun' in c.params))).toBe(false)
+    expect(s.audits()).toContain('proposal_cancelled')
+  })
   it('cancels a proposal recorded while regeneration resolves the model', async () => {
     let release!: (key: string) => void
     let resolving = false
@@ -412,8 +448,12 @@ describe('approvals through the service (tier B reads pause the run)', () => {
     // Mid-run, the panel's history shows the waiting row and the card.
     const mid = s.service.view('acc-1', conversationId).items
     expect(mid.map((i) => (i.kind === 'tool' ? `tool:${i.status}` : i.kind))).toEqual(['user', 'tool:waiting', 'approval'])
-    // A typed "同意" can't get in while the run waits, and would only be text anyway.
-    await expect(s.service.send('acc-1', conversationId, '同意')).rejects.toThrow('还在处理中')
+    // Typed "同意" can queue, but it cannot decide the approval.
+    const queued = await s.service.send('acc-1', conversationId, '同意')
+    expect(queued.queued?.id).toBeTruthy()
+    expect(s.service.view('acc-1', conversationId).items.find((i) => i.kind === 'approval')).toMatchObject({ approval: { state: 'pending' } })
+    expect(s.fake.of('sqs', 'ListQueues')).toEqual([])
+    s.service.queueCancel('acc-1', conversationId, queued.queued!.id)
     s.service.decideApproval('acc-1', conversationId, card.id, 'once')
     await s.waitDone(1)
     expect(s.fake.of('sqs', 'ListQueues').map((c) => c.params)).toEqual([{ QueueNamePrefix: 'prod' }])

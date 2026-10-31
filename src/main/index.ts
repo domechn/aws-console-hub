@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, shell, systemPreferences } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AccountStore } from './accounts'
@@ -32,6 +32,7 @@ import {
 } from './federation'
 import { runCredentialCommand, runKeyCommand } from './credentialCommand'
 import { testConnection } from './connectionTest'
+import { readThemePreference, saveThemePreference, backgroundForPreference, readSystemDark, resolvedSystemDark } from './theme'
 import { needsDisplayName, resolveDisplayName } from './resolver'
 import type { ActivityEvent } from './activity'
 import type { RecentResource } from '../shared/types'
@@ -53,10 +54,14 @@ function loadAppIcon(): Electron.NativeImage | undefined {
   return image.isEmpty() ? undefined : image
 }
 
+// Capture the native value while Electron still follows the OS. Chromium is forced light for console pages below.
+let systemDark = nativeTheme.shouldUseDarkColors
 function createWindow(): void {
-  // Light everywhere, including the embedded consoles, which follow
-  // prefers-color-scheme.
+  systemDark = resolvedSystemDark(process.platform, systemDark, process.platform === 'darwin' ? systemPreferences.getUserDefault('AppleInterfaceStyle', 'string') : undefined)
+  let preference = readThemePreference(app.getPath('userData'))
+  // The console pages keep their pre-P3 light color scheme. The renderer paints app chrome separately.
   nativeTheme.themeSource = 'light'
+  ipcMain.on('app:system-dark', (event) => { event.returnValue = systemDark })
 
   const icon = loadAppIcon()
   // On macOS the dock icon comes from the bundle when packaged, but in dev it
@@ -73,10 +78,50 @@ function createWindow(): void {
     titleBarStyle: 'hiddenInset',
     // Centered in the 52px renderer header.
     trafficLightPosition: { x: 18, y: 20 },
-    backgroundColor: '#ffffff',
+    backgroundColor: backgroundForPreference(preference, systemDark),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js')
     }
+  })
+  const paintBackground = (): void => {
+    const color = backgroundForPreference(preference, systemDark)
+    win.setBackgroundColor(color)
+    win.contentView.setBackgroundColor(color)
+  }
+  let views: ViewManager
+  paintBackground()
+  const updateSystemDark = (dark: boolean): void => {
+    if (win.isDestroyed()) return
+    if (systemDark === dark) return
+    systemDark = dark
+    paintBackground()
+    win.webContents.send('app:system-dark-changed', dark)
+    toasts.setSystemDark(dark)
+  }
+  const systemNotification = process.platform === 'darwin'
+    ? systemPreferences.subscribeNotification('AppleInterfaceThemeChangedNotification', () => {
+      updateSystemDark(systemPreferences.getUserDefault('AppleInterfaceStyle', 'string') === 'Dark')
+    }) : null
+  const refreshSystem = (): void => readSystemDark(process.platform, updateSystemDark)
+  if (process.platform !== 'darwin') refreshSystem()
+  const systemTimer = process.platform !== 'darwin' ? setInterval(refreshSystem, 10_000) : null
+  win.on('focus', refreshSystem)
+  win.on('closed', () => {
+    ipcMain.removeAllListeners('app:system-dark')
+    ipcMain.removeAllListeners('app:theme')
+    if (systemNotification !== null) systemPreferences.unsubscribeNotification(systemNotification)
+    if (systemTimer) clearInterval(systemTimer)
+  })
+  ipcMain.on('app:theme', (event, choice: unknown, resolved: unknown) => {
+    if (event.sender !== win.webContents || (choice !== 'system' && choice !== 'light' && choice !== 'dark') || (resolved !== 'light' && resolved !== 'dark')) return
+    if (choice !== preference) {
+      try { saveThemePreference(app.getPath('userData'), choice) }
+      catch { console.error('Unable to save theme preference') }
+    }
+    // Keep Chromium light for every embedded console WebContentsView.
+    // The renderer's data-theme selects the app colors.
+    preference = choice
+    paintBackground()
   })
   win.setMenuBarVisibility(false)
   // The shell only ever shows its own page: a dropped file or link must not
@@ -145,7 +190,7 @@ function createWindow(): void {
   // Created before any tab, and raised above each new one.
   const toasts = new ToastOverlay(win, () => views.focus())
 
-  const views = new ViewManager(win, {
+  views = new ViewManager(win, {
     onNavigated: (accountId, url) => {
       touch(accountId)
       const item = recents.record(accountId, url)
@@ -433,6 +478,7 @@ function createWindow(): void {
       return region && REGIONS.some((r) => r.id === region) ? region : (accounts.get(id)?.defaultRegion ?? 'us-east-1')
     },
     activePage: (id) => views.activePage(id),
+    recents: () => recents.list(),
     readPage: (id) => readCurrentPage(views.onScreenTab(), id),
     emit: (e) => send('ai:event', e),
     openConsole: navigateConsole,
