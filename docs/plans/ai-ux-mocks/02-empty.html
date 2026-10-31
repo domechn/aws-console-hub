@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>02 空状态：按当前页面生成的建议</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel" aria-label="AI 助手">
+  <header class="hdr">
+    <button class="conv-btn"><span class="t">新对话</span><span class="i xs i-down"></span></button>
+    <span class="mode">只读</span>
+    <button class="ib" aria-label="新对话"><span class="i i-plus"></span></button>
+    <button class="ib" aria-label="更多"><span class="i i-more"></span></button>
+    <button class="ib" aria-label="收起"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="empty">
+    <div class="who">
+      <div class="n"><span class="dot" style="background:#2e9d5b"></span>演示-测试</div>
+      <div class="s"><span class="num">111111111111</span> · ap-northeast-1 · 只在这个账号里查询</div>
+    </div>
+
+    <div class="sugg" role="group" aria-label="基于当前页面">
+      <div class="h"><span class="i xs i-page"></span>基于当前页面 · EC2 实例 web-1</div>
+      <button class="hover"><span class="i sm i-arrow"></span>web-1 过去 24 小时的 CPU 和网络怎么样？</button>
+      <button><span class="i sm i-arrow"></span>web-1 的安全组开放了哪些端口？</button>
+      <button><span class="i sm i-arrow"></span>web-1 挂了哪些 EBS 卷，最近有快照吗？</button>
+    </div>
+
+    <div class="sugg" role="group" aria-label="常用">
+      <div class="h"><span class="i xs i-history"></span>常用</div>
+      <button><span class="i sm i-arrow"></span>最近一小时哪些 Lambda 报错了？</button>
+      <button><span class="i sm i-arrow"></span>列出没有 owner 标签的 S3 桶</button>
+      <button><span class="i sm i-arrow"></span>本月成本前五的服务是哪些？<span class="tag">每次约 $0.01</span></button>
+    </div>
+
+    <div class="sugg" role="group" aria-label="最近的对话">
+      <div class="h"><span class="i xs i-history"></span>最近的对话 · 这个账号<span style="margin-left:auto"><button class="link">全部 23 个</button></span></div>
+      <button><span class="i sm i-right"></span>东京区 EC2 巡检<span class="tag">今天 10:12</span></button>
+      <button><span class="i sm i-right"></span>orders-queue 超时调整<span class="tag">昨天</span></button>
+    </div>
+
+    <div class="cap">
+      <span class="i i-info" style="margin-top:1px"></span>
+      <div><b>只读</b>：助手只能查询，不会修改资源。不在默认放行范围内的查询会先问你。<br /><button class="link">允许提出变更…</button></div>
+    </div>
+  </div>
+
+  <footer class="comp">
+    <div class="box focus">
+      <div class="chips">
+        <span class="chip"><span class="i xs i-page"></span><span class="t">EC2 实例 · web-1</span><button class="x"><span class="i xs i-x"></span></button></span>
+      </div>
+      <div class="ta"><span class="cur"></span><span class="ph">问点什么… 输入 / 用命令，@ 添加上下文</span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <button class="send off" disabled><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>06b 变更提案：最终确认（输入确认文字）+ 旧卡片折叠</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel" aria-label="AI 助手">
+  <header class="hdr">
+    <button class="conv-btn"><span class="t">orders-queue 超时调整</span><span class="i xs i-down"></span></button>
+    <span class="mode write">可提议变更</span>
+    <button class="ib"><span class="i i-plus"></span></button>
+    <button class="ib"><span class="i i-more"></span></button>
+    <button class="ib"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="thread bottom">
+    <section class="card collapsed" aria-label="卡片：orders-queue 当前属性（已折叠）">
+      <div class="card-hd"><span class="i xs i-right" style="color:var(--text-dim)"></span><span class="title" style="font-weight:500">orders-queue 当前属性</span><span class="meta">6 项 · 已折叠</span></div>
+    </section>
+
+    <section class="prop high" role="group" aria-label="变更提案：最终确认">
+      <div class="prop-sec">
+        <div class="prop-hd">
+          <span class="pill danger">高风险</span>
+          <span class="pill line">通用请求</span>
+          <span class="cd"><span class="i xs i-clock"></span>7:58</span>
+        </div>
+        <div class="prop-title">修改 SQS 队列 orders-queue 的 2 个属性</div>
+        <div class="scope"><span class="dot" style="background:#2e9d5b"></span>演示-测试<span class="sep">·</span><span class="num">111111111111</span><span class="sep">·</span>ap-northeast-1</div>
+      </div>
+      <div class="prop-sec">
+        <div class="sec-h"><span class="i xs i-lock"></span><b>将发送的请求</b><span class="sp"></span><span class="op" style="font-size:11px;font-weight:500">sqs:SetQueueAttributes</span></div>
+        <dl class="kvs stack">
+          <dt>QueueUrl</dt><dd class="mono">https://sqs.ap-northeast-1.amazonaws.com/111111111111/orders-queue</dd>
+          <dt>Attributes › VisibilityTimeout</dt><dd><b>300</b></dd>
+          <dt>Attributes › MessageRetentionPeriod</dt><dd><b>1209600</b></dd>
+        </dl>
+        <div class="note"><span class="i xs i-info"></span><span>AI 影响分析已在上方收起（高风险 · 可撤销）</span></div>
+      </div>
+      <div class="final" role="group" aria-label="最终确认">
+        <p>将在「演示-测试」（<span class="num">111111111111</span>）· ap-northeast-1 执行：<b>修改 SQS 队列 orders-queue 的 2 个属性</b>。这是通用请求，应用无法预知影响，请确认你核对过参数。</p>
+        <label class="field">
+          <span>请输入 <span class="confirm-text">sqs:SetQueueAttributes</span> 以确认</span>
+          <span class="input focus">sqs:SetQueue<span class="cur"></span></span>
+        </label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn danger-fill" disabled>我确认，立即执行</button>
+          <button class="btn">返回</button>
+          <button class="btn ghost">取消提案</button>
+        </div>
+        <div class="hint">文字一致后才能执行；在输入框按 <kbd>↵</kbd> 提交</div>
+      </div>
+    </section>
+
+    <section class="card collapsed">
+      <div class="card-hd"><span class="i sm i-check st-ok"></span><span class="title" style="font-weight:500">上一个提案：给 web-1 打 owner 标签 · 已执行</span><span class="meta">10:42</span></div>
+    </section>
+  </div>
+
+  <footer class="comp">
+    <div class="box">
+      <div class="ta"><span class="ph">问点什么… 输入 / 用命令，@ 添加上下文</span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <button class="send off"><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

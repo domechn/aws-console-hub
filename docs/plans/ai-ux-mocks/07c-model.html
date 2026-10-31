@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>07c 输入框：模型切换</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel">
+  <header class="hdr">
+    <button class="conv-btn"><span class="t">东京区 EC2 巡检</span><span class="i xs i-down"></span></button>
+    <span class="mode">只读</span>
+    <button class="ib"><span class="i i-plus"></span></button><button class="ib"><span class="i i-more"></span></button><button class="ib"><span class="i i-x"></span></button>
+  </header>
+  <div class="thread bottom">
+    <div class="md" style="color:var(--text-dim)"><p>……其余 3 台都低于 20%。</p></div>
+  </div>
+  <footer class="comp">
+    <div class="pop" role="listbox" aria-label="模型" style="left:10px;width:300px;bottom:calc(100% - 2px)">
+      <div class="pop-h">Bedrock · 账号「工具账号」· us-east-1</div>
+      <button class="pop-i sel"><span class="main"><span class="l1">Claude Sonnet 5.5</span><span class="l2">目录价 $3 / $15 每百万 token</span></span><span class="i sm i-check" style="color:var(--accent)"></span></button>
+      <button class="pop-i"><span class="main"><span class="l1">Claude Haiku 5.5</span><span class="l2">更快更便宜 · $1 / $5</span></span></button>
+      <button class="pop-i"><span class="main"><span class="l1">Claude Opus 5.5</span><span class="l2">更强 · $5 / $25</span></span></button>
+      <div class="pop-sep"></div>
+      <button class="pop-i"><span class="main"><span class="l1" style="color:var(--text-dim)">其他服务商…</span><span class="l2">在 AI 设置里填 key</span></span><span class="i xs i-right"></span></button>
+      <div class="pop-ft"><span class="num">本月 1.24M tokens · $4.10</span><span class="sp"></span><button class="link">AI 设置…</button></div>
+    </div>
+    <div class="box">
+      <div class="ta"><span class="ph">问点什么… 输入 / 用命令，@ 添加上下文</span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model open"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <span class="cost">$0.03</span>
+        <button class="send off"><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

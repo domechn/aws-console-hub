@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>03 对话：折叠的 Activity + 表格卡片 + 接下来</title>
+<link rel="stylesheet" href="mock.css" />
+<script>if (location.hash === '#dark') document.documentElement.dataset.theme = 'dark'</script>
+</head>
+<body>
+<aside class="panel" aria-label="AI 助手">
+  <header class="hdr">
+    <button class="conv-btn" aria-haspopup="dialog"><span class="t">东京区 EC2 巡检</span><span class="i xs i-down"></span></button>
+    <span class="mode" title="助手只能查询">只读</span>
+    <button class="ib" aria-label="新对话"><span class="i i-plus"></span></button>
+    <button class="ib" aria-label="更多"><span class="i i-more"></span></button>
+    <button class="ib" aria-label="收起"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="thread bottom">
+    <div class="u">
+      <div class="bubble">列出东京区运行中的 EC2，顺便看看过去一小时哪台 CPU 最高</div>
+      <div class="where">在「EC2 · 实例列表 · ap-northeast-1」提问</div>
+    </div>
+
+    <div class="turn">
+      <div class="act">
+        <button class="act-row" aria-expanded="false">
+          <span class="i sm i-check st-ok"></span>
+          <span class="lbl"><b>3 步</b> · 查询 EC2 实例、运行脚本、查询指标</span>
+          <span class="dur">4.8 秒</span>
+          <span class="i xs i-right"></span>
+        </button>
+      </div>
+
+      <div class="md">
+        <p>东京区有 <strong>4 台</strong>运行中的实例。过去 1 小时 CPU 最高的是 <code>worker-1</code>（平均 71%，峰值 93%），其余 3 台都低于 20%。</p>
+      </div>
+
+      <section class="card" aria-label="卡片：运行中的 EC2">
+        <div class="card-hd">
+          <span class="title">ap-northeast-1 · 运行中的 EC2</span>
+          <span class="meta num">4 台</span>
+          <button class="ib sm" aria-label="复制为 TSV" title="复制为 TSV"><span class="i sm i-copy"></span></button>
+          <button class="ib sm" aria-label="折叠卡片"><span class="i xs i-down"></span></button>
+        </div>
+        <table class="tbl adaptive">
+          <thead>
+            <tr><th>名称</th><th class="wide-only">实例 ID</th><th>类型</th><th>可用区</th><th class="r">CPU · 1h</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr class="hot"><td>worker-1</td><td class="id wide-only">i-0c7d2e19a4</td><td>c6g.large</td><td>1a</td><td class="r">71%</td>
+              <td class="act-col"><button class="ib" title="在 Console 打开"><span class="i sm i-ext"></span></button><button class="ib" title="更多操作"><span class="i sm i-more"></span></button></td></tr>
+            <tr><td>db-primary</td><td class="id wide-only">i-03b8f61e2c</td><td>r6g.xlarge</td><td>1c</td><td class="r">18%</td>
+              <td class="act-col"><button class="ib" title="在 Console 打开"><span class="i sm i-ext"></span></button><button class="ib" title="更多操作"><span class="i sm i-more"></span></button></td></tr>
+            <tr><td>web-1</td><td class="id wide-only">i-0a41c7d953</td><td>t3.small</td><td>1a</td><td class="r">9%</td>
+              <td class="act-col"><button class="ib" title="在 Console 打开"><span class="i sm i-ext"></span></button><button class="ib" title="更多操作"><span class="i sm i-more"></span></button></td></tr>
+            <tr><td>web-2</td><td class="id wide-only">i-0f92ab4e07</td><td>t3.small</td><td>1c</td><td class="r">7%</td>
+              <td class="act-col"><button class="ib" title="在 Console 打开"><span class="i sm i-ext"></span></button><button class="ib" title="更多操作"><span class="i sm i-more"></span></button></td></tr>
+          </tbody>
+        </table>
+        <ul class="rows">
+          <li class="hot"><div class="main"><div class="l1">worker-1<span class="v">71%</span></div><div class="l2">c6g.large · 1a</div></div><button class="ib" title="在 Console 打开"><span class="i sm i-ext"></span></button><button class="ib" title="更多操作"><span class="i sm i-more"></span></button></li>
+          <li><div class="main"><div class="l1">db-primary<span class="v">18%</span></div><div class="l2">r6g.xlarge · 1c</div></div><button class="ib"><span class="i sm i-ext"></span></button><button class="ib"><span class="i sm i-more"></span></button></li>
+          <li><div class="main"><div class="l1">web-1<span class="v">9%</span></div><div class="l2">t3.small · 1a</div></div><button class="ib"><span class="i sm i-ext"></span></button><button class="ib"><span class="i sm i-more"></span></button></li>
+          <li><div class="main"><div class="l1">web-2<span class="v">7%</span></div><div class="l2">t3.small · 1c</div></div><button class="ib"><span class="i sm i-ext"></span></button><button class="ib"><span class="i sm i-more"></span></button></li>
+        </ul>
+      </section>
+
+      <div class="msg-actions">
+        <button class="ib sm" title="复制回答"><span class="i sm i-copy"></span></button>
+        <button class="ib sm" title="重新生成"><span class="i sm i-retry"></span></button>
+        <span class="sep narrow-hide"></span>
+        <button class="ib sm narrow-hide" title="有帮助"><span class="i sm i-up"></span></button>
+        <button class="ib sm narrow-hide" title="没帮助"><span class="i sm i-thumbdown"></span></button>
+        <span class="meta"><span class="wide-only">Claude Sonnet 5.5 ·&nbsp;</span><span class="num">3.1k tokens · $0.012</span></span>
+      </div>
+
+      <div class="follow" role="group" aria-label="接下来">
+        <div class="h">接下来</div>
+        <button><span class="i sm i-arrow"></span>看 worker-1 的 CPU 曲线</button>
+        <button><span class="i sm i-arrow"></span>查 worker-1 最近的报错日志</button>
+        <button><span class="i sm i-arrow"></span>列出这些实例的安全组</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="comp">
+    <div class="box">
+      <div class="chips">
+        <span class="chip" title="每次提问时发送：地址（已去除令牌）、标题、region"><span class="i xs i-page"></span><span class="t">EC2 · 实例列表 · ap-northeast-1</span><button class="x" aria-label="本对话不发送当前页面"><span class="i xs i-x"></span></button></span>
+      </div>
+      <div class="ta"><span class="ph">问点什么… 输入 / 用命令，@ 添加上下文</span></div>
+      <div class="tools">
+        <button class="ib sm" title="添加上下文（@）"><span class="i sm i-at"></span></button>
+        <button class="ib sm" title="命令（/）"><span class="i sm i-slash"></span></button>
+        <button class="model" title="切换模型"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <span class="cost narrow-hide" title="本对话：输入 9.8k / 输出 1.4k tokens（按目录价估算）">$0.03</span>
+        <button class="send off" aria-label="发送" disabled><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

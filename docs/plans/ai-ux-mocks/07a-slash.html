@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>07a 输入框：斜杠命令</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel">
+  <header class="hdr">
+    <button class="conv-btn"><span class="t">东京区 EC2 巡检</span><span class="i xs i-down"></span></button>
+    <span class="mode">只读</span>
+    <button class="ib"><span class="i i-plus"></span></button><button class="ib"><span class="i i-more"></span></button><button class="ib"><span class="i i-x"></span></button>
+  </header>
+  <div class="thread bottom">
+    <div class="md" style="color:var(--text-dim)"><p>……其余 3 台都低于 20%。</p></div>
+  </div>
+  <footer class="comp">
+    <div class="pop" role="listbox" aria-label="命令" style="left:10px;right:10px;bottom:calc(100% - 2px)">
+      <div class="pop-h">命令 · 在本地执行，不发给模型</div>
+      <button class="pop-i sel"><span class="cmd">/新对话</span><span class="main"><span class="l2">开始一个新对话</span></span><span class="r"><kbd>⌘N</kbd></span></button>
+      <button class="pop-i"><span class="cmd">/模型</span><span class="main"><span class="l2">切换模型（全局）</span></span></button>
+      <button class="pop-i"><span class="cmd">/页面</span><span class="main"><span class="l2">本对话发送 / 不发送当前页面</span></span></button>
+      <button class="pop-i"><span class="cmd">/只读</span><span class="main"><span class="l2">切换只读 / 可提议变更（会二次确认）</span></span></button>
+      <button class="pop-i"><span class="cmd">/重命名</span><span class="main"><span class="l2">重命名这个对话</span></span></button>
+      <button class="pop-i"><span class="cmd">/清空</span><span class="main"><span class="l2">删除这个账号的全部对话（会确认）</span></span></button>
+      <button class="pop-i"><span class="cmd">/设置</span><span class="main"><span class="l2">打开 AI 设置</span></span></button>
+      <div class="pop-ft"><span><kbd>↑</kbd> <kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 执行</span><span><kbd>Esc</kbd> 关闭</span></div>
+    </div>
+    <div class="box focus">
+      <div class="ta">/<span class="cur"></span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm" style="background:var(--bg-active);color:var(--text)"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <button class="send off"><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

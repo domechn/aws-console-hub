@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>07 输入框状态</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<div class="board">
+  <div class="col">
+    <div class="cap-t">/ 命令</div>
+    <div class="cap-s">本地执行，不发给模型；危险命令仍走原来的确认</div>
+    <iframe src="07a-slash.html" width="400" height="520" title="slash"></iframe>
+  </div>
+  <div class="col">
+    <div class="cap-t">@ 上下文</div>
+    <div class="cap-s">当前页面、最近资源；只能引用本账号</div>
+    <iframe src="07b-context.html" width="400" height="520" title="context"></iframe>
+  </div>
+  <div class="col">
+    <div class="cap-t">模型切换</div>
+    <div class="cap-s">服务商 · 模型常驻输入框；本月用量收进这里</div>
+    <iframe src="07c-model.html" width="400" height="520" title="model"></iframe>
+  </div>
+</div>
+</body>
+</html>

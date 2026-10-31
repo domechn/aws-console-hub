@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>08 对话列表：搜索、置顶、按日期分组</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel">
+  <header class="hdr">
+    <button class="conv-btn open" aria-expanded="true"><span class="t">东京区 EC2 巡检</span><span class="i xs i-down"></span></button>
+    <span class="mode">只读</span>
+    <button class="ib"><span class="i i-plus"></span></button><button class="ib"><span class="i i-more"></span></button><button class="ib"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="pop" role="dialog" aria-label="对话" style="top:44px;left:8px;right:8px">
+    <div class="search"><span class="i sm i-search"></span><span class="q">安全<span style="display:inline-block;width:1px;height:15px;margin-left:1px;vertical-align:-3px;background:var(--text)"></span></span><kbd>Esc</kbd></div>
+    <div class="pop-h">置顶</div>
+    <button class="pop-i"><span class="i sm i-pin"></span><span class="main"><span class="l1">生产<span class="mark">安全</span>组审计</span><span class="l2">3 个提案已执行</span></span><span class="r">10月20日</span></button>
+    <div class="pop-h">今天</div>
+    <button class="pop-i sel"><span class="i sm i-check" style="color:var(--accent)"></span><span class="main"><span class="l1"><span class="mark">安全</span>组入站规则梳理</span><span class="l2">当前对话 · 6 条消息</span></span><span class="r" style="display:flex;gap:0"><span class="ib sm"><span class="i sm i-pin"></span></span><span class="ib sm"><span class="i sm i-edit"></span></span><span class="ib sm"><span class="i sm i-trash"></span></span></span></button>
+    <button class="pop-i"><span class="dot" style="background:var(--accent);margin:0 4px"></span><span class="main"><span class="l1">sg-0a1f 开放端口排查</span><span class="l2">正在运行 · 等待审批</span></span><span class="r">10:05</span></button>
+    <div class="pop-h">昨天</div>
+    <button class="pop-i"><span class="i sm" style="background:none"></span><span class="main"><span class="l1">web-1 <span class="mark">安全</span>组规则调整</span><span class="l2">提案已取消</span></span><span class="r">16:40</span></button>
+    <div class="pop-h">最近 7 天</div>
+    <button class="pop-i"><span class="i sm" style="background:none"></span><span class="main"><span class="l1">S3 桶公开访问与<span class="mark">安全</span>设置</span><span class="l2">14 个桶</span></span><span class="r">周一</span></button>
+    <div class="pop-ft"><span>匹配 5 / 23 个对话 · 只搜标题</span><span class="sp"></span><button class="link" style="color:var(--danger)">清空本账号全部对话…</button></div>
+  </div>
+
+  <div class="thread bottom" style="opacity:.55">
+    <div class="u"><div class="bubble">列出东京区运行中的 EC2，顺便看看过去一小时哪台 CPU 最高</div></div>
+    <div class="md"><p>东京区有 <strong>4 台</strong>运行中的实例。过去 1 小时 CPU 最高的是 <code>worker-1</code>……</p></div>
+  </div>
+  <footer class="comp">
+    <div class="box">
+      <div class="ta"><span class="ph">问点什么… 输入 / 用命令，@ 添加上下文</span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <button class="send off"><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

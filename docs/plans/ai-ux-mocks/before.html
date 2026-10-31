@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Before：当前面板（直接引用 src/renderer/src/styles.css）</title>
+<!-- The app's real stylesheet and the class names AssistantPanel / ToolRow / CardView / QuickReplies / PageChip render. Demo data. -->
+<link rel="stylesheet" href="../../../src/renderer/src/styles.css" />
+</head>
+<body>
+<aside class="ai-panel" style="width: 100vw; height: 100vh" aria-label="AI 助手">
+  <header class="ai-header">
+    <span class="ai-title">✦ AI 助手</span>
+    <button class="ai-badge">只读</button>
+    <span class="ai-spacer"></span>
+    <button class="ai-icon-btn" aria-label="AI 设置">⚙</button>
+    <button class="ai-icon-btn" aria-label="收起 AI 面板">×</button>
+  </header>
+  <div class="ai-convbar">
+    <select class="ai-conv-select" aria-label="对话"><option>东京区 EC2 巡检</option></select>
+    <button class="ai-text-btn">＋</button>
+    <button class="ai-text-btn">✎</button>
+    <button class="ai-text-btn">🗑</button>
+    <button class="ai-text-btn">清空</button>
+  </div>
+
+  <div class="ai-messages" style="justify-content: flex-end">
+    <div class="ai-msg user">列出东京区运行中的 EC2，顺便看看过去一小时哪台 CPU 最高</div>
+    <div class="ai-msg-page">EC2 · 实例列表 · ap-northeast-1</div>
+
+    <div class="ai-tool ok"><button class="ai-tool-row"><span class="ai-tool-icon">✓</span><span class="ai-tool-text">查询 EC2 实例<span class="ai-tool-summary"> · 4 台运行中（ap-northeast-1）</span></span><span class="ai-tool-caret">▸</span></button></div>
+    <div class="ai-tool ok"><button class="ai-tool-row"><span class="ai-tool-icon">✓</span><span class="ai-tool-text">运行脚本<span class="ai-tool-summary"> · 4 次调用</span></span><span class="ai-tool-caret">▸</span></button></div>
+    <div class="ai-tool ok"><button class="ai-tool-row"><span class="ai-tool-icon">✓</span><span class="ai-tool-text">查询 CloudWatch 指标<span class="ai-tool-summary"> · CPUUtilization × 4，60 个点</span></span><span class="ai-tool-caret">▸</span></button></div>
+
+    <section class="ai-card" aria-label="卡片：运行中的 EC2">
+      <header class="ai-card-head"><span class="ai-card-title">ap-northeast-1 · 运行中的 EC2（4）</span></header>
+      <div class="ai-table-block">
+        <div class="ai-table-scroll">
+          <table class="ai-table">
+            <thead><tr>
+              <th scope="col"><button class="ai-sort">名称</button></th>
+              <th scope="col"><button class="ai-sort">类型</button></th>
+              <th scope="col"><button class="ai-sort">可用区</button></th>
+              <th scope="col" style="text-align: right"><button class="ai-sort">CPU 1h</button></th>
+              <th scope="col" class="ai-row-actions">操作</th>
+            </tr></thead>
+            <tbody>
+              <tr><td>worker-1</td><td>c6g.large</td><td>1a</td><td style="text-align: right">71%</td><td class="ai-row-actions"><span class="ai-row-actions-inner"><button class="ai-card-btn default">在 Console 打开 ↗</button><button class="ai-card-btn danger">停止…</button></span></td></tr>
+              <tr><td>db-primary</td><td>r6g.xlarge</td><td>1c</td><td style="text-align: right">18%</td><td class="ai-row-actions"><span class="ai-row-actions-inner"><button class="ai-card-btn default">在 Console 打开 ↗</button></span></td></tr>
+              <tr><td>web-1</td><td>t3.small</td><td>1a</td><td style="text-align: right">9%</td><td class="ai-row-actions"><span class="ai-row-actions-inner"><button class="ai-card-btn default">在 Console 打开 ↗</button><button class="ai-card-btn danger">停止…</button></span></td></tr>
+              <tr><td>web-2</td><td>t3.small</td><td>1c</td><td style="text-align: right">7%</td><td class="ai-row-actions"><span class="ai-row-actions-inner"><button class="ai-card-btn default">在 Console 打开 ↗</button><button class="ai-card-btn danger">停止…</button></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="ai-table-foot"><span>4 行</span><span class="ai-spacer"></span><button class="ai-link-btn">复制为 TSV</button></div>
+      </div>
+    </section>
+
+    <div class="ai-msg assistant"><div class="md"><p>东京区有 <strong>4 台</strong>运行中的实例。过去 1 小时 CPU 最高的是 <code>worker-1</code>（平均 71%，峰值 93%），其余 3 台都低于 20%。</p></div></div>
+
+    <div class="ai-replies" role="group" aria-label="快捷回复">
+      <button class="ai-reply-chip">看 worker-1 的 CPU 曲线</button>
+      <button class="ai-reply-chip">查 worker-1 最近的报错日志</button>
+      <button class="ai-reply-chip">列出这些实例的安全组</button>
+    </div>
+  </div>
+
+  <footer class="ai-footer">
+    <div class="ai-page-chip"><span class="ai-page-label">当前页面：EC2 · 实例列表 · ap-northeast-1</span><button class="ai-page-off">×</button></div>
+    <textarea rows="3" aria-label="给 AI 助手的消息" placeholder="问点什么…（↵ 发送，⇧↵ 换行）"></textarea>
+    <div class="ai-footer-row">
+      <span class="ai-usage"><span class="ai-usage-line">本对话 输入 9.8k / 输出 1.4k tokens · $0.03</span><span class="ai-usage-line">本月 1.24M tokens · $4.10</span></span>
+      <button class="ai-send primary" disabled>发送</button>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

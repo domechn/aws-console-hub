@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>06a 变更提案：审阅（应用确定的事实在前，AI 分析在后，细节可展开）</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel" aria-label="AI 助手">
+  <header class="hdr">
+    <button class="conv-btn"><span class="t">orders-queue 超时调整</span><span class="i xs i-down"></span></button>
+    <span class="mode write">可提议变更</span>
+    <button class="ib"><span class="i i-plus"></span></button>
+    <button class="ib"><span class="i i-more"></span></button>
+    <button class="ib"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="thread bottom">
+    <div class="turn">
+      <div class="act"><button class="act-row"><span class="i sm i-check st-ok"></span><span class="lbl"><b>2 步</b> · 读取队列属性、生成提案</span><span class="dur">1.3 秒</span><span class="i xs i-right"></span></button></div>
+      <div class="md"><p>已生成提案，请在下面核对后确认。这个操作没有专用适配器，所以走通用请求。</p></div>
+
+      <section class="prop high" id="proposal-p-3f9a01c2d4e5" role="group" aria-label="变更提案：修改 SQS 队列 orders-queue 的 2 个属性">
+        <div class="prop-sec">
+          <div class="prop-hd">
+            <span class="pill danger">高风险</span>
+            <span class="pill line">通用请求</span>
+            <span class="cd"><span class="i xs i-clock"></span>8:42</span>
+          </div>
+          <div class="prop-title">修改 SQS 队列 orders-queue 的 2 个属性</div>
+          <div class="scope"><span class="dot" style="background:#2e9d5b"></span>演示-测试<span class="sep">·</span><span class="num">111111111111</span><span class="sep">·</span>ap-northeast-1</div>
+        </div>
+
+        <div class="prop-sec">
+          <div class="sec-h"><span class="i xs i-lock"></span><b>将发送的请求</b><span class="sp"></span><span class="op" style="font-size:11px;font-weight:500">sqs:SetQueueAttributes</span></div>
+          <dl class="kvs stack">
+            <dt>QueueUrl</dt><dd class="mono">https://sqs.ap-northeast-1.amazonaws.com/111111111111/orders-queue</dd>
+            <dt>Attributes › VisibilityTimeout</dt><dd><b>300</b></dd>
+            <dt>Attributes › MessageRetentionPeriod</dt><dd><b>1209600</b></dd>
+          </dl>
+          <div class="note"><span class="i xs i-info"></span><span>没有专用适配器：应用无法预知影响，没有变更前快照，不做漂移检查。</span></div>
+          <button class="det"><span class="i xs i-right"></span>原始 JSON（实际发送的内容）</button>
+        </div>
+
+        <div class="prop-sec" style="background:var(--bg-sunken)">
+          <div class="sec-h"><b>AI 影响分析</b>可能有误，请核对<span class="sp"></span><span>可信度 中 · 查询 3 次</span></div>
+          <p>队列的消费者是 Lambda <b>order-worker</b>（超时 60 秒）。可见性超时改为 300 秒后，处理失败的消息要等 5 分钟才会重新投递；保留期变长只影响积压消息留存多久。</p>
+          <div class="facts3">
+            <div><div class="k">影响对象</div><div class="v">已知：order-worker</div></div>
+            <div><div class="k">可撤销性</div><div class="v">可撤销</div></div>
+            <div><div class="k">建议风险</div><div class="v">高（未提高）</div></div>
+          </div>
+          <table class="chg">
+            <thead><tr><th>会改变什么</th><th>当前</th><th></th><th>执行后</th></tr></thead>
+            <tbody>
+              <tr><th>可见性超时</th><td class="before">30 秒</td><td class="arrow">→</td><td class="after">300 秒</td></tr>
+              <tr><th>消息保留期</th><td class="before">4 天</td><td class="arrow">→</td><td class="after">14 天</td></tr>
+            </tbody>
+          </table>
+          <div class="dets">
+            <button class="det"><span class="i xs i-right"></span>事实 <span class="c">3 条，含依据</span></button>
+            <button class="det"><span class="i xs i-right"></span>推断 <span class="c">1 条</span></button>
+            <button class="det"><span class="i xs i-right"></span>不确定的地方 <span class="c">2 处</span></button>
+          </div>
+        </div>
+
+        <div class="prop-sec">
+          <dl class="kvs">
+            <dt>预检</dt><dd><span class="st-ok">权限预检通过</span>（IAM 策略模拟）</dd>
+            <dt>助手的理由</dt><dd>按你的要求调整超时和保留期</dd>
+          </dl>
+          <button class="det"><span class="i xs i-right"></span>提案 ID 与参数校验</button>
+        </div>
+
+        <div class="prop-act">
+          <button class="btn danger">确认执行…</button>
+          <button class="btn">取消</button>
+          <span class="sp"></span>
+          <span class="hint">下一步要输入确认文字</span>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <footer class="comp">
+    <div class="box">
+      <div class="ta"><span class="ph">问点什么… 输入 / 用命令，@ 添加上下文</span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <button class="send off"><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

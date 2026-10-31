@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>10 错误与重试</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel">
+  <header class="hdr">
+    <button class="conv-btn"><span class="t">本月成本</span><span class="i xs i-down"></span></button>
+    <span class="mode">只读</span>
+    <button class="ib"><span class="i i-plus"></span></button><button class="ib"><span class="i i-more"></span></button><button class="ib"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="thread bottom">
+    <div class="u"><div class="bubble">列出所有 Lambda 函数</div></div>
+    <div class="turn">
+      <div class="md"><p>这个账号在 ap-northeast-1 有 12 个函数，按运行时分……</p></div>
+      <div class="msg-actions">
+        <span class="stopped"><span class="i sm i-stop"></span>已停止</span>
+        <span class="sep"></span>
+        <button class="tbtn"><span class="i xs i-retry"></span>重新生成</button>
+      </div>
+    </div>
+
+    <div class="u">
+      <div class="bubble">本月成本前五的服务是哪些？</div>
+      <div class="hover-actions"><button class="ib sm" title="编辑并重发"><span class="i sm i-edit"></span></button><button class="ib sm" title="复制"><span class="i sm i-copy"></span></button></div>
+    </div>
+    <div class="turn">
+      <div class="act"><button class="act-row"><span class="i sm i-check st-ok"></span><span class="lbl"><b>1 步</b> · 查询成本</span><span class="dur">1.8 秒</span><span class="i xs i-right"></span></button></div>
+      <div class="err" role="alert">
+        <div class="err-hd"><span class="i i-alert"></span><div><b>回答没有完成。</b>Bedrock 限流（429）：请求太频繁，稍后再试。</div></div>
+        <div class="detail">ThrottlingException: Too many requests, please wait before trying again.</div>
+        <div class="acts">
+          <button class="btn sm primary"><span class="i xs i-retry"></span>重试</button>
+          <button class="btn sm">换个模型重试</button>
+          <button class="btn sm ghost"><span class="i xs i-copy"></span>复制错误</button>
+        </div>
+        <div class="note"><span class="i xs i-info"></span><span>已完成的查询会保留；重试不会再调用 Cost Explorer（每次约 $0.01）。</span></div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="comp">
+    <div class="comp-status bad">
+      <span class="i sm i-alert"></span>
+      <span class="t">没有发送：「演示-测试」的凭证已过期。你的输入还在。</span>
+      <button class="btn sm">重新登录</button>
+    </div>
+    <div class="box focus">
+      <div class="ta">那上个月呢？按服务对比一下<span class="cur"></span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <button class="send"><span class="i sm i-send"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

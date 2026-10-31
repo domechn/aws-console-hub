@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>04 展开的 Activity：步骤、脚本调用与代码（回答正在生成）</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel" aria-label="AI 助手">
+  <header class="hdr">
+    <button class="conv-btn"><span class="running" title="正在运行"></span><span class="t">S3 桶 owner 标签检查</span><span class="i xs i-down"></span></button>
+    <span class="mode">只读</span>
+    <button class="ib"><span class="i i-plus"></span></button>
+    <button class="ib"><span class="i i-more"></span></button>
+    <button class="ib"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="thread bottom">
+    <div class="u">
+      <div class="bubble">哪些 S3 桶没有打 owner 标签？顺便看下它们有多大</div>
+    </div>
+
+    <div class="turn">
+      <div class="act">
+        <button class="act-row" aria-expanded="true">
+          <span class="i sm i-check st-ok"></span>
+          <span class="lbl"><b>4 步</b> · <span class="st-fail">1 步失败</span></span>
+          <span class="dur">12.6 秒</span>
+          <span class="i xs i-down"></span>
+        </button>
+        <ol class="steps">
+          <li><button class="step-row"><span class="i xs i-check st-ok"></span><span class="lbl">查询账号身份 <span class="sum">· 演示-测试</span></span><span class="dur">0.4 秒</span></button></li>
+          <li><button class="step-row"><span class="i xs i-check st-ok"></span><span class="lbl">列出 S3 存储桶 <span class="sum">· 14 个</span></span><span class="dur">0.9 秒</span></button></li>
+          <li>
+            <button class="step-row" aria-expanded="true"><span class="i xs i-check st-ok"></span><span class="lbl">运行脚本 <span class="sum">· 28 次调用</span></span><span class="dur">9.8 秒</span><span class="i xs i-down chev"></span></button>
+            <div class="step-detail">
+              <div class="calls">
+                <span class="call">s3:GetBucketTagging <span class="n">×14</span></span>
+                <span class="call">cloudwatch:GetMetricData <span class="n">×14</span></span>
+              </div>
+              <div class="code">
+                <div class="code-hd"><span class="i xs i-code"></span>脚本 · 只读 · 12 行<span class="sp"></span><button class="tbtn"><span class="i xs i-copy"></span>复制</button></div>
+<pre><span class="l"><span class="tok-k">const</span> buckets = (<span class="tok-k">await</span> aws(<span class="tok-s">'s3'</span>, <span class="tok-s">'ListBuckets'</span>)).Buckets</span><span class="l"><span class="tok-k">const</span> rows = <span class="tok-k">await</span> parallel(buckets.map((b) =&gt; <span class="tok-k">async</span> () =&gt; {</span><span class="l">  <span class="tok-k">const</span> tags = <span class="tok-k">await</span> aws(<span class="tok-s">'s3'</span>, <span class="tok-s">'GetBucketTagging'</span>, { Bucket: b.Name })</span><span class="l">    .then((r) =&gt; r.TagSet, () =&gt; [])</span><span class="l">  <span class="tok-k">if</span> (tags.some((t) =&gt; t.Key === <span class="tok-s">'owner'</span>)) <span class="tok-k">return</span> <span class="tok-k">null</span></span><span class="l">  <span class="tok-k">const</span> m = <span class="tok-k">await</span> aws(<span class="tok-s">'cloudwatch'</span>, <span class="tok-s">'GetMetricData'</span>, sizeQuery(b.Name))</span><span class="l">  <span class="tok-k">return</span> { name: b.Name, bytes: m.MetricDataResults[0]?.Values[0] ?? 0 }</span><span class="l">}))</span><span class="l"><span class="tok-c">// 只保留没有 owner 标签的桶，按大小排序</span></span><span class="l"><span class="tok-k">return</span> rows.filter(Boolean).sort((a, b) =&gt; b.bytes - a.bytes)</span></pre>
+              </div>
+            </div>
+          </li>
+          <li><button class="step-row"><span class="i xs i-fail st-fail"></span><span class="lbl">读取桶策略 <span class="sum">· AccessDenied（logs-archive）</span></span><span class="dur">0.3 秒</span><span class="i xs i-right chev"></span></button></li>
+        </ol>
+      </div>
+
+      <div class="md">
+        <p>14 个桶里有 <strong>3 个</strong>没有 <code>owner</code> 标签：</p>
+        <ul>
+          <li><code>logs-archive-111111111111</code> · 1.8 TB</li>
+          <li><code>tmp-exports</code> · 42 GB</li>
+          <li><code>web-assets-staging</code><span class="caret"></span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <footer class="comp">
+    <div class="box">
+      <div class="chips">
+        <span class="chip"><span class="i xs i-page"></span><span class="t">S3 · 存储桶列表</span><button class="x"><span class="i xs i-x"></span></button></span>
+      </div>
+      <div class="ta"><span class="ph">生成中… 可以先写下一个问题</span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <span class="hint" style="margin-right:6px"><kbd>Esc</kbd>停止</span>
+        <button class="send stop" aria-label="停止生成"><span class="i sm i-stop"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>05 行内审批：键盘提示</title>
+<link rel="stylesheet" href="mock.css" />
+</head>
+<body>
+<aside class="panel" aria-label="AI 助手">
+  <header class="hdr">
+    <button class="conv-btn"><span class="running"></span><span class="t">SSM Agent 在线检查</span><span class="i xs i-down"></span></button>
+    <span class="mode">只读</span>
+    <button class="ib"><span class="i i-plus"></span></button>
+    <button class="ib"><span class="i i-more"></span></button>
+    <button class="ib"><span class="i i-x"></span></button>
+  </header>
+
+  <div class="thread bottom">
+    <div class="u">
+      <div class="bubble">用 SSM 看看 web-1、web-2 的 Agent 在不在线</div>
+    </div>
+
+    <div class="turn">
+      <div class="act">
+        <button class="act-row">
+          <span class="i sm i-pause st-wait"></span>
+          <span class="lbl"><b>2 步</b> · 等待你审批第 2 步</span>
+          <span class="dur">0.6 秒</span>
+          <span class="i xs i-right"></span>
+        </button>
+      </div>
+
+      <div class="appr focused" role="group" tabindex="-1" aria-label="需要你的审批：ssm:DescribeInstanceInformation">
+        <div class="appr-hd">
+          <span class="i i-shield"></span>
+          <span class="t">需要你的审批</span>
+          <span class="pill line">只读调用</span>
+          <span class="cd" title="5 分钟内不处理视为拒绝">4:53 后自动拒绝</span>
+        </div>
+        <div class="op">ssm:DescribeInstanceInformation</div>
+        <div class="scope"><span class="dot" style="background:#2e9d5b"></span>演示-测试<span class="sep">·</span><span class="num">111111111111</span><span class="sep">·</span>ap-northeast-1</div>
+        <dl class="kvs">
+          <dt>为什么问你</dt><dd>ssm 不在默认自动允许的服务里</dd>
+          <dt>助手的理由</dt><dd>确认这两台实例的 SSM Agent 是否在线</dd>
+        </dl>
+        <pre class="params" tabindex="0" aria-label="将发送的参数">{
+  "Filters": [
+    {
+      "Key": "InstanceIds",
+      "Values": [
+        "i-0a41c7d953",
+        "i-0f92ab4e07"
+      ]
+    }
+  ]
+}</pre>
+        <div class="exact">执行的就是上面这些参数，助手改不了。</div>
+        <div class="appr-act">
+          <button class="btn">允许一次 <kbd>↵</kbd></button>
+          <button class="btn">拒绝 <kbd>Esc</kbd></button>
+        </div>
+        <button class="check"><span class="box"></span><span>本对话中始终允许此操作（此账号 · 此区域，参数可以不同）</span></button>
+        <button class="disc"><span class="i i-right"></span>请求 ID 与参数校验</button>
+      </div>
+      <div class="hint">焦点在审批卡上：<kbd>↵</kbd> 允许一次 · <kbd>Esc</kbd> 拒绝 · <kbd>Tab</kbd> 逐项查看</div>
+    </div>
+  </div>
+
+  <footer class="comp">
+    <div class="comp-status">
+      <span class="i sm i-pause"></span>
+      <span class="t">回答已暂停，等你处理上面的审批</span>
+    </div>
+    <div class="box">
+      <div class="ta"><span class="ph">等待审批… 可以先写下一个问题</span></div>
+      <div class="tools">
+        <button class="ib sm"><span class="i sm i-at"></span></button>
+        <button class="ib sm"><span class="i sm i-slash"></span></button>
+        <button class="model"><span class="t">Bedrock · Claude Sonnet 5.5</span><span class="i xs i-down"></span></button>
+        <span class="sp"></span>
+        <button class="send stop" aria-label="停止"><span class="i sm i-stop"></span></button>
+      </div>
+    </div>
+  </footer>
+</aside>
+</body>
+</html>
