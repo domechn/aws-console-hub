@@ -22,6 +22,8 @@ const STATE_NOTE: Record<Exclude<CardState, 'active'>, string> = {
 }
 
 interface Props {
+  disabled?: boolean
+  pendingProposal?: boolean
   card: Card
   /** reply / open-console, through main. */
   onAction: (actionId: string, rowId?: string, values?: FormValues) => Promise<CardActionResult>
@@ -32,7 +34,9 @@ interface Props {
 
 /** What the blocks need from the card. */
 interface Ctx {
+  pendingProposal: boolean
   live: boolean
+  blocked: boolean
   system: boolean
   actions: Map<string, CardAction>
   run: (a: CardAction, rowId?: string, values?: FormValues) => void
@@ -43,7 +47,7 @@ interface Ctx {
 
 export function CardSkeleton(): React.JSX.Element {
   return (
-    <div className="ai-card skeleton" role="status" aria-label="正在生成卡片">
+    <div className="ai-card skeleton" aria-label="正在生成卡片">
       <div className="ai-sk w40" />
       <div className="ai-sk" />
       <div className="ai-sk w70" />
@@ -51,7 +55,7 @@ export function CardSkeleton(): React.JSX.Element {
   )
 }
 
-export function CardView({ card, onAction, onLink, accountColor }: Props): React.JSX.Element {
+export function CardView({ card, disabled, pendingProposal = false, onAction, onLink, accountColor }: Props): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
@@ -71,6 +75,7 @@ export function CardView({ card, onAction, onLink, accountColor }: Props): React
     )
   }
   const run = (a: CardAction, rowId?: string, values?: FormValues): void => {
+    if (disabled) return
     if (a.kind === 'copy') return copy(fillRow(a.text ?? '', rowId, false), `${a.id}:${rowId ?? ''}`)
     setBusy(true)
     setError(null)
@@ -79,7 +84,7 @@ export function CardView({ card, onAction, onLink, accountColor }: Props): React
       .finally(() => setBusy(false))
   }
   const system = card.origin === 'system'
-  const ctx: Ctx = { live: state === 'active' && !busy, system, actions: new Map(actions.map((a) => [a.id, a])), run, copy, copied, onLink }
+  const ctx: Ctx = { live: state === 'active' && !busy && !disabled, blocked: Boolean(disabled), pendingProposal, system, actions: new Map(actions.map((a) => [a.id, a])), run, copy, copied, onLink }
 
   return (
     <section
@@ -126,7 +131,7 @@ function ActionButton({ action: a, rowId, ctx }: { action: CardAction; rowId?: s
       type="button"
       className={`ai-card-btn ${a.style ?? 'default'}`}
       // Copying changes nothing, so it works on a handled card too.
-      disabled={a.kind !== 'copy' && !ctx.live}
+      disabled={ctx.blocked || (a.kind !== 'copy' && !ctx.live)}
       aria-label={rowId ? `${a.label}：${rowId}` : undefined}
       title={a.kind === 'open-console' ? '在 Console 中打开' : undefined}
       onClick={() => ctx.run(a, rowId)}
@@ -240,7 +245,7 @@ function BlockView({ block: b, ctx }: { block: Block; ctx: Ctx }): React.JSX.Ele
     case 'change':
       return <ChangeView block={b} />
     case 'analysis':
-      return <AnalysisView block={b} />
+      return <AnalysisView block={b} pendingProposal={ctx.pendingProposal} />
     case 'diff':
       // Card v1 (stored history): the older line-by-line view.
       return (
@@ -413,6 +418,7 @@ function ChangeView({ block: b }: { block: ChangeBlock }): React.JSX.Element {
         </div>
       )}
       {b.raw !== undefined && (
+        // For generic requests this can be the only complete request. Keep it visible at every confirmation step.
         <details className="ai-change-raw" open>
           <summary>原始 JSON（实际发送的内容）</summary>
           <pre className="ai-request-params" tabIndex={0} aria-label="请求参数">
@@ -431,10 +437,10 @@ const REVERSIBILITY: Record<string, string> = { reversible: '可撤销', partly:
 const CONFIDENCE: Record<string, string> = { low: '低', medium: '中', high: '高' }
 
 /** The AI impact analysis (analysis.ts): advisory and labelled so; facts with their evidence, inferences as such. Plain text. */
-function AnalysisView({ block: b }: { block: AnalysisBlock }): React.JSX.Element {
+function AnalysisView({ block: b, pendingProposal }: { block: AnalysisBlock; pendingProposal: boolean }): React.JSX.Element {
   if (b.status === 'running') {
     return (
-      <div className="ai-analysis running" role="status" aria-live="polite">
+      <div className="ai-analysis running">
         <span>正在分析影响…（用到的查询：{b.calls}）</span>
         <div className="ai-sk w70" />
         <div className="ai-sk w40" />
@@ -464,6 +470,11 @@ function AnalysisView({ block: b }: { block: AnalysisBlock }): React.JSX.Element
           风险已由「{RISK[b.raised.from]}」提高到「{RISK[b.raised.to]}」：{r.risk.reasons.join('；') || '分析建议'}
         </div>
       )}
+      <dl className="ai-kv ai-analysis-metrics">
+        <div className="ai-kv-row"><dt>影响对象</dt><dd>{EXPOSURE[r.exposure.level]}{r.exposure.who.length > 0 && `：${r.exposure.who.join('、')}`}</dd></div>
+        <div className="ai-kv-row"><dt>可撤销性</dt><dd>{REVERSIBILITY[r.reversibility.level]}{r.reversibility.how && `：${r.reversibility.how}`}</dd></div>
+        <div className="ai-kv-row"><dt>建议风险</dt><dd>{RISK[r.risk.level]}{!b.raised && r.risk.reasons.length > 0 && `：${r.risk.reasons.join('；')}`}<div className="ai-dim small">分析只会提高提案的风险，不会降低</div></dd></div>
+      </dl>
       {r.changes.length > 0 && (
         <div className="ai-table-scroll">
           <table className="ai-table ai-change-table">
@@ -509,47 +520,26 @@ function AnalysisView({ block: b }: { block: AnalysisBlock }): React.JSX.Element
         </details>
       )}
       {inferences.length > 0 && (
-        <ul className="ai-analysis-inferences" aria-label="推断">
+        <details className="ai-analysis-inferences" open={pendingProposal}>
+          <summary>推断（{inferences.length} 条）</summary>
+          <ul>
           {inferences.map((f, i) => (
             <li key={i}>
               <span className="ai-tone warn">推断</span> {f.text}
             </li>
           ))}
-        </ul>
+          </ul>
+        </details>
       )}
-      <dl className="ai-kv">
-        <div className="ai-kv-row">
-          <dt>影响对象</dt>
-          <dd>
-            {EXPOSURE[r.exposure.level]}
-            {r.exposure.who.length > 0 && `：${r.exposure.who.join('、')}`}
-          </dd>
-        </div>
-        <div className="ai-kv-row">
-          <dt>可撤销性</dt>
-          <dd>
-            {REVERSIBILITY[r.reversibility.level]}
-            {r.reversibility.how && `：${r.reversibility.how}`}
-          </dd>
-        </div>
-        <div className="ai-kv-row">
-          <dt>建议风险</dt>
-          <dd>
-            {RISK[r.risk.level]}
-            {!b.raised && r.risk.reasons.length > 0 && `：${r.risk.reasons.join('；')}`}
-            <div className="ai-dim small">分析只会提高提案的风险，不会降低</div>
-          </dd>
-        </div>
-      </dl>
       {r.uncertainties.length > 0 && (
-        <div className="ai-analysis-uncertain">
-          <span className="ai-dim">不确定的地方：</span>
+        <details className="ai-analysis-uncertain" open={pendingProposal}>
+          <summary>不确定的地方（{r.uncertainties.length} 处）</summary>
           <ul>
             {r.uncertainties.map((u, i) => (
               <li key={i}>{u}</li>
             ))}
           </ul>
-        </div>
+        </details>
       )}
     </section>
   )

@@ -21,14 +21,16 @@ const RISK: Record<string, string> = { low: '低风险', medium: '中风险', hi
 const ARM_MS = 1000
 
 interface Props {
+  disabled?: boolean
   proposal: ProposalView
+  older?: boolean
   accountColor?: string
   onConfirm: (typed?: string) => Promise<CardActionResult>
   onCancel: () => Promise<CardActionResult>
   onLink: (url: string) => void
 }
 
-export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, onLink }: Props): React.JSX.Element {
+export function ProposalCard({ proposal: p, disabled, older = false, accountColor, onConfirm, onCancel, onLink }: Props): React.JSX.Element {
   const [now, setNow] = useState(() => Date.now())
   const [step, setStep] = useState<'review' | 'final'>('review')
   const [armed, setArmed] = useState(false)
@@ -70,14 +72,20 @@ export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, o
       .finally(() => setBusy(false))
   }
   const confirm = (): void => {
-    if (live && armed && typedOk && !busy && !analyzing) run(() => onConfirm(p.confirmText ? typed.trim() : undefined))
+    if (live && armed && typedOk && !busy && !disabled && !analyzing) run(() => onConfirm(p.confirmText ? typed.trim() : undefined))
   }
 
   const danger = p.risk === 'high' || p.risk === 'destructive'
   // The card's own state stays active: this component says what state the proposal is in.
-  const card = { ...p.card, state: 'active' as const, expiresAt: Number.MAX_SAFE_INTEGER }
+  const ids = p.card.blocks.flatMap((b) => b.type === 'kv' ? b.items.filter((i) => i.label === '提案') : [])
+  const card = {
+    ...p.card,
+    state: 'active' as const,
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    blocks: p.card.blocks.map((b) => b.type === 'kv' ? { ...b, items: b.items.filter((i) => i.label !== '提案') } : b)
+  }
 
-  return (
+  const content = (
     <div
       className={`ai-proposal ${state} risk-${p.risk}${p.tier === 'C' ? ' strong' : ''}`}
       id={`proposal-${p.id}`}
@@ -86,18 +94,13 @@ export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, o
       aria-label={`${p.tier === 'C' ? '强确认' : '变更提案'}：${p.title}`}
     >
       <div className="ai-proposal-chips">
+        <span className="ai-chip" aria-label="由应用生成">🔒 由应用生成</span>
         <span className={`ai-tone ${danger ? 'danger' : p.risk === 'medium' ? 'warn' : 'ok'}`} title={raised ? `AI 影响分析把风险从「${RISK[raised.from]}」提高到了「${RISK[raised.to]}」，原因见卡片` : undefined}>
           {RISK[p.risk]}
           {raised && ' ↑'}
         </span>
         <span className="ai-chip">会修改资源</span>
         {p.generic && <span className="ai-chip">通用请求</span>}
-        <span className="ai-chip" title={`账号 ${p.awsAccountId}`}>
-          <span className="dot" style={{ background: accountColor }} />
-          {p.accountName} · {p.awsAccountId}
-        </span>
-        <span className="ai-chip">{p.region}</span>
-        {p.production && <span className="ai-chip prod">生产</span>}
         <span className="ai-spacer" />
         {live ? (
           <span className="ai-countdown" title="提案 10 分钟内有效" aria-label={`剩余 ${formatCountdown(p.expiresAt - now)}`}>
@@ -106,6 +109,15 @@ export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, o
         ) : (
           <span className={`ai-proposal-state ${state}`}>{STATE_NOTE[state as Exclude<ProposalState, 'pending'>]}</span>
         )}
+      </div>
+      <strong className="ai-proposal-title">{p.title}</strong>
+      <div className="ai-proposal-scope">
+        <span className="ai-chip" title={`账号 ${p.awsAccountId}`}>
+          <span className="dot" style={{ background: accountColor }} />
+          {p.accountName} · {p.awsAccountId}
+        </span>
+        <span className="ai-chip">{p.region}</span>
+        {p.production && <span className="ai-chip prod">生产</span>}
       </div>
 
       {/* Only what the app knows: the categories by name, no predicted effects (those come from the AI analysis, labelled). */}
@@ -126,7 +138,8 @@ export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, o
         </div>
       )}
 
-      <CardView card={card} accountColor={accountColor} onLink={onLink} onAction={async () => ({ ok: false, error: '' })} />
+      <CardView card={card} pendingProposal={live} accountColor={accountColor} onLink={onLink} onAction={async () => ({ ok: false, error: '' })} />
+      {ids.length > 0 && <details className="ai-proposal-ids"><summary>提案 ID 与参数校验</summary>{ids.map((i, n) => <div key={n}>{i.value}</div>)}</details>}
 
       {p.outcome && !live && <div className="ai-proposal-outcome">{p.outcome}</div>}
 
@@ -142,13 +155,13 @@ export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, o
           <button
             type="button"
             className={`ai-card-btn ${danger ? 'danger' : 'primary'}`}
-            disabled={busy || analyzing}
+            disabled={busy || disabled || analyzing}
             title={analyzing ? '影响分析完成后才能确认' : undefined}
             onClick={() => setStep('final')}
           >
             确认执行…
           </button>
-          <button type="button" className="ai-card-btn" disabled={busy} onClick={() => run(onCancel)}>
+          <button type="button" className="ai-card-btn" disabled={busy || disabled} onClick={() => run(onCancel)}>
             取消
           </button>
         </div>
@@ -192,13 +205,13 @@ export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, o
             </label>
           )}
           <div className="ai-proposal-actions">
-            <button type="button" className={`ai-card-btn ${danger ? 'danger' : 'primary'}`} disabled={!armed || !typedOk || busy || analyzing} onClick={confirm}>
+            <button type="button" className={`ai-card-btn ${danger ? 'danger' : 'primary'}`} disabled={!armed || !typedOk || busy || disabled || analyzing} onClick={confirm}>
               {busy ? '正在执行…' : '我确认，立即执行'}
             </button>
-            <button ref={backRef} type="button" className="ai-card-btn" disabled={busy} onClick={() => setStep('review')}>
+            <button ref={backRef} type="button" className="ai-card-btn" disabled={busy || disabled} onClick={() => setStep('review')}>
               返回
             </button>
-            <button type="button" className="ai-card-btn" disabled={busy} onClick={() => run(onCancel)}>
+            <button type="button" className="ai-card-btn" disabled={busy || disabled} onClick={() => run(onCancel)}>
               取消提案
             </button>
           </div>
@@ -212,4 +225,8 @@ export function ProposalCard({ proposal: p, accountColor, onConfirm, onCancel, o
       )}
     </div>
   )
+  if (older && state !== 'pending' && state !== 'executing') {
+    return <details className="ai-old-card"><summary>🔒 由应用生成 · {state === 'succeeded' ? '✓' : state === 'failed' ? '✗' : '■'} 上一个提案：{p.title} · {STATE_NOTE[state]}</summary>{content}</details>
+  }
+  return content
 }

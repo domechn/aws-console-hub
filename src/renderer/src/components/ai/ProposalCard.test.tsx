@@ -34,6 +34,28 @@ const render = (p: ProposalView): string =>
   renderToStaticMarkup(<ProposalCard proposal={p} accountColor="#123456" onLink={() => {}} onConfirm={async () => ({ ok: true })} onCancel={async () => ({ ok: true })} />)
 
 describe('ProposalCard', () => {
+  it('keeps pending parameters, risk and outcome visible and collapses only settled cards after a later turn', () => {
+    const pending = render(view({ card: { ...view().card, blocks: [
+      { type: 'request', action: 'ec2:TerminateInstances', region: 'ap-northeast-1', params: '{"InstanceIds":["i-0abc"]}' },
+      { type: 'risk', level: 'destructive', reasons: ['无法撤销'] }
+    ] } }))
+    expect(pending).toContain('{&quot;InstanceIds&quot;')
+    expect(pending).toContain('无法撤销')
+    expect(pending).not.toContain('ai-old-card')
+    const settled = renderToStaticMarkup(<ProposalCard proposal={view({ state: 'succeeded', outcome: '完成' })} older accountColor="#123456" onLink={() => {}} onConfirm={async () => ({ ok: true })} onCancel={async () => ({ ok: true })} />)
+    expect(settled).toContain('ai-old-card')
+    expect(settled).toContain('已执行')
+    expect(settled).toContain('<details')
+  })
+  it('shows preflight and consequences in the first step while proposal identifiers start closed', () => {
+    const html = render(view({ card: { ...view().card, blocks: [
+      { type: 'consequences', items: [{ kind: 'downtime', text: '服务会中断' }] },
+      { type: 'kv', items: [{ label: '预检', value: '权限预检通过' }, { label: '提案', value: 'p-abc · sha256:xyz' }] }
+    ] } }))
+    expect(html).toContain('服务会中断')
+    expect(html).toContain('权限预检通过')
+    expect(html).toContain('<details class="ai-proposal-ids"><summary>提案 ID 与参数校验</summary>')
+  })
   it('shows risk, account, region, production, the system card and the first step only', () => {
     const html = render(view())
     expect(html).toContain('破坏性')
@@ -43,6 +65,7 @@ describe('ProposalCard', () => {
     expect(html).toContain('生产')
     expect(html).toContain('ai-card active system')
     expect(html).toContain('🔒')
+    expect(html).toContain('aria-label="由应用生成"')
     expect(html).toContain('&lt;b&gt;终止&lt;/b&gt;')
     expect(html).toContain('确认执行…')
     expect(html).toContain('取消')
@@ -66,6 +89,9 @@ describe('ProposalCard', () => {
     }
     expect(render(view({ expiresAt: Date.now() - 1 }))).toContain('已过期，请让助手重新生成')
     expect(render(view({ expiresAt: Date.now() - 1 }))).not.toContain('确认执行…')
+    const failedOlder = renderToStaticMarkup(<ProposalCard proposal={view({ state: 'failed' })} older onConfirm={async () => ({ ok: true })} onCancel={async () => ({ ok: true })} onLink={() => {}} />)
+    expect(failedOlder).toContain('🔒 由应用生成 · ✗ 上一个提案')
+    expect(failedOlder).toContain('由应用生成')
   })
 
   it('while the impact analysis runs the first step is disabled; once it ends (done or failed) it is enabled; a raised risk is marked', () => {

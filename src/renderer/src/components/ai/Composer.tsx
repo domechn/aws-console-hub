@@ -1,7 +1,8 @@
-import { useId, useLayoutEffect, useRef } from 'react'
+import { useId, useLayoutEffect, useRef, useState } from 'react'
 import { AI_PROVIDERS, BEDROCK_PROVIDER_ID, CUSTOM_PROVIDER_ID, type AiConfigView, type AiModelInfo, type MonthUsage, type UsageTotals } from '../../../../shared/ai'
 import { formatCost, formatMonth, formatUsage } from '../../ai'
 import { IconArrowUp, IconCheck, IconChevronDown, IconStop } from '../icons'
+import { localCommand, menuSelection, type LocalCommand } from './commands'
 
 export type ComposerAction = 'send' | 'stop' | 'close' | 'history-up' | 'history-down' | null
 
@@ -90,9 +91,11 @@ interface Props {
   value: string
   onChange: (text: string) => void
   onSend: () => void
+  onCommand?: (command: LocalCommand) => void
   onStop: () => void
   onClose: () => void
   busy: boolean
+  pausedOnApproval?: boolean
   /** The conversation's own messages, oldest first: what ↑ walks back through. */
   history: string[]
   inputRef: React.RefObject<HTMLTextAreaElement | null>
@@ -108,8 +111,10 @@ interface Props {
 }
 
 /** The input box (plan ai-ux-redesign §3.7): grows 1–8 lines, one send / stop button, model and cost in its toolbar. */
-export function Composer({ scope, value, onChange, onSend, onStop, onClose, busy, history, inputRef, chip, config, models, onModel, onOpenSettings, usage, month }: Props): React.JSX.Element {
+export function Composer({ scope, value, onChange, onSend, onCommand, onStop, onClose, busy, pausedOnApproval = false, history, inputRef, chip, config, models, onModel, onOpenSettings, usage, month }: Props): React.JSX.Element {
   const at = useRef<Recall | null>(null)
+  const [commandIndex, setCommandIndex] = useState(-1)
+  const [closedCommand, setClosedCommand] = useState<string | null>(null)
   const previousScope = useRef(scope)
   useLayoutEffect(() => {
     at.current = recallForScope(scope, previousScope.current, at.current)
@@ -118,7 +123,17 @@ export function Composer({ scope, value, onChange, onSend, onStop, onClose, busy
   const id = useId()
   const modelPop = `${id}-model`
   const costPop = `${id}-cost`
+  const commandListId = `${id}-commands`
   const label = modelLabel(config, models)
+  const choices = ([
+    { text: '/新对话', label: '新对话' },
+    { text: '/只读', label: '切换为只读' },
+    { text: '/清空', label: '清空本账号全部对话' }
+  ] as const).filter((c) => value !== closedCommand && value.startsWith('/') && c.text.startsWith(value.trim()))
+  const choose = (text: string): void => {
+    const command = localCommand(text)
+    if (command) onCommand?.(command)
+  }
   const monthLine = month && hasUsage(month.totals) ? formatMonth(month) : null
   // A click on any button inside closes the popover it is in.
   const closeOnPick = (e: React.MouseEvent<HTMLDivElement>): void => {
@@ -126,6 +141,24 @@ export function Composer({ scope, value, onChange, onSend, onStop, onClose, busy
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (choices.length && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        setCommandIndex((n) => menuSelection(n, e.key as 'ArrowUp' | 'ArrowDown', choices.length))
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        setClosedCommand(value)
+        return
+      }
+      if (e.key === 'Enter' && !e.shiftKey && commandIndex >= 0) {
+        e.preventDefault()
+        choose(choices[Math.min(commandIndex, choices.length - 1)].text)
+        return
+      }
+    }
     const action = composerKey({ ...e, isComposing: e.nativeEvent.isComposing }, busy)
     if (action === 'send') {
       e.preventDefault()
@@ -146,6 +179,11 @@ export function Composer({ scope, value, onChange, onSend, onStop, onClose, busy
 
   return (
     <div className="ai-composer">
+      {choices.length > 0 && (
+        <div id={commandListId} className="ai-command-menu" role="listbox" aria-label="本地命令">
+          {choices.map((c, i) => <button id={`${commandListId}-${i}`} key={c.text} type="button" role="option" aria-selected={i === commandIndex} onMouseDown={(e) => e.preventDefault()} onClick={() => choose(c.text)}>{c.text} <span className="ai-dim">{c.label}</span></button>)}
+        </div>
+      )}
       {chip && <div className="ai-composer-chips">{chip}</div>}
       <textarea
         ref={inputRef}
@@ -153,8 +191,10 @@ export function Composer({ scope, value, onChange, onSend, onStop, onClose, busy
         rows={1}
         maxLength={8000}
         aria-label="给 AI 助手的消息"
+        aria-controls={choices.length ? commandListId : undefined}
+        aria-activedescendant={choices.length && commandIndex >= 0 ? `${commandListId}-${Math.min(commandIndex, choices.length - 1)}` : undefined}
         placeholder="问点什么…（↵ 发送，⇧↵ 换行，↑ 上一条）"
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => { setClosedCommand(null); setCommandIndex(-1); onChange(e.target.value) }}
         onKeyDown={onKeyDown}
       />
       <div className="ai-composer-tools">
@@ -207,8 +247,9 @@ export function Composer({ scope, value, onChange, onSend, onStop, onClose, busy
           </>
         )}
         {busy ? (
-          <button type="button" className="ai-send stop" aria-label="停止生成" title="停止生成（esc）" onClick={onStop}>
+          <button type="button" className={`ai-send stop${pausedOnApproval ? ' paused' : ''}`} aria-label={pausedOnApproval ? '停止回答（不会批准或拒绝审批）' : '停止生成'} title={pausedOnApproval ? '停止回答（不会批准或拒绝审批）' : '停止生成（esc）'} onClick={onStop}>
             <IconStop />
+            {pausedOnApproval && <span>停止回答</span>}
           </button>
         ) : (
           <button type="button" className="ai-send" aria-label="发送" title="发送（↵）" disabled={!value.trim()} onClick={onSend}>

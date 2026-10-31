@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   BEDROCK_PROVIDER_ID,
   CUSTOM_PROVIDER_ID,
@@ -21,8 +21,12 @@ import { ActivityGroup, groupTools, type NonToolItem } from './ActivityGroup'
 import { ApprovalCard } from './ApprovalCard'
 import { CardSkeleton, CardView } from './CardView'
 import { Composer, draftKey, draftStore, restoreFailedSend, scopedContent } from './Composer'
+import { ConversationPopover } from './ConversationPopover'
+import { canSendText, submitText, type LocalCommand } from './commands'
 import { EmptyState } from './EmptyState'
 import { Markdown } from './Markdown'
+import { editKey, fromUserIndex, isOlder, MessageActions, MessageFailure, panelEscapeStops, truncatesChanges, turnActionsAt } from './MessageActions'
+import { cardDisabledState, liveStatus, regenerationOrdinal, regenerationPreview } from './panelLogic'
 import { PageChip } from './PageChip'
 import { ProposalCard } from './ProposalCard'
 import { QuickReplies } from './QuickReplies'
@@ -36,6 +40,7 @@ interface Props {
   width: number
   onResize: (width: number, done: boolean) => void
   onOpenSettings: () => void
+  onOpenAudit: () => void
   /** The model chip saved a new model (ai:config-save); the app keeps the config. */
   onConfig: (config: AiConfigView) => void
   onClose: () => void
@@ -50,7 +55,7 @@ interface Props {
 const ai = window.api.ai
 
 /** Right-hand chat panel. A sibling of the console column, so the native console view narrows instead of covering it. */
-export function AssistantPanel({ account, config, width, onResize, onOpenSettings, onConfig, onClose, onSetAllowWrite, focusToken, pageKey }: Props): React.JSX.Element {
+export function AssistantPanel({ account, config, width, onResize, onOpenSettings, onOpenAudit, onConfig, onClose, onSetAllowWrite, focusToken, pageKey }: Props): React.JSX.Element {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [items, setItems] = useState<ChatItem[]>([])
@@ -66,7 +71,16 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const [models, setModels] = useState<AiModelInfo[]>([])
   // Chips the user started typing over (by their suggest_replies call id).
   const [dismissedReplies, setDismissedReplies] = useState<string | null>(null)
-  const [renaming, setRenaming] = useState<string | null>(null)
+  const [conversationsOpen, setConversationsOpen] = useState(false)
+  const [editTarget, setEditTarget] = useState<string | null>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const [editIndex, setEditIndex] = useState<number | null>(null)
+  const [editText, setEditText] = useState('')
+  const [regenerating, setRegenerating] = useState(false)
+  const regeneratingRef = useRef(false)
+  const [justExecuted, setJustExecuted] = useState(false)
   // What main would send as the current page (undefined until asked), and the conversation's toggle for it.
   const [page, setPage] = useState<PageContext | null | undefined>(undefined)
   const [pageOn, setPageOn] = useState(true)
@@ -74,6 +88,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const [allows, setAllows] = useState<SessionAllowView[]>([])
   const refreshAllows = useCallback(async (): Promise<void> => setAllows(await ai.sessionAllows()), [])
   const listRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLElement>(null)
+  const titleRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stickRef = useRef(true)
   const currentRef = useRef<string | null>(null)
@@ -82,12 +98,42 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const lastByAccount = useRef(new Map<string, string | null>())
 
   const accountId = account?.id ?? null
+  const closeConversations = (): void => {
+    setConversationsOpen(false)
+    setEditTarget(null)
+    requestAnimationFrame(() => titleRef.current?.focus())
+  }
   accountRef.current = accountId
   const scope = draftKey(accountId, conversationId)
   currentRef.current = scope
   const { items: visibleItems, input: visibleInput } = scopedContent(scope, viewScope, items, input)
   const ready = aiReady(config)
   const busy = conversationId !== null && running.has(conversationId)
+  const hasPendingDecision = visibleItems.some((item) =>
+    item.kind === 'approval' && item.approval.state === 'pending' || item.kind === 'proposal' && item.proposal.state === 'pending'
+  )
+  useEffect(() => {
+    if (!menuOpen) return
+    menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
+    const outside = (e: PointerEvent): void => {
+      if (!menuRef.current?.contains(e.target as Node) && !menuButtonRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', outside)
+    return () => document.removeEventListener('pointerdown', outside)
+  }, [menuOpen])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!panelRef.current?.contains(document.activeElement) || e.altKey || !e.shiftKey || !(window.api.platform === 'darwin' ? e.metaKey : e.ctrlKey)) return
+      if ((e.key.toLowerCase() === 'k' || e.code === 'KeyK') && !e.isComposing) {
+        e.preventDefault()
+        e.stopPropagation()
+        setConversationsOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
 
   const loadConversation = useCallback(async (accId: string, id: string | null) => {
     const target = draftKey(accId, id)
@@ -98,6 +144,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     setUsage(null)
     lastByAccount.current.set(accId, id)
     setNotice(null)
+    setJustExecuted(false)
+    setEditIndex(null)
     setInput(drafts.get(draftKey(accId, id)))
     if (!id) {
       setPageOn(true)
@@ -177,6 +225,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           }
           return
         }
+        if (event.type === 'proposal-state' && event.proposal.state === 'succeeded' && draftKey(acc, id) === currentRef.current) setJustExecuted(true)
         // Main starts turns too (a card button's reply), so any run event means the conversation is running.
         // Card and proposal state changes, result cards and an impact analysis's usage come outside runs (runId 0).
         if (runId !== 0 && event.type !== 'card-state' && event.type !== 'proposal-state' && event.type !== 'proposal-result' && event.type !== 'approval') {
@@ -186,8 +235,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
         if (event.type === 'usage') setMonth(event.month)
         if (draftKey(acc, id) !== currentRef.current) return
         if (event.type === 'usage') setUsage(event.usage)
-        else if (event.type === 'error') setNotice(event.message)
-        else setItems((prev) => applyEvent(prev, event))
+        else setItems((prev) => event.type === 'note' && regeneratingRef.current && prev.at(-1)?.kind === 'user'
+          ? [...prev.slice(0, -1), { kind: 'note', text: event.text }, prev.at(-1)!]
+          : applyEvent(prev, event))
       }),
     [accountId, refreshList]
   )
@@ -195,6 +245,12 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   useEffect(() => {
     if (focusToken) inputRef.current?.focus()
   }, [focusToken])
+
+  useEffect(() => {
+    if (!justExecuted) return
+    const timer = setTimeout(() => setJustExecuted(false), 5000)
+    return () => clearTimeout(timer)
+  }, [justExecuted])
 
   useEffect(() => {
     void refreshAllows()
@@ -271,8 +327,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   }
 
   const send = async (text: string): Promise<void> => {
-    if (!accountId || !text.trim() || busy) return
+    if (!accountId || !canSendText(text) || busy) return
     const sentScope = scope
+    setJustExecuted(false)
     setNotice(null)
     setDraft('')
     stickRef.current = true
@@ -307,6 +364,42 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     if (conversationId) void ai.abort(conversationId)
   }
 
+  const regenerate = async (index: number, text?: string): Promise<void> => {
+    if (!accountId || !conversationId || busy || regeneratingRef.current || hasPendingDecision) return
+    const selected = visibleItems[index]
+    const ordinal = regenerationOrdinal(selected)
+    if (ordinal === null || selected?.kind !== 'user') return
+    if (truncatesChanges(visibleItems, index) && !confirm('之后的回复将被删除；其中已执行的操作不会撤销。继续吗？')) return
+    const target = scope
+    const previous = visibleItems
+    regeneratingRef.current = true
+    setRegenerating(true)
+    setJustExecuted(false)
+    setNotice(null)
+    setItems(regenerationPreview(visibleItems, index, text ?? selected.text))
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const result = await Promise.race([
+        ai.regenerate(accountId, conversationId, ordinal, selected.text, text),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('重新生成超时，请刷新对话后重试')), 35_000) })
+      ]).finally(() => clearTimeout(timer))
+      setRunning((prev) => new Set(prev).add(result.conversationId))
+      if (currentRef.current !== target) return
+      setEditIndex(null)
+      if (result.warning) setNotice(result.warning)
+      stickRef.current = true
+    } catch (err) {
+      if (currentRef.current === target) { setItems(previous); setNotice(ipcError(err)) }
+    } finally {
+      regeneratingRef.current = false
+      setRegenerating(false)
+    }
+  }
+
+  const copy = (text: string): void => {
+    void navigator.clipboard.writeText(text).catch((err) => setNotice(ipcError(err)))
+  }
+
   // A suggestion goes into the input for the user to edit or send; it is never sent by itself.
   const fill = (text: string): void => {
     setDraft(text)
@@ -317,13 +410,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     })
   }
 
-  const remove = async (): Promise<void> => {
-    if (!accountId || !conversationId) return
-    const title = conversations.find((c) => c.id === conversationId)?.title || '这个对话'
+  const remove = async (id: string): Promise<void> => {
+    if (!accountId) return
+    const title = conversations.find((c) => c.id === id)?.title || '这个对话'
     if (!confirm(`删除「${title}」？`)) return
-    await ai.delete(accountId, conversationId)
+    await ai.delete(accountId, id)
     const list = await refreshList(accountId)
-    void loadConversation(accountId, list[0]?.id ?? null)
+    if (id === conversationId) void loadConversation(accountId, list[0]?.id ?? null)
   }
 
   const clearAll = async (): Promise<void> => {
@@ -333,11 +426,10 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     void loadConversation(accountId, null)
   }
 
-  const rename = async (title: string): Promise<void> => {
-    setRenaming(null)
-    if (!accountId || !conversationId || !title.trim()) return
+  const rename = async (id: string, title: string): Promise<void> => {
+    if (!accountId || !title.trim()) return
     try {
-      await ai.rename(accountId, conversationId, title)
+      await ai.rename(accountId, id, title)
       void refreshList(accountId)
     } catch (err) {
       setNotice(ipcError(err))
@@ -382,6 +474,19 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     await onSetAllowWrite(allow)
   }
 
+  const runCommand = (command: LocalCommand): void => {
+    if (!accountId) return
+    if (command === 'new') { setDraft(''); void loadConversation(accountId, null) }
+    if (command === 'clear' && account && confirm(`删除「${account.name}」的全部 AI 对话？`)) {
+      setDraft('')
+      void ai.clear(accountId).then(async () => { await refreshList(accountId); void loadConversation(accountId, null) }).catch((err) => setNotice(ipcError(err)))
+    }
+    if (command === 'readonly' && account?.aiAllowWrite && confirm(`将「${account.name}」切换为只读？之后不能提出新的变更。`)) {
+      setDraft('')
+      void onSetAllowWrite(false).catch((err) => setNotice(ipcError(err)))
+    }
+  }
+
   const approvalAction = async (approvalId: string, decision: ApprovalDecision): Promise<CardActionResult> => {
     if (!accountId || !conversationId) return { ok: false, error: '对话不存在' }
     stickRef.current = true
@@ -397,6 +502,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
 
   const pendingCalls = pendingApprovals(visibleItems)
   const pending = pendingProposals(visibleItems)
+  const { message: actionsDisabled, card: cardDisabled } = cardDisabledState(busy, hasPendingDecision, regenerating)
   // The waiting call first (the answer is paused on it).
   const pendingIds = [...pendingCalls.map((id) => `approval-${id}`), ...pending.map((id) => `proposal-${id}`)]
   const pendingKey = pendingIds.join(' ')
@@ -431,7 +537,12 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const allowed = allows.filter((a) => a.conversationId === conversationId)
 
   return (
-    <aside className="ai-panel" style={{ width }} aria-label="AI 助手">
+    <aside ref={panelRef} className="ai-panel" style={{ width }} aria-label="AI 助手" onKeyDown={(e) => {
+      if (!panelEscapeStops(e.key, busy, e.defaultPrevented, Boolean((e.target as Element).closest('.ai-approval, .ai-proposal, [popover], form, .ai-conversation-pop, .ai-header-menu')), e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)) return
+      e.preventDefault()
+      e.stopPropagation()
+      stop()
+    }}>
       <div
         className="ai-resize"
         role="separator"
@@ -446,7 +557,11 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       />
 
       <header className="ai-header">
-        <span className="ai-title">✦ AI 助手</span>
+        {account && ready ? (
+          <button ref={titleRef} type="button" className="ai-header-title" aria-expanded={conversationsOpen} onClick={() => { setEditTarget(null); setConversationsOpen((v) => !v) }}>
+            {current?.title || '新对话'} <span aria-hidden>⌄</span>
+          </button>
+        ) : <span className="ai-title">AI 助手</span>}
         {account &&
           (account.aiAllowWrite ? (
             <button className="ai-badge write" title="助手可以提出变更，每项都需要你在卡片上确认。点击改回只读" onClick={() => void toggleWrite()}>
@@ -457,59 +572,21 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
               只读
             </button>
           ))}
-        <span className="ai-spacer" />
-        <button className="ai-icon-btn" title="AI 设置" aria-label="AI 设置" onClick={onOpenSettings}>
-          ⚙
-        </button>
+        {account && ready && <button className="ai-icon-btn" title="新对话" aria-label="新对话" onClick={() => void loadConversation(account.id, null)}>＋</button>}
+        <div className="ai-header-menu-wrap">
+          <button ref={menuButtonRef} className="ai-icon-btn" title="更多操作" aria-label="更多操作" aria-expanded={menuOpen} onClick={() => setMenuOpen((v) => !v)}>⋯</button>
+          {menuOpen && <div ref={menuRef} className="ai-header-menu" onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setMenuOpen(false); menuButtonRef.current?.focus() } }}>
+            <button type="button" disabled={!current} onClick={() => { if (current) { setEditTarget(current.id); setConversationsOpen(true) } setMenuOpen(false) }}>重命名对话…</button>
+            <button type="button" disabled={!current} onClick={() => { if (current) void remove(current.id); setMenuOpen(false) }}>删除这个对话…</button>
+            <button type="button" onClick={() => { onOpenSettings(); setMenuOpen(false) }}>AI 设置…</button>
+            <button type="button" onClick={() => { onOpenAudit(); setMenuOpen(false) }}>AI 审计…</button>
+          </div>}
+        </div>
         <button className="ai-icon-btn" title="收起（esc）" aria-label="收起 AI 面板" onClick={onClose}>
           ×
         </button>
       </header>
-
-      {account && ready && (
-        <div className="ai-convbar">
-          {renaming !== null ? (
-            <input
-              className="ai-rename"
-              autoFocus
-              value={renaming}
-              maxLength={100}
-              onChange={(e) => setRenaming(e.target.value)}
-              onBlur={() => void rename(renaming)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void rename(renaming)
-                if (e.key === 'Escape') setRenaming(null)
-              }}
-            />
-          ) : (
-            <select
-              className="ai-conv-select"
-              aria-label="对话"
-              value={conversationId ?? ''}
-              onChange={(e) => void loadConversation(account.id, e.target.value || null)}
-            >
-              <option value="">新对话</option>
-              {conversations.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {(running.has(c.id) ? '● ' : '') + (c.title || '未命名对话')}
-                </option>
-              ))}
-            </select>
-          )}
-          <button className="ai-text-btn" title="新对话" aria-label="新对话" onClick={() => void loadConversation(account.id, null)}>
-            ＋
-          </button>
-          <button className="ai-text-btn" title="重命名" aria-label="重命名对话" disabled={!current} onClick={() => setRenaming(current?.title ?? '')}>
-            ✎
-          </button>
-          <button className="ai-text-btn" title="删除这个对话" aria-label="删除这个对话" disabled={!current} onClick={() => void remove()}>
-            🗑
-          </button>
-          <button className="ai-text-btn" title={`清空「${account.name}」的全部对话`} disabled={conversations.length === 0} onClick={() => void clearAll()}>
-            清空
-          </button>
-        </div>
-      )}
+      {account && ready && <ConversationPopover conversations={conversations} currentId={conversationId} running={running} open={conversationsOpen} editTarget={editTarget} onClose={closeConversations} onOpen={(id) => void loadConversation(account.id, id)} onRename={(id, title) => void rename(id, title)} onDelete={(id) => void remove(id)} onClear={() => void clearAll()} />}
 
       {allowed.length > 0 && (
         <div className="ai-allows" role="group" aria-label="本对话已允许的动作">
@@ -539,7 +616,6 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           else if (Date.now() - userScrollRef.current < 400) stickRef.current = false
           else if (stickRef.current) scrollToEnd()
         }}
-        aria-live="polite"
       >
         {!account ? (
           <div className="ai-empty">
@@ -568,21 +644,37 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
             onAllowWrite={() => void toggleWrite()}
           />
         ) : (
-          groupTools(visibleItems).map((item, i) =>
-            Array.isArray(item) ? (
-              <ActivityGroup key={item[0].id} tools={item} />
-            ) : (
-              <Item
-                key={item.kind === 'card' || item.kind === 'proposal' || item.kind === 'approval' ? item.id : i}
+          groupTools(visibleItems).map((item, i) => {
+            const index = visibleItems.indexOf(Array.isArray(item) ? item[0] : item)
+            const tail = index + (Array.isArray(item) ? item.length - 1 : 0)
+            const actions = turnActionsAt(visibleItems, tail)
+            const user = visibleItems[fromUserIndex(visibleItems, index)]
+            return <Fragment key={Array.isArray(item) ? item[0].id : item.kind === 'card' || item.kind === 'proposal' || item.kind === 'approval' ? item.id : i}>
+              {Array.isArray(item) ? <ActivityGroup tools={item} /> : <Item
                 item={item}
+                index={index}
+                older={isOlder(visibleItems, index)}
+                userIndex={fromUserIndex(visibleItems, index)}
+                retryable={user?.kind === 'user' && regenerationOrdinal(user) !== null}
+                actionsDisabled={actionsDisabled}
+                cardDisabled={cardDisabled}
+                editing={editIndex === index}
+                editText={editText}
+                onEditText={setEditText}
+                onEdit={() => { setEditIndex(index); setEditText(item.kind === 'user' ? item.text : '') }}
+                onCancelEdit={() => setEditIndex(null)}
+                onRegenerate={regenerate}
+                onCopy={copy}
+                onOpenModel={onOpenSettings}
                 onLink={openLink}
                 onCardAction={cardAction}
                 onProposal={proposalAction}
                 onApproval={approvalAction}
                 accountColor={account.color}
-              />
-            )
-          )
+              />}
+              {actions && <MessageActions kind="assistant" text={actions.text} model={actions.model} usage={actions.usage} disabled={actionsDisabled} onRegenerate={() => void regenerate(actions.userIndex)} onCopy={copy} />}
+            </Fragment>
+          })
         )}
         {replies && <QuickReplies options={replies.options} onSend={(text) => void send(text)} />}
         {/* Not while paused on an approval: the Activity line and the status line already say the run waits for the user. */}
@@ -591,11 +683,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
             <span className="spinner" />
           </div>
         )}
-        {notice && <div className="ai-notice">{notice}</div>}
+        {notice && !(account && ready && config) && <div className="ai-notice">{notice}</div>}
       </div>
+        <div className="ai-live-status" role="status" aria-live="polite" aria-atomic="true">{liveStatus(status, busy, justExecuted)}</div>
 
       {account && ready && config && (
         <footer className="ai-footer">
+          {notice && <div className="ai-send-notice" role="alert">{notice}</div>}
           {status && (
             // Says why the answer stopped and can bring the card into view; never a way to allow (only the card, next to its parameters, does that).
             <div className="ai-status-line" role="status">
@@ -627,10 +721,12 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
               // Typing means the user is writing their own answer: the chips go.
               if (text && shownReplies) setDismissedReplies(shownReplies.id)
             }}
-            onSend={() => void send(visibleInput)}
+            onSend={() => submitText(visibleInput, runCommand, (text) => void send(text))}
+            onCommand={runCommand}
             onStop={stop}
             onClose={onClose}
             busy={busy}
+            pausedOnApproval={pendingCalls.length > 0}
             history={visibleItems.flatMap((i) => (i.kind === 'user' ? [i.text] : []))}
             inputRef={inputRef}
             chip={page !== undefined && <PageChip page={page} on={pageOn} readPage={config.readPage !== false} onToggle={togglePage} />}
@@ -649,6 +745,20 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
 
 interface ItemProps {
   item: NonToolItem
+  index: number
+  userIndex: number
+  retryable: boolean
+  actionsDisabled: boolean
+  cardDisabled: boolean
+  editing: boolean
+  editText: string
+  onEditText: (text: string) => void
+  onEdit: () => void
+  onCancelEdit: () => void
+  onRegenerate: (index: number, text?: string) => void
+  onCopy: (text: string) => void
+  onOpenModel: () => void
+  older: boolean
   onLink: (url: string) => void
   onCardAction: (cardId: string, actionId: string, rowId?: string, values?: FormValues) => Promise<CardActionResult>
   onProposal: (proposalId: string, confirm: boolean, typed?: string) => Promise<CardActionResult>
@@ -656,17 +766,24 @@ interface ItemProps {
   accountColor: string
 }
 
-function Item({ item, onLink, onCardAction, onProposal, onApproval, accountColor }: ItemProps): React.JSX.Element | null {
+export function Item({ item, index, userIndex, retryable, actionsDisabled, cardDisabled, editing, editText, onEditText, onEdit, onCancelEdit, onRegenerate, onCopy, onOpenModel, older, onLink, onCardAction, onProposal, onApproval, accountColor }: ItemProps): React.JSX.Element | null {
   if (item.kind === 'user') {
     return (
-      <>
-        <div className="ai-msg user">{item.text}</div>
+      <div className="ai-user-turn">
+        {editing ? <div className="ai-inline-edit">
+          <textarea aria-label="编辑消息" autoFocus value={editText} onChange={(e) => onEditText(e.target.value)} onKeyDown={(e) => {
+            const action = editKey(e.key, e.metaKey || e.ctrlKey, e.shiftKey, e.nativeEvent.isComposing)
+            if (action) { e.preventDefault(); if (action === 'cancel') onCancelEdit(); else if (editText.trim()) onRegenerate(index, editText) }
+          }} />
+          <div><button type="button" disabled={actionsDisabled || !editText.trim()} onClick={() => onRegenerate(index, editText)}>发送修改</button><button type="button" onClick={onCancelEdit}>取消</button><span>⌘↵ 发送 · Esc 取消</span></div>
+        </div> : <div className="ai-msg user">{item.text}</div>}
         {item.page && (
           <div className="ai-msg-page" title="提问时打开的页面">
             {item.page}
           </div>
         )}
-      </>
+        {!editing && regenerationOrdinal(item) !== null && <MessageActions kind="user" text={item.text} disabled={actionsDisabled} onRegenerate={() => onRegenerate(index)} onEdit={onEdit} onCopy={onCopy} />}
+      </div>
     )
   }
   // Chips are drawn once, under the last reply (visibleReplies), not in place.
@@ -674,13 +791,16 @@ function Item({ item, onLink, onCardAction, onProposal, onApproval, accountColor
   if (item.kind === 'note') return <div className="ai-dim small">{item.text}</div>
   if (item.kind === 'approval') {
     const id = item.approval.id
-    return <ApprovalCard approval={item.approval} accountColor={accountColor} onDecide={(d) => onApproval(id, d)} />
+    const card = <ApprovalCard approval={item.approval} disabled={cardDisabled} accountColor={accountColor} onDecide={(d) => onApproval(id, d)} />
+    return older && item.approval.state !== 'pending' ? <details className="ai-old-card"><summary>上一个审批：{item.approval.service}:{item.approval.action} · {item.approval.state === 'allowed' ? '✓ 已允许' : item.approval.state === 'denied' ? '✗ 已拒绝' : '■ 已停止'}</summary>{card}</details> : card
   }
   if (item.kind === 'proposal') {
     const id = item.proposal.id
     return (
       <ProposalCard
         proposal={item.proposal}
+        older={older}
+        disabled={cardDisabled}
         accountColor={accountColor}
         onLink={onLink}
         onConfirm={(typed) => onProposal(id, true, typed)}
@@ -691,13 +811,13 @@ function Item({ item, onLink, onCardAction, onProposal, onApproval, accountColor
   if (item.kind === 'card') {
     const card = item.card
     if (!card) return <CardSkeleton />
-    return <CardView card={card} onLink={onLink} accountColor={accountColor} onAction={(a, row, values) => onCardAction(card.id, a, row, values)} />
+    const view = <CardView card={card} disabled={cardDisabled} onLink={onLink} accountColor={accountColor} onAction={(a, row, values) => onCardAction(card.id, a, row, values)} />
+    return older && card.state !== 'active' && card.origin === 'system' ? <details className="ai-old-card"><summary>上一个卡片：{card.title} · {card.state === 'resolved' ? '✓ 已处理' : '■ 已失效'}</summary>{view}</details> : view
   }
   return (
-    <div className="ai-msg assistant">
-      {item.text && <Markdown text={item.text} onLink={onLink} />}
-      {item.aborted && <div className="ai-dim small">（已停止）</div>}
-      {item.error && <div className="ai-notice">{item.error}</div>}
+    <div className="ai-assistant-turn">
+      {item.text && <div className="ai-msg assistant"><Markdown text={item.text} onLink={onLink} /></div>}
+      <MessageFailure error={item.error} aborted={item.aborted} disabled={actionsDisabled} hideRetry={!retryable || item.retryable === false} onRetry={() => onRegenerate(userIndex)} onModel={onOpenModel} onCopy={onCopy} />
     </div>
   )
 }

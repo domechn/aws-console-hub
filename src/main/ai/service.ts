@@ -28,13 +28,13 @@ import { ApprovalStore, type ApprovalRequest, type Verdict } from './approvals'
 import type { AwsCall, AwsInputMembers, AwsSupports } from './aws'
 import { explainBedrockError } from './bedrock'
 import { buildModelCard, cardActionLabel, cardActionText, checkCardAction, parseCardAction } from './cards'
-import { proposalResultText, resultCard, type ProposalResult } from './changes/card'
+import { parseProposalResult, proposalResultText, resultCard, type ProposalResult } from './changes/card'
 import { ProposalEngine, type AnalysisOutcome } from './changes/engine'
 import { changeCatalog } from './changes/registry'
 import type { AiConfigStore } from './config'
 import { compactContext, mergeUserTurns } from './context'
 import type { AiStore } from './db'
-import { ANSWER_REQUEST, hasAnswer, LIMIT_NOTE, LIMIT_REQUEST, sumUsage, toChatItems, transcriptCards, type StoredAgentMessage } from './history'
+import { ANSWER_REQUEST, hasAnswer, LIMIT_NOTE, LIMIT_REQUEST, sumUsage, textOf, toChatItems, transcriptCards, type StoredAgentMessage } from './history'
 import type { KeyStore } from './keystore'
 import { pageContext, type PageRead } from './page'
 import { buildSystemPrompt } from './prompt'
@@ -43,6 +43,7 @@ import { redactSecrets } from './redact'
 import { checkReplies } from './replies'
 import { displayParams } from './shape'
 import { buildCardTool, buildPageTool, buildProposeTool, buildReadTools, buildRepliesTool, MAX_COST_CALLS } from './tools'
+import { checkPrompt, checkUserIndex } from './validate'
 
 /** Per user message (plan §9.8). */
 export const LIMITS = {
@@ -97,6 +98,8 @@ interface Run {
   accountId: string
   agent?: { abort(): void }
   aborted: boolean
+  finished: Promise<void>
+  finish: () => void
 }
 
 interface Resolved {
@@ -153,6 +156,7 @@ export class AiService {
   private pendingCards = new Map<string, Set<string>>()
   /** Per conversation: card replies clicked while a run was going; each becomes the next turn. */
   private queued = new Map<string, QueuedTurn[]>()
+  private regenerating = new Set<string>()
 
   constructor(private d: AiServiceDeps) {
     this.engine = new ProposalEngine({
@@ -273,10 +277,9 @@ export class AiService {
 
   private rates = (provider: string, model: string) => this.d.models.getModel(provider, model)?.cost
 
-  /** The transcript's replies plus the conversation's impact analyses (not in the transcript). */
+  /** Billed usage survives regeneration because the usage table is append-only. */
   private usage(conversationId: string): UsageTotals {
-    const analyses = this.d.store.analysisUsage(conversationId).map((r) => ({ role: 'assistant', provider: r.provider, model: r.model, usage: r }))
-    return sumUsage([...this.transcript(conversationId), ...analyses] as StoredAgentMessage[], this.rates)
+    return sumUsage(this.d.store.conversationUsage(conversationId).map((r) => ({ role: 'assistant', provider: r.provider, model: r.model, usage: r })) as StoredAgentMessage[], this.rates)
   }
 
   /** This calendar month (local time) from the usage table, which keeps deleted conversations' replies. */
@@ -295,11 +298,12 @@ export class AiService {
     const quickReplies = this.d.config.get().quickReplies
     return {
       items: toChatItems(
-        this.transcript(conversationId),
+        this.d.store.messages(conversationId).map((m) => ({ ...(m.content as StoredAgentMessage), rowId: m.id })),
         this.now(),
         this.pendingCards.get(conversationId),
         (id) => this.engine.view(id),
-        (toolCallId) => this.approvals.forToolCall(conversationId, toolCallId)
+        (toolCallId) => this.approvals.forToolCall(conversationId, toolCallId),
+        this.rates
       ).filter((i) => quickReplies || i.kind !== 'replies'),
       usage: this.usage(conversationId),
       month: this.monthUsage(),
@@ -434,6 +438,7 @@ export class AiService {
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
     this.owned(accountId, conversationId)
+    if (this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
     const card = this.cards(conversationId).get(cardId)
     if (!card) throw new Error('卡片不存在')
     const checked = checkCardAction(card, actionId, rowId, values)
@@ -457,6 +462,7 @@ export class AiService {
   }
 
   private async startCardTurn(account: AwsAccount, conversationId: string, turn: CardTurn): Promise<void> {
+    if (this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
     const blocked = this.blocked()
     if (blocked) throw new Error(blocked)
     let resolved
@@ -465,6 +471,7 @@ export class AiService {
     } catch (err) {
       throw new Error(this.clean(err instanceof Error ? err.message : String(err)))
     }
+    if (this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
     // A typed message got in during the await: go after it.
     if (this.runs.has(conversationId)) this.queued.set(conversationId, [turn, ...(this.queued.get(conversationId) ?? [])])
     else this.start(account, conversationId, turn.text, resolved, turn.label)
@@ -483,6 +490,7 @@ export class AiService {
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
     this.owned(accountId, conversationId)
+    if (this.regenerating.has(conversationId)) throw new Error('对话正在重新生成')
     const outcome = await this.engine.confirm(accountId, conversationId, proposalId, typed)
     const title = this.engine.get(proposalId)?.plan.title ?? proposalId
     const result: ProposalResult =
@@ -499,6 +507,7 @@ export class AiService {
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
     this.owned(accountId, conversationId)
+    if (this.regenerating.has(conversationId)) throw new Error('对话正在重新生成')
     const p = this.engine.cancel(accountId, conversationId, proposalId)
     void this.deliverResult(account, conversationId, { proposalId, status: 'cancelled', title: p.plan.title }, false)
   }
@@ -610,16 +619,15 @@ export class AiService {
   /** Resolves once the run has started; its progress comes as ai:event. Config problems reject here. */
   /** `page`: a new conversation's page toggle (an existing one keeps its own). */
   async send(accountId: string, conversationId: string | null, text: string, page = true): Promise<AiSendResult> {
+    text = checkPrompt(text)
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
     if (conversationId) {
       this.owned(accountId, conversationId)
-      if (this.runs.has(conversationId)) throw new Error('上一条消息还在处理中')
+      if (this.runs.has(conversationId) || this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
     }
     // Those prefixes mark turns main composed (a card click, a proposal's outcome); a typed one would pass for one.
-    if (text.startsWith(CARD_ACTION_PREFIX.trim())) throw new Error('消息不能以 [card_action] 开头')
-    if (text.startsWith(PROPOSAL_RESULT_PREFIX.trim())) throw new Error('消息不能以 [proposal_result] 开头')
-    if (text.startsWith('[answer_request]')) throw new Error('消息不能以 [answer_request] 开头')
+    this.checkUserPrompt(text)
     const month = this.monthUsage()
     if (month.blocked) throw new Error(month.budget ?? '本月 AI 预算已用完')
     let resolved
@@ -632,19 +640,116 @@ export class AiService {
     }
     const id = conversationId ?? this.d.store.createConversation(accountId, this.clean(titleFrom(text), resolved.apiKey), page)
     // Re-checked after the await: a second send may have started meanwhile.
-    if (this.runs.has(id)) throw new Error('上一条消息还在处理中')
+    if (this.runs.has(id) || this.regenerating.has(id)) throw new Error('上一条消息还在处理中')
     return { ...this.start(account, id, text, resolved), ...(month.budget && { warning: month.budget }) }
   }
 
+  /** A user turn ordinal and its displayed original text. Keeps audit and billed usage. */
+  async regenerate(accountId: string, conversationId: string, fromUserIndex: number, expectedText: string, text?: string): Promise<AiSendResult> {
+    const account = this.d.account(accountId)
+    if (!account) throw new Error('账号不存在')
+    this.owned(accountId, conversationId)
+    checkUserIndex(fromUserIndex)
+    if (this.regenerating.has(conversationId)) throw new Error('上一条消息还在处理中')
+    const running = this.runs.get(conversationId)
+    const waiting = running && this.view(accountId, conversationId).items.some((i) => i.kind === 'approval' && i.approval.state === 'pending')
+    if (running && !waiting) throw new Error('上一条消息还在处理中')
+    const candidates = (rows: ReturnType<AiStore['messages']>) => rows.filter((m) => {
+      if (m.role !== 'user') return false
+      const value = textOf((m.content as StoredAgentMessage).content)
+      return value !== ANSWER_REQUEST && value !== LIMIT_REQUEST && !parseProposalResult(value)
+    })
+    const select = (rows: ReturnType<AiStore['messages']>) => {
+      const selected = candidates(rows)[fromUserIndex]
+      if (!selected) throw new Error('消息位置不是用户提问')
+      const originalText = textOf((selected.content as StoredAgentMessage).content)
+      if (originalText !== expectedText) throw new Error('消息已变化，请刷新对话后重试')
+      return selected
+    }
+    const initialRows = this.d.store.messages(conversationId)
+    const selected = select(initialRows)
+    const originalText = textOf((selected.content as StoredAgentMessage).content)
+    if (originalText.startsWith(CARD_ACTION_PREFIX.trim())) throw new Error('不能重新发送卡片操作')
+    const prompt = checkPrompt(text ?? originalText)
+    this.checkUserPrompt(prompt)
+    const month = this.monthUsage()
+    if (month.blocked) throw new Error(month.budget ?? '本月 AI 预算已用完')
+    const affected = (rows: ReturnType<AiStore['messages']>, id: number) => rows.filter((r) => r.id >= id)
+      .map((r) => ((r.content as StoredAgentMessage).details as { proposal?: ProposalView } | undefined)?.proposal?.id)
+      .filter((id): id is string => Boolean(id))
+    const checkExecuting = (ids: string[]) => {
+      if (ids.some((id) => this.engine.view(id)?.state === 'executing')) throw new Error('提案正在执行，暂时不能重新生成')
+    }
+    checkExecuting(affected(initialRows, selected.id))
+    this.regenerating.add(conversationId)
+    try {
+      if (running) {
+        this.abort(conversationId)
+        let stopTimer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          running.finished,
+          new Promise<never>((_, reject) => { stopTimer = setTimeout(() => reject(new Error('停止上一条回答超时，请重试')), 25_000) })
+        ]).finally(() => clearTimeout(stopTimer))
+      }
+      let setupTimer: ReturnType<typeof setTimeout> | undefined
+      const resolved = await Promise.race([
+        this.resolve(),
+        new Promise<never>((_, reject) => { setupTimer = setTimeout(() => reject(new Error('模型配置超时，请重试')), 25_000) })
+      ]).finally(() => clearTimeout(setupTimer))
+      if (this.runs.has(conversationId) || this.d.store.conversationAccount(conversationId) !== accountId) throw new Error('上一条消息还在处理中')
+      const rows = this.d.store.messages(conversationId)
+      const fresh = select(rows)
+      const proposalIds = affected(rows, fresh.id)
+      checkExecuting(proposalIds)
+      // Cancel pending cards in the removed suffix. Finished changes remain in audit and usage stays billed.
+      let cancelled = 0
+      for (const proposalId of proposalIds) if (this.engine.view(proposalId)?.state === 'pending') {
+        this.engine.cancel(accountId, conversationId, proposalId)
+        cancelled++
+      }
+      this.approvals.abortConversation(conversationId)
+      this.pendingCards.delete(conversationId)
+      this.queued.delete(conversationId)
+      const retry = text === undefined
+      const fromId = fresh.id
+      const earlier = rows.filter((r) => r.id < fromId)
+      const earlierProposals = new Set(earlier.map((r) => ((r.content as StoredAgentMessage).details as { proposal?: ProposalView } | undefined)?.proposal?.id).filter(Boolean))
+      const keepIds = rows.filter((r) => {
+        if (r.id < fromId || r.role !== 'user') return false
+        const value = textOf((r.content as StoredAgentMessage).content)
+        const result = parseProposalResult(value)
+        if (result) return earlierProposals.has(result.proposalId)
+        return false
+      }).map((r) => r.id)
+      this.d.store.truncateMessages(conversationId, fromId, keepIds)
+      this.d.store.audit('conversation_regenerated', accountId, { conversationId, fromUserIndex, edited: !retry, actor: 'user' })
+      const notice = `${waiting ? '已取消待处理审批。' : ''}${cancelled ? `已取消 ${cancelled} 个待确认提案。` : ''}之前的操作可能已经执行；重新生成不会撤销已完成的查询或变更，请查看审计记录。`
+      this.d.store.addMessage(conversationId, { role: 'note', content: { role: 'note', content: notice, timestamp: this.now() } })
+      this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'note', text: notice } })
+      return { ...this.start(account, conversationId, prompt, resolved, undefined, notice), ...(month.budget && { warning: month.budget }) }
+    } finally {
+      this.regenerating.delete(conversationId)
+    }
+  }
+
+  private checkUserPrompt(text: string): void {
+    if (text.startsWith(CARD_ACTION_PREFIX.trim())) throw new Error('消息不能以 [card_action] 开头')
+    if (text.startsWith(PROPOSAL_RESULT_PREFIX.trim())) throw new Error('消息不能以 [proposal_result] 开头')
+    if (text.startsWith('[answer_request]')) throw new Error('消息不能以 [answer_request] 开头')
+  }
+
   /** `shown`: main started this turn (a card reply), so the panel gets the user item from here. */
-  private start(account: AwsAccount, id: string, text: string, resolved: Resolved, shown?: string): AiSendResult {
-    const run: Run = { runId: this.nextRunId++, accountId: account.id, aborted: false }
+  private start(account: AwsAccount, id: string, text: string, resolved: Resolved, shown?: string, runNotice?: string): AiSendResult {
+    let finish = (): void => {}
+    const finished = new Promise<void>((resolve) => { finish = resolve })
+    const run: Run = { runId: this.nextRunId++, accountId: account.id, aborted: false, finished, finish }
     this.runs.set(id, run)
     const emit = (event: AiEvent): void => this.d.emit({ accountId: account.id, conversationId: id, runId: run.runId, event })
     if (shown) emit({ type: 'user', text: shown })
-    void this.execute(account, id, run, text, resolved, emit).finally(() => {
+    void this.execute(account, id, run, text, resolved, emit, runNotice).finally(() => {
       this.runs.delete(id)
       this.next(account, id, emit)
+      run.finish()
     })
     return { conversationId: id, runId: run.runId }
   }
@@ -674,7 +779,9 @@ export class AiService {
       (err: unknown) => {
         if (t.kind === 'card') this.release(account.id, id, t.cardId)
         else this.storeTurn(id, t.text)
-        emit({ type: 'error', message: this.clean(err instanceof Error ? err.message : String(err)) })
+        const message = this.clean(err instanceof Error ? err.message : String(err))
+        this.d.store.addMessage(id, { role: 'note', content: { role: 'note', content: '', error: message, retryable: false, timestamp: this.now() } })
+        emit({ type: 'error', message, retryable: false })
         this.next(account, id, emit)
       }
     )
@@ -686,11 +793,18 @@ export class AiService {
     run: Run,
     text: string,
     { model, apiKey, explain }: Resolved,
-    emit: (event: AiEvent) => void
+    emit: (event: AiEvent) => void,
+    runNotice?: string
   ): Promise<void> {
+    const reportError = (message: string): void => {
+      const clean = this.clean(message, apiKey)
+      if (this.d.store.conversationAccount(conversationId) !== undefined)
+        this.d.store.addMessage(conversationId, { role: 'note', content: { role: 'note', content: '', error: clean, timestamp: this.now() } })
+      emit({ type: 'error', message: clean })
+    }
     const fail = (message: string): void => {
       const clean = this.clean(message, apiKey)
-      emit({ type: 'error', message: clean })
+      reportError(clean)
       this.d.toast(`AI 助手：${clean}`)
     }
     // Shown after the reply: why the run stopped early, if it did.
@@ -738,12 +852,22 @@ export class AiService {
         return { text, summary: `${view.id} · 待确认`, proposal: view }
       }
       const perRun = { left: LIMITS.maxApprovals }
+      let approvalWaitMs = 0
+      let approvalDepth = 0
+      let approvalStarted = 0
+      const elapsedApprovalWait = (): number => approvalWaitMs + (approvalDepth ? Date.now() - approvalStarted : 0)
       const approve = async (req: Omit<ApprovalRequest, 'accountId' | 'conversationId'>, signal?: AbortSignal): Promise<Verdict> => {
-        pause()
+        if (approvalDepth++ === 0) {
+          pause()
+          approvalStarted = Date.now()
+        }
         try {
           return await this.approvals.request({ ...req, accountId: account.id, conversationId }, signal, perRun)
         } finally {
-          arm()
+          if (--approvalDepth === 0) {
+            approvalWaitMs += Date.now() - approvalStarted
+            arm()
+          }
         }
       }
       // Resolved per run: the user may have moved to another page since the last turn.
@@ -761,6 +885,7 @@ export class AiService {
         ...(quickReplies ? [buildRepliesTool(audit, () => answered)] : [])
       ]
       let toolCalls = 0
+      const toolStarted = new Map<string, { at: number; wait: number }>()
       let turns = 0
       // Which cap the run hit; it then lands: one last round where every tool call is blocked.
       let limit: string | null = null
@@ -774,11 +899,12 @@ export class AiService {
             now: (this.d.now ?? (() => new Date()))(),
             page: { on: pageOn, context: page, readable },
             quickReplies
-          }),
+          }) + (runNotice ? `\n\n重新生成通知：${runNotice}` : ''),
           model,
           tools,
           // The page a turn was asked on is the app's record, not something to send again.
-          messages: this.transcript(conversationId).map(({ page: _page, ...m }) => m) as AgentMessage[]
+          messages: this.transcript(conversationId).filter((m) => m.role !== 'note')
+            .map(({ page: _page, ...m }) => m) as AgentMessage[]
         },
         getApiKey: () => apiKey,
         toolExecution: 'sequential',
@@ -805,11 +931,12 @@ export class AiService {
           const part = e.assistantMessageEvent.partial.content[e.assistantMessageEvent.contentIndex]
           if (part?.type === 'toolCall' && part.name === 'render_card') emit({ type: 'card-pending', id: part.id })
         } else if (e.type === 'tool_execution_start') {
+          toolStarted.set(e.toolCallId, { at: Date.now(), wait: elapsedApprovalWait() })
           if (e.toolName === 'render_card') emit({ type: 'card-pending', id: e.toolCallId })
           // Quiet: the chips are the result, a tool row would only clutter the reply.
           else if (e.toolName !== 'suggest_replies') {
             const code = scriptCode(e.toolName, e.args)
-            emit({ type: 'tool-start', id: e.toolCallId, label: toolLabel(e.toolName, e.args), ...(code !== undefined && { code }) })
+            emit({ type: 'tool-start', id: e.toolCallId, label: toolLabel(e.toolName, e.args), ...(code !== undefined && { code }), t: Date.now() })
           }
         } else if (e.type === 'tool_execution_end' && e.toolName === 'suggest_replies') {
           // Main's checked list from the result, never the model's arguments.
@@ -829,7 +956,8 @@ export class AiService {
           if (proposal) return emit({ type: 'proposal', id: e.toolCallId, proposal })
           const summary = e.isError ? this.clean(String(e.result?.content?.[0]?.text ?? '失败')).slice(0, 200) : e.result?.details?.summary
           const calls = e.toolName === 'run_script' ? scriptCalls(e.result?.details) : undefined
-          emit({ type: 'tool-end', id: e.toolCallId, ok: !e.isError && e.result?.details?.denied !== true, summary, ...(calls && { calls }) })
+          const started = toolStarted.get(e.toolCallId)
+          emit({ type: 'tool-end', id: e.toolCallId, ok: !e.isError && e.result?.details?.denied !== true, summary, ...(calls && { calls }), t: Date.now() - (started ? elapsedApprovalWait() - started.wait : 0) })
         } else if (e.type === 'message_end' && e.message.role !== 'system') {
           // Ends before its tool calls run: suggest_replies asks this.
           if (e.message.role === 'assistant') answered = hasAnswer(e.message as StoredAgentMessage)
@@ -838,12 +966,16 @@ export class AiService {
           // Stored as it happens, so a stop or a crash keeps what was said so far.
           const live = e.message as StoredAgentMessage
           // The panel shows a failed reply's stored error, so that copy gets the explanation (pi's message stays as is).
-          const m =
+          let m =
             live.stopReason === 'error' && live.errorMessage
               ? { ...live, errorMessage: explain(live.errorMessage) }
               : live.role === 'user' && page
                 ? { ...live, page: { label: page.label, url: page.url } }
                 : live
+          if (m.role === 'toolResult' && m.toolCallId && toolStarted.has(m.toolCallId)) {
+            const started = toolStarted.get(m.toolCallId)!
+            m = { ...m, durationMs: Math.max(0, Date.now() - started.at - (elapsedApprovalWait() - started.wait)) }
+          }
           // The store's pattern scrub misses keys without a known shape (Gemini's AIza…); drop the active key by value.
           const content = apiKey && apiKey.length >= 16 ? JSON.parse(JSON.stringify(m).split(apiKey).join('[redacted]')) : m
           this.d.store.addMessage(conversationId, { role: m.role, content, tokensIn: m.usage?.input, tokensOut: m.usage?.output })
@@ -869,7 +1001,7 @@ export class AiService {
       const last = agent.state.messages.at(-1) as StoredAgentMessage | undefined
       // The failed reply is in the transcript, which the panel shows with its error; the toast is for elsewhere.
       if (last?.role === 'assistant' && last.stopReason === 'error') this.d.toast(`AI 助手：${this.clean(explain(last.errorMessage ?? '请求失败'), apiKey)}`)
-      if (notice) emit({ type: 'error', message: notice })
+      if (notice) reportError(notice)
     } catch (err) {
       fail(explain(err instanceof Error ? err.message : String(err)))
     } finally {

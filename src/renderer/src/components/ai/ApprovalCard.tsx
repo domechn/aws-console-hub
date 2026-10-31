@@ -48,12 +48,13 @@ export function everySecond(tick: () => void): () => void {
 }
 
 interface Props {
+  disabled?: boolean
   approval: ApprovalView
   accountColor?: string
   onDecide: (decision: ApprovalDecision) => Promise<CardActionResult>
 }
 
-export function ApprovalCard({ approval: a, accountColor, onDecide }: Props): React.JSX.Element {
+export function ApprovalCard({ approval: a, disabled, accountColor, onDecide }: Props): React.JSX.Element {
   const [now, setNow] = useState(() => Date.now())
   const [armed, setArmed] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -71,7 +72,7 @@ export function ApprovalCard({ approval: a, accountColor, onDecide }: Props): Re
   }, [])
 
   const decide = (d: ApprovalDecision): void => {
-    if (!live || busy || (d !== 'deny' && !armed)) return
+    if (!live || busy || disabled || (d !== 'deny' && !armed)) return
     setBusy(true)
     setError(null)
     onDecide(d)
@@ -176,10 +177,10 @@ export function ApprovalCard({ approval: a, accountColor, onDecide }: Props): Re
         <>
           {/* A read approval: allow and deny weigh the same; red is kept for strong (write) confirmations. */}
           <div className="ai-proposal-actions ai-approval-actions">
-            <button type="button" className="ai-card-btn" disabled={!armed || busy} onClick={() => decide('once')}>
+            <button type="button" className="ai-card-btn" disabled={!armed || busy || disabled} onClick={() => decide('once')}>
               允许一次<kbd aria-hidden>↵</kbd>
             </button>
-            <button type="button" className="ai-card-btn" disabled={busy} onClick={() => decide('deny')}>
+            <button type="button" className="ai-card-btn" disabled={busy || disabled} onClick={() => decide('deny')}>
               拒绝<kbd aria-hidden>Esc</kbd>
             </button>
           </div>
@@ -187,7 +188,7 @@ export function ApprovalCard({ approval: a, accountColor, onDecide }: Props): Re
             <button
               type="button"
               className="ai-link-btn ai-approval-session"
-              disabled={!armed || busy}
+              disabled={!armed || busy || disabled}
               title={`${key} · ${a.accountName} ${a.awsAccountId} · ${a.region}\n之后同一账号、同一区域的这个动作不再询问，参数可以不同。可在 AI 设置里撤销\n焦点在卡片上时也可按 ⌘↵ / Ctrl+↵`}
               onClick={() => decide('session')}
             >

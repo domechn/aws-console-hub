@@ -18,6 +18,7 @@ export function groupTools(items: ChatItem[]): (NonToolItem | ToolItem[])[] {
 }
 
 const STATUS_TEXT: Record<ToolItem['status'], string> = { running: '进行中', waiting: '等待审批', ok: '成功', error: '失败' }
+const duration = (ms: number): string => `${(ms / 1000).toFixed(1)} 秒`
 
 function StatusIcon({ status }: { status: ToolItem['status'] }): React.JSX.Element {
   return (
@@ -36,9 +37,12 @@ export function ActivityGroup({ tools }: { tools: ToolItem[] }): React.JSX.Eleme
   const waiting = tools.findIndex((t) => t.status === 'waiting')
   const running = tools.findIndex((t) => t.status === 'running')
   const failed = tools.filter((t) => t.status === 'error').length
-  const expanded = open ?? waiting >= 0
+  const expanded = open ?? (waiting >= 0 || running >= 0)
   const status: ToolItem['status'] = waiting >= 0 ? 'waiting' : running >= 0 ? 'running' : failed === tools.length ? 'error' : 'ok'
   const names = [...new Set(tools.map((t) => t.label))].join('、')
+  const total = tools.every((t) => t.ms !== undefined && t.status !== 'running' && t.status !== 'waiting')
+    ? duration(tools.reduce((sum, t) => sum + (t.ms ?? 0), 0))
+    : null
 
   return (
     <div className="ai-act">
@@ -58,6 +62,7 @@ export function ActivityGroup({ tools }: { tools: ToolItem[] }): React.JSX.Eleme
           {failed > 0 && <span className="ai-act-fail"> · {failed} 步失败</span>}
           {waiting < 0 && running < 0 && <> · {names}</>}
         </span>
+        {total && <span className="ai-act-duration">{total}</span>}
         <span className="ai-act-caret" aria-hidden>
           {expanded ? <IconChevronDown /> : <IconForward />}
         </span>
@@ -84,8 +89,9 @@ export function Step({ item }: { item: ToolItem }): React.JSX.Element {
       <span className="ai-step-text">
         {label}
         {item.summary && <span className="ai-step-summary"> · {item.summary}</span>}
-        {item.status === 'waiting' && <span className="ai-step-summary"> · 等待你在下面的卡片上审批</span>}
+        {item.status === 'waiting' && <span className="ai-step-summary"> · 等待你在下面的<span className="ai-keep-word">卡片</span>上审批</span>}
       </span>
+      {item.ms !== undefined && <span className="ai-act-duration">{duration(item.ms)}</span>}
     </>
   )
   return (

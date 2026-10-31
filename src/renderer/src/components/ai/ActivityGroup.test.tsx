@@ -27,6 +27,13 @@ describe('groupTools', () => {
 })
 
 describe('ActivityGroup', () => {
+  it('shows completed step times and their total, while missing times stay hidden', () => {
+    const a = { ...tool('a', '查询 EC2 实例', 'ok'), ms: 400 }
+    const b = { ...tool('b', '运行脚本', 'ok'), ms: 4400 }
+    expect(render([a, b])).toContain('4.8 秒')
+    expect(renderToStaticMarkup(<Step item={a} />)).toContain('0.4 秒')
+    expect(render([a, tool('c', '查询指标', 'ok')])).not.toContain('0.4 秒')
+  })
   it('collapsed by default: one line 「✓ N 步 · names」, steps hidden', () => {
     const html = render([tool('a', '查询 EC2 实例', 'ok', '4 个'), script, tool('c', '查询指标', 'ok')])
     expect(html).toContain('<b>3 步</b> · 查询 EC2 实例、运行脚本、查询指标')
@@ -52,7 +59,7 @@ describe('ActivityGroup', () => {
     expect(html).toContain('class="ai-act-icon waiting" role="img" aria-label="等待审批"')
     expect(html).toContain('aria-expanded="true"')
     expect(html).toContain('<ol class="ai-steps">')
-    expect(html).toContain('调用 ssm:DescribeInstanceInformation<span class="ai-step-summary"> · 等待你在下面的卡片上审批</span>')
+    expect(html).toContain('调用 ssm:DescribeInstanceInformation<span class="ai-step-summary"> · 等待你在下面的<span class="ai-keep-word">卡片</span>上审批</span>')
     // Once decided it folds again (the user never opened it by hand).
     expect(render([tool('a', '查询 EC2 实例', 'ok'), tool('b', '调用 ssm:DescribeInstanceInformation', 'ok')])).toContain('aria-expanded="false"')
   })
@@ -61,6 +68,7 @@ describe('ActivityGroup', () => {
     const html = render([tool('a', '查询 EC2 实例', 'ok'), tool('b', '查询 CloudWatch 指标', 'running')])
     expect(html).toContain('正在查询 CloudWatch 指标… · 第 2 步')
     expect(html).toContain('aria-label="进行中"')
+    expect(html).toContain('aria-expanded="true"')
   })
 
   it('run_script step: 「运行脚本 · N 次调用」, opening to the calls and the code (as plain text)', () => {

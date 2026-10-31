@@ -49,6 +49,7 @@ export function App(): React.JSX.Element {
   const [aiOpen, setAiOpen] = useState(false)
   const [aiFocus, setAiFocus] = useState(0)
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+  const [aiSettingsView, setAiSettingsView] = useState<'settings' | 'audit'>('settings')
   const [aiConfig, setAiConfig] = useState<AiConfigView | null>(null)
   const [aiDataVersion, setAiDataVersion] = useState(0)
   const [aiWidth, setAiWidth] = useState(() => {
@@ -346,7 +347,8 @@ export function App(): React.JSX.Element {
               setAiWidth(width)
               if (done) localStorage.setItem(AI_WIDTH_KEY, String(width))
             }}
-            onOpenSettings={() => setAiSettingsOpen(true)}
+            onOpenSettings={() => { setAiSettingsView('settings'); setAiSettingsOpen(true) }}
+            onOpenAudit={() => { setAiSettingsView('audit'); setAiSettingsOpen(true) }}
             onConfig={setAiConfig}
             onClose={toggleAssistant}
             pageKey={`${navState?.url ?? ''}\n${navState?.tabs.find((t) => t.id === navState.activeTabId)?.title ?? ''}`}
@@ -401,6 +403,7 @@ export function App(): React.JSX.Element {
 
       {aiSettingsOpen && (
         <AiSettings
+          initialView={aiSettingsView}
           accounts={accounts}
           onClose={(config) => {
             if (config) setAiConfig(config)

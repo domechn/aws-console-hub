@@ -158,10 +158,10 @@ export interface UsageTotals {
 /** What the panel shows; built in main from the stored transcript (never raw tool results). */
 export type ChatItem =
   /** `page`: the page label it was asked on, when page context was on. */
-  | { kind: 'user'; text: string; page?: string }
-  | { kind: 'assistant'; text: string; error?: string; aborted?: boolean }
+  | { kind: 'user'; text: string; page?: string; cardAction?: boolean; ordinal?: number }
+  | { kind: 'assistant'; text: string; error?: string; aborted?: boolean; retryable?: boolean; usage?: { input: number; output: number; costUsd?: number }; model?: string }
   /** waiting: paused on an approval card (the approval item follows it). run_script: `code` and the `calls` it made (`ec2:DescribeInstances ×3`), shown on expand. */
-  | { kind: 'tool'; id: string; label: string; status: 'running' | 'waiting' | 'ok' | 'error'; summary?: string; code?: string; calls?: string[] }
+  | { kind: 'tool'; id: string; label: string; status: 'running' | 'waiting' | 'ok' | 'error'; summary?: string; code?: string; calls?: string[]; ms?: number }
   /** A render_card call (`id` is the tool call's); `card` is null while it streams (skeleton). */
   | { kind: 'card'; id: string; card: Card | null }
   /** A propose_change call that made a proposal (`id` is the tool call's). */
@@ -194,8 +194,8 @@ export interface ConversationView {
 export type AiEvent =
   | { type: 'text-delta'; text: string }
   /** `code`: run_script's script, shown read-only on the row. */
-  | { type: 'tool-start'; id: string; label: string; code?: string }
-  | { type: 'tool-end'; id: string; ok: boolean; summary?: string; calls?: string[] }
+  | { type: 'tool-start'; id: string; label: string; code?: string; t?: number }
+  | { type: 'tool-end'; id: string; ok: boolean; summary?: string; calls?: string[]; t?: number }
   /** A render_card call started streaming; `card`, or a failed tool-end, follows. */
   | { type: 'card-pending'; id: string }
   | { type: 'card'; id: string; card: Card }
@@ -215,7 +215,7 @@ export type AiEvent =
   | { type: 'usage'; usage: UsageTotals; month: MonthUsage }
   /** A quiet line in the reply (not an error). */
   | { type: 'note'; text: string }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; retryable?: boolean }
   | { type: 'done' }
 
 export interface AiEventEnvelope {

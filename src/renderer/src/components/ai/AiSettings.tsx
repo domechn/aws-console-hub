@@ -24,9 +24,9 @@ const KEY_MODES: { id: AiKeyMode; label: string }[] = [
 const ai = window.api.ai
 
 /** Provider, model, endpoint and key. The key field is write-only: main never sends a stored key back. */
-export function AiSettings({ accounts, onClose, onDataDeleted }: Props): React.JSX.Element {
+export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'settings' }: Props & { initialView?: 'settings' | 'audit' }): React.JSX.Element {
   const [config, setConfig] = useState<AiConfigView | null>(null)
-  const [view, setView] = useState<'settings' | 'audit'>('settings')
+  const [view, setView] = useState<'settings' | 'audit'>(initialView)
   const [provider, setProvider] = useState('')
   const [model, setModel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')

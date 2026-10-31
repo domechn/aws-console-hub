@@ -15,6 +15,7 @@ import { AWS_ACCOUNT, ec2World, fakeAws } from './changes/testing'
 vi.mock('electron', () => ({ app: { getPath: () => os.tmpdir() } }))
 
 const { AiStore, migrate } = await import('./db')
+const { toChatItems } = await import('./history')
 const { AiConfigStore } = await import('./config')
 const { createAppModels } = await import('./providers')
 const { AiService } = await import('./service')
@@ -30,7 +31,7 @@ const isAnalyst = (ctx: { messages: unknown[] }): boolean => JSON.stringify(ctx.
  * `responses` answer the chat, `analyst` the impact analysis, each from its own queue (they run concurrently). An
  * empty analyst queue fails the analysis at once, so confirm is not held up.
  */
-function setup(responses: FauxResponseStep[], patch: Partial<AwsAccount> = {}, extra: Parameters<typeof fakeAws>[0] = {}, analyst: FauxResponseStep[] = []) {
+function setup(responses: FauxResponseStep[], patch: Partial<AwsAccount> = {}, extra: Parameters<typeof fakeAws>[0] = {}, analyst: FauxResponseStep[] = [], runKeyCommand: () => Promise<string> = async () => '') {
   const db = new DatabaseSync(':memory:')
   db.exec('pragma foreign_keys = on')
   migrate(db)
@@ -82,7 +83,7 @@ function setup(responses: FauxResponseStep[], patch: Partial<AwsAccount> = {}, e
     emit: (e) => events.push(e),
     openConsole: () => {},
     toast: () => {},
-    runKeyCommand: async () => ''
+    runKeyCommand
   })
   const dones = (): number => events.filter((e) => e.event.type === 'done').length
   const waitDone = (n: number) => vi.waitFor(() => expect(dones()).toBeGreaterThanOrEqual(n), { timeout: 5000, interval: 5 })
@@ -109,6 +110,126 @@ const kinds = (items: ChatItem[]) => items.map((i) => (i.kind === 'proposal' ? `
 const lastToolResult = (context: { messages: { role: string; content?: unknown }[] }): string => JSON.stringify(context.messages.filter((m) => m.role === 'toolResult').at(-1))
 
 describe('propose_change through the service', () => {
+  it('cancels a proposal recorded while regeneration resolves the model', async () => {
+    let release!: (key: string) => void
+    let resolving = false
+    let sawCancellation = false
+    const s = setup([proposeStop(), fauxAssistantMessage('请确认。'), (context) => {
+      sawCancellation = JSON.stringify(context).includes('已取消 1 个待确认提案')
+      return fauxAssistantMessage('new')
+    }], {}, {}, [], () => {
+      resolving = true
+      return new Promise((resolve) => { release = resolve })
+    })
+    const { conversationId } = await s.service.send('acc-1', null, '停掉实例')
+    await s.waitDone(1)
+    const proposalId = s.proposalId()
+    const proposalRow = s.store.messages(conversationId).find((m) => (m.content as { details?: { proposal?: { id: string } } }).details?.proposal?.id === proposalId)!
+    s.store.truncateMessages(conversationId, proposalRow.id)
+    s.config.save({ keyMode: 'command', keyCommand: 'fake' })
+    const regenerating = s.service.regenerate('acc-1', conversationId, 0, '停掉实例', '换问题')
+    await vi.waitFor(() => expect(resolving).toBe(true))
+    await expect(s.service.confirmProposal('acc-1', conversationId, proposalId)).rejects.toThrow('正在重新生成')
+    expect(() => s.service.cancelProposal('acc-1', conversationId, proposalId)).toThrow('正在重新生成')
+    s.store.addMessage(conversationId, { role: proposalRow.role, content: proposalRow.content })
+    release('sk-test-key-0123456789abcdef')
+    await regenerating
+    await s.waitDone(2)
+    expect(s.service.engine.view(proposalId)?.state).toBe('cancelled')
+    expect(sawCancellation).toBe(true)
+    expect(s.audits()).toContain('proposal_cancelled')
+    expect(s.service.view('acc-1', conversationId).items.some((i) => i.kind === 'proposal')).toBe(false)
+  })
+  it('cancels a pending proposal before removing its turn and keeps the cancellation audit', async () => {
+    const s = setup([proposeStop(), fauxAssistantMessage('请确认。'), fauxAssistantMessage('换个回答。')])
+    const { conversationId } = await s.service.send('acc-1', null, '停掉实例')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    expect(s.service.engine.view(id)?.state).toBe('pending')
+    await s.service.regenerate('acc-1', conversationId, 0, '停掉实例', '只解释实例')
+    await s.waitDone(2)
+    expect(s.service.engine.view(id)?.state).toBe('cancelled')
+    expect(s.audits()).toContain('proposal_cancelled')
+    expect(s.fake.writes()).toEqual([])
+    await expect(s.service.confirmProposal('acc-1', conversationId, id)).rejects.toThrow()
+    expect(s.service.view('acc-1', conversationId).items.some((i) => i.kind === 'proposal')).toBe(false)
+  })
+
+  it('refuses regeneration before touching an executing proposal or its transcript', async () => {
+    let finishWrite!: (result: unknown) => void
+    const s = setup([proposeStop(), fauxAssistantMessage('请确认。'), fauxAssistantMessage('写完了')], {}, {
+      'ec2:StopInstances': () => new Promise((resolve) => { finishWrite = resolve })
+    })
+    const { conversationId } = await s.service.send('acc-1', null, '停掉实例')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    const confirming = s.service.confirmProposal('acc-1', conversationId, id)
+    await vi.waitFor(() => expect(s.service.engine.view(id)?.state).toBe('executing'))
+    const before = s.store.messages(conversationId)
+    await expect(s.service.regenerate('acc-1', conversationId, 0, '停掉实例', '换问题')).rejects.toThrow('提案正在执行')
+    expect(s.store.messages(conversationId)).toEqual(before)
+    expect(s.service.engine.view(id)?.state).toBe('executing')
+    await vi.waitFor(() => expect(finishWrite).toEqual(expect.any(Function)))
+    finishWrite({ StoppingInstances: [] })
+    await confirming
+    await s.waitDone(2)
+  })
+
+  it('keeps an executed change in audit when regenerating an earlier turn', async () => {
+    const s = setup([proposeStop(), fauxAssistantMessage('请确认。'), fauxAssistantMessage('已完成。'), fauxAssistantMessage('重新回答。')])
+    const { conversationId } = await s.service.send('acc-1', null, '停掉实例')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    await s.service.confirmProposal('acc-1', conversationId, id)
+    await s.waitDone(2)
+    expect(s.fake.writes()).toHaveLength(1)
+    await s.service.regenerate('acc-1', conversationId, 0, '停掉实例', '解释实例')
+    await s.waitDone(3)
+    expect(s.fake.writes()).toHaveLength(1)
+    expect(s.audits()).toContain('proposal_executed')
+    expect(s.service.view('acc-1', conversationId).items).toContainEqual(expect.objectContaining({ kind: 'note', text: expect.stringContaining('之前的操作可能已经执行') }))
+  })
+
+  it('keeps a prior proposal executed after a later turn when that later turn is regenerated', async () => {
+    const s = setup([proposeStop(), fauxAssistantMessage('请确认。'), fauxAssistantMessage('第二问答复。'), fauxAssistantMessage('已完成。'), fauxAssistantMessage('第二问新答复。')])
+    const { conversationId } = await s.service.send('acc-1', null, '停掉实例')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    await s.service.send('acc-1', conversationId, '第二问')
+    await s.waitDone(2)
+    await s.service.confirmProposal('acc-1', conversationId, id)
+    await s.waitDone(3)
+    await s.service.regenerate('acc-1', conversationId, 1, '第二问', '改过的第二问')
+    await s.waitDone(4)
+    const reloaded = toChatItems(s.store.messages(conversationId).map((m) => m.content as never))
+    expect(reloaded.find((i) => i.kind === 'proposal')).toMatchObject({ proposal: { state: 'succeeded' } })
+    expect(reloaded.some((i) => i.kind === 'card' && i.id === `r-${id}`)).toBe(true)
+    expect(s.fake.writes()).toHaveLength(1)
+  })
+
+  it('retries a later question after a kept proposal result and sends the question once', async () => {
+    const seen: string[] = []
+    const s = setup([proposeStop(), fauxAssistantMessage('请确认。'), fauxAssistantMessage('第二问答复。'), fauxAssistantMessage('已完成。'), (ctx) => {
+      seen.push(JSON.stringify(ctx.messages))
+      return fauxAssistantMessage('第二问新答复。')
+    }])
+    const { conversationId } = await s.service.send('acc-1', null, '停掉实例')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    await s.service.send('acc-1', conversationId, '第二问')
+    await s.waitDone(2)
+    await s.service.confirmProposal('acc-1', conversationId, id)
+    await s.waitDone(3)
+    await s.service.regenerate('acc-1', conversationId, 1, '第二问')
+    await s.waitDone(4)
+    const rows = s.store.messages(conversationId).filter((r) => r.role === 'user').map((r) => JSON.stringify(r.content))
+    expect(rows.filter((r) => r.includes('第二问'))).toHaveLength(1)
+    expect(rows.at(-2)).toContain('[proposal_result]')
+    expect(rows.at(-1)).toContain('第二问')
+    expect(seen[0]).toContain('[proposal_result]')
+    expect(seen[0].match(/第二问/g)).toHaveLength(1)
+  })
+
   it('refuses on a read-only account without any AWS call, and tells the model how to enable writes', async () => {
     const seen: string[] = []
     const s = setup([proposeStop(), (ctx) => (seen.push(lastToolResult(ctx)), fauxAssistantMessage('当前账号只读。'))], { aiAllowWrite: undefined })
@@ -474,7 +595,7 @@ describe('AI impact analysis through the service', () => {
     expect(s.audits()).toContain('proposal_analysis')
 
     // Usage: its own rows, in the conversation's total and the month, with an out-of-run usage event.
-    const rows = s.store.analysisUsage(conversationId)
+    const rows = s.store.conversationUsage(conversationId)
     expect(rows.reduce((n, r) => n + r.input, 0)).toBeGreaterThan(0)
     const totals = s.service.view('acc-1', conversationId).usage
     expect(s.events.filter((e) => e.event.type === 'usage' && e.runId === 0).length).toBeGreaterThanOrEqual(2)

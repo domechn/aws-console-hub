@@ -21,6 +21,13 @@ const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `i-${i}`,
 const table = (n: number): Block => ({ type: 'table', columns: [{ key: 'name', label: '名称' }], rows: rows(n) })
 
 describe('CardView', () => {
+  it('disables reply and copy card actions during regeneration', () => {
+    const html = renderToStaticMarkup(<CardView card={card({ actions: [
+      { id: 'reply', label: '回复', kind: 'reply', text: 'reply' },
+      { id: 'copy', label: '复制', kind: 'copy', text: 'value' }
+    ] })} disabled onAction={async () => ({ ok: true })} onLink={() => {}} />)
+    expect(html.match(/disabled=""/g)).toHaveLength(2)
+  })
   it('shows cell, kv and badge text as plain text, never as HTML', () => {
     const html = render(
       card({
@@ -78,6 +85,18 @@ describe('CardView', () => {
     expect(done).toContain('AI 分析（可能有误，请核对）')
     expect(done).toContain('风险已由「高」提高到「破坏性」：Principal * 且没有 Condition')
     expect(done).toContain('事实（1 条，展开看依据）')
+    expect(done).toContain('<details class="ai-analysis-evidence"><summary>依据：s3:GetBucketPolicy</summary>')
+    expect(done).toContain('<details class="ai-analysis-inferences"><summary>推断（1 条）</summary>')
+    expect(done).toContain('<details class="ai-analysis-uncertain"><summary>不确定的地方（1 处）</summary>')
+    const pending = renderToStaticMarkup(<CardView card={card({ v: 3, origin: 'system', blocks: [{
+      type: 'analysis', status: 'done', calls: 2, result: {
+        summary: '可能受影响', changes: [], impact: [{ kind: 'inference', text: '可能中断' }],
+        exposure: { level: 'unknown', who: [] }, reversibility: { level: 'unknown', how: '' },
+        risk: { level: 'high', reasons: [] }, uncertainties: ['未查到依赖'], confidence: 'low'
+      }
+    }] })} pendingProposal onAction={async () => ({ ok: true })} onLink={() => {}} />)
+    expect(pending).toContain('<details class="ai-analysis-inferences" open="">')
+    expect(pending).toContain('<details class="ai-analysis-uncertain" open="">')
     expect(done).toContain('依据：s3:GetBucketPolicy')
     expect(done).toContain('Principal.AWS = …:root')
     expect(done).toContain('推断</span>')

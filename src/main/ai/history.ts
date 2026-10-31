@@ -32,8 +32,13 @@ export interface StoredAgentMessage {
   usage?: Usage
   provider?: string
   model?: string
+  timestamp?: number
+  durationMs?: number
+  error?: string
+  retryable?: boolean
   /** User turns: the page they were asked on (app metadata, not sent to the model). */
   page?: { label: string; url: string }
+  rowId?: number
 }
 
 /** USD for `usage` at catalog `rates` ($ per 1M tokens). shortcut: ignores long-context price tiers; add them if a priced model in use has tiers. */
@@ -57,7 +62,7 @@ export function sumUsage(messages: StoredAgentMessage[], ratesFor: (provider: st
   return total
 }
 
-const textOf = (content: StoredAgentMessage['content']): string =>
+export const textOf = (content: StoredAgentMessage['content']): string =>
   typeof content === 'string' ? content : (content ?? []).filter((p) => p.type === 'text').map((p) => p.text ?? '').join('')
 
 /** The message is an assistant reply with some answer text (not only tool calls). */
@@ -134,7 +139,8 @@ export function toChatItems(
   now = Date.now(),
   pending?: ReadonlySet<string>,
   live?: (proposalId: string) => ProposalView | undefined,
-  liveApproval?: (toolCallId: string) => ApprovalView | undefined
+  liveApproval?: (toolCallId: string) => ApprovalView | undefined,
+  ratesFor?: (provider: string, model: string) => TokenRates | undefined
 ): ChatItem[] {
   const cards = transcriptCards(messages, now, pending)
   const results = new Map<string, ProposalResult>()
@@ -145,9 +151,21 @@ export function toChatItems(
   const items: ChatItem[] = []
   const tools = new Map<string, Extract<ChatItem, { kind: 'tool' }>>()
   const replyCalls = new Set<string>()
+  const toolStarted = new Map<string, number>()
+  let turnUsage: { input: number; output: number; costUsd?: number } | undefined
+  let turnModel: string | undefined
+  let turnAssistant: Extract<ChatItem, { kind: 'assistant' }> | undefined
+  let userOrdinal = 0
   for (const m of messages) {
-    if (m.role === 'user') {
+    if (m.role === 'note') {
+      items.push(m.error ? { kind: 'assistant', text: '', error: m.error, ...(m.retryable === false && { retryable: false }) } : { kind: 'note', text: textOf(m.content) })
+    } else if (m.role === 'user') {
       const text = textOf(m.content)
+      if (text !== ANSWER_REQUEST && text !== LIMIT_REQUEST) {
+        turnUsage = undefined
+        turnModel = undefined
+        turnAssistant = undefined
+      }
       if (text === ANSWER_REQUEST) continue
       if (text === LIMIT_REQUEST) {
         items.push({ kind: 'note', text: LIMIT_NOTE })
@@ -161,13 +179,26 @@ export function toChatItems(
       }
       const action = parseCardAction(text)
       const page = typeof m.page?.label === 'string' ? m.page.label : undefined
-      items.push({ kind: 'user', text: action ? cardActionLabel(action) : text, ...(page && { page }) })
+      items.push({ kind: 'user', text: action ? cardActionLabel(action) : text, ...(action && { cardAction: true }), ...(page && { page }), ...(m.rowId !== undefined && { ordinal: userOrdinal }) })
+      userOrdinal++
     } else if (m.role === 'assistant') {
+      if (m.usage) {
+        const rates = ratesFor?.(m.provider ?? '', m.model ?? '')
+        const cost = rates && (rates.input || rates.output) ? estimateCost(rates, m.usage) : undefined
+        turnUsage = {
+          input: (turnUsage?.input ?? 0) + m.usage.input,
+          output: (turnUsage?.output ?? 0) + m.usage.output,
+          ...(cost !== undefined && (turnUsage === undefined || turnUsage.costUsd !== undefined) && { costUsd: (turnUsage?.costUsd ?? 0) + cost })
+        }
+      }
+      if (m.model) turnModel = m.model
       const text = textOf(m.content)
       const error = m.stopReason === 'error' ? (m.errorMessage ?? '请求失败') : undefined
       if (text || error || m.stopReason === 'aborted') {
-        items.push({ kind: 'assistant', text, ...(error && { error }), ...(m.stopReason === 'aborted' && { aborted: true }) })
+        turnAssistant = { kind: 'assistant', text, ...(error && { error }), ...(m.stopReason === 'aborted' && { aborted: true }) }
+        items.push(turnAssistant)
       }
+      if (turnAssistant) Object.assign(turnAssistant, { ...(turnUsage && { usage: turnUsage }), ...(turnModel && { model: turnModel }) })
       for (const p of Array.isArray(m.content) ? m.content : []) {
         if (p.type !== 'toolCall' || !p.id) continue
         // No tool row: its result becomes the chips.
@@ -178,6 +209,7 @@ export function toChatItems(
         const code = scriptCode(p.name ?? '', p.arguments)
         const item = { kind: 'tool' as const, id: p.id, label: toolLabel(p.name ?? '', p.arguments), status: 'running' as const, ...(code !== undefined && { code }) }
         tools.set(p.id, item)
+        if (Number.isFinite(m.timestamp)) toolStarted.set(p.id, m.timestamp!)
         items.push(item)
       }
     } else if (m.role === 'toolResult' && m.toolCallId && replyCalls.has(m.toolCallId)) {
@@ -205,6 +237,7 @@ export function toChatItems(
       const calls = item.code === undefined ? undefined : scriptCalls(m.details)
       Object.assign(item, {
         status: m.isError || denied ? 'error' : 'ok',
+        ...(Number.isFinite(m.durationMs) && m.durationMs! >= 0 ? { ms: m.durationMs } : Number.isFinite(m.timestamp) && toolStarted.has(item.id) ? { ms: Math.max(0, m.timestamp! - toolStarted.get(item.id)!) } : {}),
         summary: typeof summary === 'string' ? summary : m.isError ? textOf(m.content).slice(0, 200) : undefined,
         ...(calls && { calls })
       })

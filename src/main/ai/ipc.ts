@@ -14,6 +14,7 @@ import {
   checkFormValues,
   checkId,
   checkPrompt,
+  checkUserIndex,
   checkProposalId,
   checkProvider,
   checkRowId,
@@ -60,6 +61,8 @@ export function registerAiIpc(win: BrowserWindow, ai: AiService, openLink: (acco
   handle('ai:conversations', (accountId) => ai.conversations(checkId(accountId, '账号 id')))
   handle('ai:history', (accountId, id) => ai.view(checkId(accountId, '账号 id'), checkId(id, '对话 id')))
   handle('ai:send', (accountId, id, text, page) => ai.send(checkId(accountId, '账号 id'), conversation(id), checkPrompt(text), checkFlag(page ?? true)))
+  handle('ai:regenerate', (accountId, id, index, expectedText, text) =>
+    ai.regenerate(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkUserIndex(index), checkPrompt(expectedText), text === undefined ? undefined : checkPrompt(text)))
   // The chip: what main would send as the current page (sanitized URL, title, parsed resource), or null.
   handle('ai:page-context', (accountId) => ai.pageContext(checkId(accountId, '账号 id')))
   handle('ai:page-toggle', (accountId, id, on) => ai.setPageContext(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkFlag(on)))

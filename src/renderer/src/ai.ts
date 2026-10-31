@@ -11,10 +11,13 @@ export function applyEvent(items: ChatItem[], e: AiEvent): ChatItem[] {
     if (last?.kind === 'assistant' && !last.error) return [...items.slice(0, -1), { ...last, text: last.text + e.text }]
     return [...items, { kind: 'assistant', text: e.text }]
   }
-  if (e.type === 'tool-start') return [...items, { kind: 'tool', id: e.id, label: e.label, status: 'running', ...(e.code !== undefined && { code: e.code }) }]
+  if (e.type === 'tool-start') return [...items, { kind: 'tool', id: e.id, label: e.label, status: 'running', ...(e.code !== undefined && { code: e.code }), ...(e.t !== undefined && { startedAt: e.t }) }]
   if (e.type === 'tool-end') {
     return items.map((i) => {
-      if (i.kind === 'tool' && i.id === e.id) return { ...i, status: e.ok ? 'ok' : 'error', summary: e.summary, ...(e.calls && { calls: e.calls }) }
+      if (i.kind === 'tool' && i.id === e.id) {
+        const { startedAt, ...tool } = i as typeof i & { startedAt?: number }
+        return { ...tool, status: e.ok ? 'ok' : 'error', summary: e.summary, ...(e.calls && { calls: e.calls }), ...(startedAt !== undefined && e.t !== undefined && { ms: Math.max(0, e.t - startedAt) }) }
+      }
       // A render_card that failed (the model gets the reason and usually retries): a failed tool row, not a card.
       if (i.kind === 'card' && i.id === e.id) return { kind: 'tool', id: i.id, label: '生成卡片', status: e.ok ? 'ok' : 'error', summary: e.summary }
       return i
@@ -48,6 +51,9 @@ export function applyEvent(items: ChatItem[], e: AiEvent): ChatItem[] {
     return at < 0 ? [...rows, item] : [...rows.slice(0, at + 1), item, ...rows.slice(at + 1)]
   }
   if (e.type === 'note') return [...items, { kind: 'note', text: e.text }]
+  if (e.type === 'error') {
+    return [...items, { kind: 'assistant', text: '', error: e.message, ...(e.retryable === false && { retryable: false }) }]
+  }
   if (e.type === 'replies') return [...items.filter((i) => i.kind !== 'replies'), { kind: 'replies', id: e.id, options: e.options }]
   return items
 }

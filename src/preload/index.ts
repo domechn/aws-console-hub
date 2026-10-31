@@ -56,6 +56,7 @@ const api: Api = {
     conversations: (accountId) => ipcRenderer.invoke('ai:conversations', accountId),
     history: (accountId, conversationId) => ipcRenderer.invoke('ai:history', accountId, conversationId),
     send: (accountId, conversationId, text, page) => ipcRenderer.invoke('ai:send', accountId, conversationId, text, page),
+    regenerate: (accountId, conversationId, userOrdinal, expectedText, text) => ipcRenderer.invoke('ai:regenerate', accountId, conversationId, userOrdinal, expectedText, text),
     pageContext: (accountId) => ipcRenderer.invoke('ai:page-context', accountId),
     setPageContext: (accountId, conversationId, on) => ipcRenderer.invoke('ai:page-toggle', accountId, conversationId, on),
     abort: (conversationId) => ipcRenderer.invoke('ai:abort', conversationId),

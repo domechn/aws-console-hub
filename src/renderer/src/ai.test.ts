@@ -4,6 +4,13 @@ import type { Card } from '../../shared/cards'
 import { aiReady, allowWriteWarning, applyEvent, formatCountdown, formatMonth, formatRates, formatUsage, formatUsd, ipcError, pendingProposals } from './ai'
 
 describe('applyEvent', () => {
+  it('keeps elapsed time on a completed live tool and puts provider errors inline', () => {
+    let items = applyEvent([{ kind: 'user', text: 'q' }], { type: 'tool-start', id: 'a', label: '查询', t: 100 })
+    items = applyEvent(items, { type: 'tool-end', id: 'a', ok: true, t: 1900 })
+    expect(items[1]).toMatchObject({ kind: 'tool', ms: 1800 })
+    items = applyEvent(items, { type: 'error', message: '限流' })
+    expect(items[2]).toMatchObject({ kind: 'assistant', error: '限流' })
+  })
   it('streams text into a new assistant item after the user message, then into the same one', () => {
     let items: ChatItem[] = [{ kind: 'user', text: 'hi' }]
     items = applyEvent(items, { type: 'text-delta', text: '你' })
@@ -58,6 +65,33 @@ describe('applyEvent', () => {
   it('leaves items alone for non-display events', () => {
     const items: ChatItem[] = [{ kind: 'user', text: 'q' }]
     expect(applyEvent(items, { type: 'done' })).toBe(items)
+  })
+
+  it('places a queued turn error after its own user item', () => {
+    const items: ChatItem[] = [
+      { kind: 'user', text: 'first' },
+      { kind: 'assistant', text: 'done' },
+      { kind: 'user', text: 'second' }
+    ]
+    expect(applyEvent(items, { type: 'error', message: 'failed' })).toEqual([
+      ...items,
+      { kind: 'assistant', text: '', error: 'failed' }
+    ])
+  })
+
+  it('does not attach a queued failure to the previous reply', () => {
+    const items: ChatItem[] = [{ kind: 'user', text: 'first' }, { kind: 'assistant', text: 'prior reply' }]
+    expect(applyEvent(items, { type: 'error', message: 'setup failed', retryable: false })).toEqual([
+      ...items,
+      { kind: 'assistant', text: '', error: 'setup failed', retryable: false }
+    ])
+  })
+  it('shows a live failure separately from a completed reply', () => {
+    const items: ChatItem[] = [{ kind: 'user', text: 'first' }, { kind: 'assistant', text: 'finished' }]
+    expect(applyEvent(items, { type: 'error', message: 'failed' })).toEqual([
+      ...items,
+      { kind: 'assistant', text: '', error: 'failed' }
+    ])
   })
 })
 

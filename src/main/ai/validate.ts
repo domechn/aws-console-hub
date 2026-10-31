@@ -25,6 +25,11 @@ export function checkPrompt(v: unknown): string {
   return v.trim()
 }
 
+export function checkUserIndex(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new Error('无效的消息位置')
+  return v
+}
+
 export function checkTitle(v: unknown): string {
   if (typeof v !== 'string') throw new Error('无效的标题')
   const title = v.replace(/[\r\n\t]+/g, ' ').trim()

@@ -71,7 +71,19 @@ const MIGRATIONS = [
   // Per conversation: the current page goes to the model each turn (the chip's ×). On for the ones already there.
   `alter table conversations add column page_context integer not null default 1;`,
   // An impact analysis's replies are not in the transcript: their usage rows name the conversation they were for.
-  `alter table usage add column analysis_of text;`
+  `alter table usage add column analysis_of text;`,
+  `alter table usage add column conversation_id text;
+   create index if not exists messages_by_created on messages (created_at);
+   update usage set conversation_id = (
+     select m.conversation_id from messages m join conversations c on c.id = m.conversation_id
+     where m.role = 'assistant' and m.created_at = usage.t and c.account_id = usage.account_id
+       and coalesce(json_extract(m.content_json, '$.model'), '') = usage.model
+       and round(coalesce(json_extract(m.content_json, '$.usage.input'), 0)) = usage.input
+       and round(coalesce(json_extract(m.content_json, '$.usage.output'), 0)) = usage.output
+     limit 1
+   ) where analysis_of is null;
+   create index usage_by_conversation on usage (conversation_id);`,
+  `update usage set conversation_id = analysis_of where analysis_of is not null and conversation_id is null;`
 ]
 
 const DAY = 86400_000
@@ -184,8 +196,8 @@ export class AiStore {
     if (m.role === 'assistant' && c?.usage) {
       const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : 0)
       this.db
-        .prepare('insert into usage (t, account_id, provider, model, input, output, cache_read, cache_write) select ?, account_id, ?, ?, ?, ?, ?, ? from conversations where id = ?')
-        .run(now, String(c.provider ?? ''), String(c.model ?? ''), n(c.usage.input), n(c.usage.output), n(c.usage.cacheRead), n(c.usage.cacheWrite), conversationId)
+        .prepare('insert into usage (t, account_id, provider, model, input, output, cache_read, cache_write, conversation_id) select ?, account_id, ?, ?, ?, ?, ?, ?, ? from conversations where id = ?')
+        .run(now, String(c.provider ?? ''), String(c.model ?? ''), n(c.usage.input), n(c.usage.output), n(c.usage.cacheRead), n(c.usage.cacheWrite), conversationId, conversationId)
     }
   }
 
@@ -193,17 +205,14 @@ export class AiStore {
   addAnalysisUsage(accountId: string, conversationId: string, r: UsageRow): void {
     const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : 0)
     this.db
-      .prepare('insert into usage (t, account_id, provider, model, input, output, cache_read, cache_write, analysis_of) values (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(Date.now(), accountId, r.provider, r.model, n(r.input), n(r.output), n(r.cacheRead), n(r.cacheWrite), conversationId)
+        .prepare('insert into usage (t, account_id, provider, model, input, output, cache_read, cache_write, analysis_of, conversation_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(Date.now(), accountId, r.provider, r.model, n(r.input), n(r.output), n(r.cacheRead), n(r.cacheWrite), conversationId, conversationId)
   }
 
-  /** The impact analyses' usage for one conversation, summed per model. */
-  analysisUsage(conversationId: string): UsageRow[] {
-    return this.db
-      .prepare(
-        'select provider, model, sum(input) as input, sum(output) as output, sum(cache_read) as cacheRead, sum(cache_write) as cacheWrite from usage where analysis_of = ? group by provider, model'
-      )
-      .all(conversationId) as unknown as UsageRow[]
+  conversationUsage(conversationId: string): UsageRow[] {
+    return this.db.prepare(
+      'select provider, model, sum(input) as input, sum(output) as output, sum(cache_read) as cacheRead, sum(cache_write) as cacheWrite from usage where conversation_id = ? group by provider, model'
+    ).all(conversationId) as unknown as UsageRow[]
   }
 
   /** Usage since `from` (ms), summed per model; deleted conversations included. */
@@ -258,6 +267,13 @@ export class AiStore {
       )
       .all(conversationId) as (Omit<StoredMessage, 'content'> & { content_json: string })[]
     return rows.map(({ content_json, ...r }) => ({ ...r, content: JSON.parse(content_json) }))
+  }
+
+  /** Remove transcript rows from a selected message; usage and audit are separate append-only records. */
+  truncateMessages(conversationId: string, fromId: number, keepIds: number[] = []): void {
+    const keep = keepIds.length ? ` and id not in (${keepIds.map(() => '?').join(',')})` : ''
+    this.db.prepare(`delete from messages where conversation_id = ? and id >= ?${keep}`).run(conversationId, fromId, ...keepIds)
+    this.db.prepare('update conversations set updated_at = ? where id = ?').run(Date.now(), conversationId)
   }
 
   /** Messages go with their conversations (on delete cascade). The audit log is kept: it is a safety record. */

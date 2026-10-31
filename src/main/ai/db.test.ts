@@ -21,7 +21,7 @@ describe('ai.sqlite', () => {
     db.close()
 
     const again = openAiDb()
-    expect(again.prepare('pragma user_version').get()).toEqual({ user_version: 4 })
+    expect(again.prepare('pragma user_version').get()).toEqual({ user_version: 6 })
     expect(new AiStore(again).conversations('a1').map((c) => c.title)).toEqual(['first'])
     again.close()
   })
@@ -85,21 +85,51 @@ describe('ai.sqlite', () => {
     old.prepare("insert into messages (conversation_id, role, content_json, created_at) values (?, 'assistant', ?, ?)").run(c, JSON.stringify({ role: 'assistant', provider: 'deepseek', model: 'm', usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0 } }), NOW)
     old.exec('alter table conversations drop column page_context')
     migrate(old)
-    expect(old.prepare('pragma user_version').get()).toEqual({ user_version: 4 })
+    expect(old.prepare('pragma user_version').get()).toEqual({ user_version: 6 })
     // v3: conversations from before it send the current page (the default).
     expect(v1.pageContext(c)).toBe(true)
     v1.setPageContext(c, false)
     expect(v1.pageContext(c)).toBe(false)
     expect(v1.usageSince(0)).toEqual([{ provider: 'deepseek', model: 'm', input: 100, output: 20, cacheRead: 5, cacheWrite: 0 }])
+    expect(v1.conversationUsage(c)).toEqual([{ provider: 'deepseek', model: 'm', input: 100, output: 20, cacheRead: 5, cacheWrite: 0 }])
 
     const { store } = fresh()
     const id = store.createConversation('a1')
     store.addMessage(id, { role: 'assistant', content: { role: 'assistant', provider: 'openai', model: 'g', usage: { input: 10, output: 3, cacheRead: 0, cacheWrite: 0 } } })
     store.addMessage(id, { role: 'assistant', content: { role: 'assistant', provider: 'openai', model: 'g', usage: { input: 1, output: 1, cacheRead: -5, cacheWrite: 'x' } } })
     store.addMessage(id, { role: 'user', content: { usage: { input: 999 } } })
+    store.truncateMessages(id, 0)
+    expect(store.conversationUsage(id)).toEqual([{ provider: 'openai', model: 'g', input: 11, output: 4, cacheRead: 0, cacheWrite: 0 }])
     store.deleteConversation(id)
     expect(store.usageSince(0)).toEqual([{ provider: 'openai', model: 'g', input: 11, output: 4, cacheRead: 0, cacheWrite: 0 }])
     expect(store.usageSince(Date.now() + DAY)).toEqual([])
+  })
+
+  it('backfills analysis conversation usage when upgrading v5, including repeated migration', () => {
+    const db = new DatabaseSync(':memory:')
+    migrate(db)
+    db.exec('pragma user_version = 5')
+    db.prepare("insert into usage (t, account_id, provider, model, input, output, analysis_of) values (?, ?, ?, ?, ?, ?, ?)").run(NOW, 'a1', 'deepseek', 'm', 7, 3, 'conversation-1')
+    migrate(db)
+    migrate(db)
+    expect(db.prepare('select conversation_id from usage where analysis_of = ?').get('conversation-1')).toEqual({ conversation_id: 'conversation-1' })
+    expect(new AiStore(db).conversationUsage('conversation-1')).toMatchObject([{ input: 7, output: 3 }])
+  })
+
+  it('matches rounded reply usage during v5 backfill and creates the time index', () => {
+    const db = new DatabaseSync(':memory:')
+    migrate(db)
+    const store = new AiStore(db)
+    const id = store.createConversation('a1')
+    db.prepare("insert into messages (conversation_id, role, content_json, created_at) values (?, 'assistant', ?, ?)").run(
+      id, JSON.stringify({ role: 'assistant', model: 'm', usage: { input: 1.6, output: 2.6 } }), NOW
+    )
+    db.exec('drop index usage_by_conversation; alter table usage drop column conversation_id; pragma user_version = 4')
+    db.prepare("insert into usage (t, account_id, provider, model, input, output) values (?, 'a1', '', 'm', 2, 3)").run(NOW)
+    migrate(db)
+    expect(db.prepare("select conversation_id from usage where model = 'm'").get()).toEqual({ conversation_id: id })
+    expect(db.prepare("select name from sqlite_master where type = 'index' and name = 'messages_by_created'").get()).toEqual({ name: 'messages_by_created' })
+    expect(store.conversationUsage(id)).toMatchObject([{ input: 2, output: 3 }])
   })
 
   it('prunes audit rows and conversations past their retention, never younger ones, and vacuums at most weekly', () => {

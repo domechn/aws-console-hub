@@ -150,6 +150,12 @@ describe('Composer', () => {
     expect(html).toContain('class="ai-send stop" aria-label="停止生成"')
     expect(html).not.toContain('aria-label="发送"')
   })
+  it('labels stopping a paused answer without implying an approval decision', () => {
+    const html = render({ busy: true, pausedOnApproval: true })
+    expect(html).toContain('aria-label="停止回答（不会批准或拒绝审批）"')
+    expect(html).toContain('class="ai-send stop paused"')
+    expect(html).toContain('>停止回答</span>')
+  })
 
   it('「服务商 · 模型」 opens the current provider’s models; the switch is said to be global', () => {
     expect(modelLabel(config, MODELS)).toBe('Bedrock · Claude Sonnet 5.5')

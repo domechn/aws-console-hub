@@ -34,6 +34,28 @@ describe('cost', () => {
 })
 
 describe('toChatItems', () => {
+  it('rebuilds tool duration and whole-turn usage from stored messages', () => {
+    const items = toChatItems([
+      { role: 'user', content: '查', timestamp: 100 },
+      { role: 'assistant', timestamp: 200, provider: 'deepseek', model: 'a', usage: usage(100, 10), content: [{ type: 'toolCall', id: 't1', name: 'aws_whoami' }] },
+      { role: 'toolResult', toolCallId: 't1', timestamp: 450, durationMs: 75, details: { summary: '完成' } },
+      { role: 'assistant', timestamp: 500, provider: 'deepseek', model: 'a', usage: usage(200, 20), content: [{ type: 'text', text: '好了' }] }
+    ], 1000, undefined, undefined, undefined, () => rates)
+    expect(items.find((i) => i.kind === 'tool')).toMatchObject({ ms: 75 })
+    expect(items.find((i) => i.kind === 'assistant')).toMatchObject({
+      model: 'a',
+      usage: { input: 300, output: 30, costUsd: (300 * 0.3 + 30 * 1.2) / 1e6 }
+    })
+  })
+
+  it('uses stored message times when an older tool result has no duration', () => {
+    const items = toChatItems([
+      { role: 'assistant', timestamp: 100, content: [{ type: 'toolCall', id: 'old', name: 'aws_whoami' }] },
+      { role: 'toolResult', toolCallId: 'old', timestamp: 240, details: { summary: '完成' } }
+    ])
+    expect(items).toEqual([{ kind: 'tool', id: 'old', label: '确认当前身份', status: 'ok', summary: '完成', ms: 140 }])
+  })
+
   it('turns the transcript into display items without tool result bodies', () => {
     const items = toChatItems([
       { role: 'user', content: '列出 EC2' },

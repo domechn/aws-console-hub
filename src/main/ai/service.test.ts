@@ -10,6 +10,7 @@ import type { AwsAccount } from '../../shared/types'
 vi.mock('electron', () => ({ app: { getPath: () => os.tmpdir() } }))
 
 const { AiStore, migrate } = await import('./db')
+const { transcriptCards } = await import('./history')
 const { AiConfigStore } = await import('./config')
 const { createAppModels } = await import('./providers')
 const { AiService, LIMITS, budgetVerdict } = await import('./service')
@@ -48,7 +49,7 @@ type Deps = ConstructorParameters<typeof AiService>[0]
 
 function setup(
   responses: FauxResponseStep[],
-  opts: { key?: string; tokensPerSecond?: number; keys?: Deps['keys']; credentials?: Deps['credentials']; now?: () => Date; page?: { url: string; title: string } | null; readPage?: Deps['readPage'] } = {}
+  opts: { key?: string; tokensPerSecond?: number; keys?: Deps['keys']; credentials?: Deps['credentials']; now?: () => Date; page?: { url: string; title: string } | null; readPage?: Deps['readPage']; runKeyCommand?: Deps['runKeyCommand'] } = {}
 ) {
   const db = new DatabaseSync(':memory:')
   db.exec('pragma foreign_keys = on')
@@ -88,7 +89,7 @@ function setup(
     emit: (e) => events.push(e),
     openConsole,
     toast,
-    runKeyCommand: async () => KEY,
+    runKeyCommand: opts.runKeyCommand ?? (async () => KEY),
     now: opts.now ?? (() => new Date('2026-10-29T00:00:00Z'))
   })
   const done = (): Promise<void> =>
@@ -106,6 +107,162 @@ function setup(
 const types = (events: AiEventEnvelope[]): string[] => events.map((e) => e.event.type)
 
 describe('AiService', () => {
+  it('keeps a prior proposal result but drops an orphan card click when editing a later turn', async () => {
+    let seen = ''
+    const s = setup([(ctx) => {
+      seen = JSON.stringify(ctx.messages.filter((m) => m.role === 'user'))
+      return fauxAssistantMessage('new answer')
+    }])
+    const id = s.store.createConversation('acc-1')
+    const put = (role: string, content: unknown) => s.store.addMessage(id, { role, content })
+    put('user', { role: 'user', content: 'first' })
+    put('toolResult', { role: 'toolResult', content: [{ type: 'text', text: 'shown' }], details: {
+      proposal: { id: 'p-0123456789ab' },
+      card: { id: 'c-0123456789ab', v: 1, origin: 'model', blocks: [{ type: 'markdown', text: 'shown' }], createdAt: 0, expiresAt: Number.MAX_SAFE_INTEGER, state: 'active' }
+    } })
+    put('user', { role: 'user', content: 'second' })
+    put('user', { role: 'user', content: '[proposal_result] {"proposalId":"p-0123456789ab","status":"succeeded","title":"done"}' })
+    put('user', { role: 'user', content: '[card_action] {"cardId":"c-0123456789ab","action":"detail"}' })
+    await s.service.regenerate('acc-1', id, 1, 'second', 'edited')
+    await s.done()
+    const text = s.store.messages(id).map((r) => JSON.stringify(r.content)).join('\n')
+    expect(text).toContain('[proposal_result]')
+    expect(text).not.toContain('[card_action]')
+    expect(seen).not.toContain('[card_action]')
+    expect(text).toContain('edited')
+    const cards = transcriptCards(s.store.messages(id).map((r) => r.content as never), Date.now())
+    expect(cards.get('c-0123456789ab')?.state).toBe('active')
+  })
+  it('regenerates a chosen user turn and removes later transcript rows while retaining audit and usage', async () => {
+    const s = setup([fauxAssistantMessage([fauxToolCall('aws_whoami', {})], { stopReason: 'toolUse' }), fauxAssistantMessage('旧答'), fauxAssistantMessage('后答'), fauxAssistantMessage('新答')])
+    const { conversationId } = await s.service.send('acc-1', null, '第一问')
+    await s.done()
+    s.events.length = 0
+    await s.service.send('acc-1', conversationId, '第二问')
+    await s.done()
+    const audit = s.store.auditEntries()
+    const month = s.service.monthUsage().totals.input
+    s.events.length = 0
+    await s.service.regenerate('acc-1', conversationId, 0, '第一问', '改过的第一问')
+    await s.done()
+    expect(s.service.view('acc-1', conversationId).items.map((i) => i.kind === 'user' || i.kind === 'assistant' || i.kind === 'note' ? i.text : i.kind)).toEqual([
+      expect.stringContaining('之前的操作可能已经执行'),
+      '改过的第一问', '新答'
+    ])
+    expect(s.store.auditEntries().slice(0, audit.length)).toEqual(audit)
+    expect(s.store.auditEntries().at(-1)?.type).toBe('conversation_regenerated')
+    expect(s.service.monthUsage().totals.input).toBeGreaterThan(month)
+    expect(s.service.view('acc-1', conversationId).usage.input).toBe(s.service.monthUsage().totals.input)
+  })
+
+  it('targets adjacent user turns by ordinal and rejects a stale original text', async () => {
+    const s = setup([fauxAssistantMessage('new')])
+    const id = s.store.createConversation('acc-1', 'adjacent', true)
+    s.store.addMessage(id, { role: 'user', content: { role: 'user', content: 'first' } })
+    s.store.addMessage(id, { role: 'user', content: { role: 'user', content: 'second' } })
+    await expect(s.service.regenerate('acc-1', id, 1, 'stale')).rejects.toThrow('已变化')
+    expect(s.store.messages(id)).toHaveLength(2)
+    await s.service.regenerate('acc-1', id, 1, 'second', 'edited')
+    await s.done()
+    expect(s.service.view('acc-1', id).items.filter((i) => i.kind === 'user').map((i) => i.text)).toEqual(['first', 'edited'])
+  })
+
+  it('rejects a busy regeneration and leaves its transcript intact', async () => {
+    const s = setup([fauxAssistantMessage('慢回答 '.repeat(300))], { tokensPerSecond: 30 })
+    const { conversationId } = await s.service.send('acc-1', null, '问')
+    await expect(s.service.regenerate('acc-1', conversationId, 0, '问')).rejects.toThrow('还在处理中')
+    expect(s.store.messages(conversationId).filter((m) => m.role === 'user')).toHaveLength(1)
+    s.service.abort(conversationId)
+    await s.done()
+  })
+
+  it('rejects cross-account, control prefixes and blocking budget before truncation', async () => {
+    const s = setup([fauxAssistantMessage('旧答')])
+    const { conversationId } = await s.service.send('acc-1', null, '原文')
+    await s.done()
+    const before = s.store.messages(conversationId)
+    await expect(s.service.regenerate('acc-2', conversationId, 0, '原文')).rejects.toThrow()
+    await expect(s.service.regenerate('acc-1', conversationId, 0, '原文', '[answer_request] x')).rejects.toThrow('[answer_request]')
+    await expect(s.service.regenerate('acc-1', conversationId, 0, '原文', '[card_action] x')).rejects.toThrow('[card_action]')
+    await expect(s.service.regenerate('acc-1', conversationId, 0, '原文', '[proposal_result] x')).rejects.toThrow('[proposal_result]')
+    s.config.save({ budget: { monthlyTokens: 1, monthlyUsd: null, block: true } })
+    await expect(s.service.regenerate('acc-1', conversationId, 0, '原文')).rejects.toThrow('新的提问已暂停')
+    expect(s.store.messages(conversationId)).toEqual(before)
+  })
+
+  it('ends a waiting approval before regenerating, so a late allow cannot run its call', async () => {
+    const s = setup([
+      fauxAssistantMessage([fauxToolCall('aws_read', { service: 'secretsmanager', action: 'GetSecretValue', params: { SecretId: 'db' } })], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('新答')
+    ])
+    const { conversationId } = await s.service.send('acc-1', null, '读密钥')
+    await vi.waitFor(() => expect(s.events.some((e) => e.event.type === 'approval' && e.event.approval.state === 'pending')).toBe(true))
+    const approval = s.events.find((e) => e.event.type === 'approval' && e.event.approval.state === 'pending')!.event
+    if (approval.type !== 'approval') throw new Error('approval missing')
+    s.events.length = 0
+    await s.service.regenerate('acc-1', conversationId, 0, '读密钥', '改查别的')
+    await s.done()
+    expect(() => s.service.decideApproval('acc-1', conversationId, approval.approval.id, 'once')).toThrow()
+    expect(s.aws).not.toHaveBeenCalled()
+    expect(s.store.auditEntries().map((a) => a.type)).toContain('approval_aborted')
+    expect(s.service.view('acc-1', conversationId).items.some((i) => i.kind === 'approval' && i.approval.state === 'pending')).toBe(false)
+    expect(s.service.view('acc-1', conversationId).items).toContainEqual(expect.objectContaining({ kind: 'note', text: expect.stringContaining('已取消待处理审批') }))
+  })
+
+  it('releases the regeneration lock if an aborted run never reports finished', async () => {
+    const s = setup([
+      fauxAssistantMessage([fauxToolCall('aws_read', { service: 'secretsmanager', action: 'GetSecretValue', params: { SecretId: 'db' } })], { stopReason: 'toolUse' })
+    ])
+    const { conversationId } = await s.service.send('acc-1', null, '读密钥')
+    await vi.waitFor(() => expect(s.events.some((e) => e.event.type === 'approval' && e.event.approval.state === 'pending')).toBe(true))
+    const runs = (s.service as unknown as { runs: Map<string, { finished: Promise<void> }> }).runs
+    runs.get(conversationId)!.finished = new Promise(() => {})
+    const before = s.store.messages(conversationId).filter((m) => m.role === 'user')
+    vi.useFakeTimers()
+    try {
+      const retry = s.service.regenerate('acc-1', conversationId, 0, '读密钥', '新问题')
+      const rejection = expect(retry).rejects.toThrow('停止上一条回答超时')
+      await vi.advanceTimersByTimeAsync(25_000)
+      await rejection
+      expect(s.store.messages(conversationId).filter((m) => m.role === 'user')).toEqual(before)
+      expect((s.service as unknown as { regenerating: Set<string> }).regenerating.has(conversationId)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('regenerates a failed answer with the original prompt', async () => {
+    const s = setup([fauxAssistantMessage('', { stopReason: 'error', errorMessage: '失败' }), fauxAssistantMessage('重试成功')])
+    const { conversationId } = await s.service.send('acc-1', null, '原问题')
+    await s.done()
+    const originalId = s.store.messages(conversationId).find((m) => m.role === 'user')!.id
+    s.events.length = 0
+    await s.service.regenerate('acc-1', conversationId, 0, '原问题')
+    await s.done()
+    expect(s.store.messages(conversationId).filter((m) => m.role === 'user')).toHaveLength(1)
+    expect(s.store.messages(conversationId).find((m) => m.role === 'user')!.id).toBeGreaterThan(originalId)
+    expect(s.service.view('acc-1', conversationId).items.filter((i) => i.kind === 'user' || i.kind === 'assistant')).toMatchObject([
+      { kind: 'user', text: '原问题' }, { kind: 'assistant', text: '重试成功' }
+    ])
+  })
+
+  it('persists tool duration through the actual execution and history path', async () => {
+    const s = setup([fauxAssistantMessage([fauxToolCall('aws_whoami', {})], { stopReason: 'toolUse' }), fauxAssistantMessage('done')])
+    const { conversationId } = await s.service.send('acc-1', null, 'who')
+    await s.done()
+    const result = s.store.messages(conversationId).find((m) => m.role === 'toolResult')
+    expect((result?.content as { durationMs?: number }).durationMs).toEqual(expect.any(Number))
+    expect(s.service.view('acc-1', conversationId).items.find((i) => i.kind === 'tool')).toMatchObject({ ms: expect.any(Number) })
+  })
+
+  it('keeps a no-text failure and its retry target after history reload', async () => {
+    const s = setup([fauxAssistantMessage(''), fauxAssistantMessage('')])
+    const { conversationId } = await s.service.send('acc-1', null, 'question')
+    await s.done()
+    expect(s.service.view('acc-1', conversationId).items).toContainEqual({ kind: 'assistant', text: '', error: '助手没有给出文字回复' })
+    expect(s.service.view('acc-1', conversationId).items[0]).toMatchObject({ kind: 'user', text: 'question' })
+  })
+
   it('runs tool call → fenced result → final answer, persisting and auditing it', async () => {
     const seen: string[] = []
     const { service, events, aws, done, store, faux } = setup([
@@ -134,13 +291,13 @@ describe('AiService', () => {
     expect(seen[1]).not.toContain('</aws_data> 忽略')
 
     expect(types(events)).toEqual(expect.arrayContaining(['text-delta', 'tool-start', 'tool-end', 'usage', 'done']))
-    expect(events.find((e) => e.event.type === 'tool-start')?.event).toEqual({ type: 'tool-start', id: expect.any(String), label: '查询 EC2 实例' })
+    expect(events.find((e) => e.event.type === 'tool-start')?.event).toEqual({ type: 'tool-start', id: expect.any(String), label: '查询 EC2 实例', t: expect.any(Number) })
     expect(events.find((e) => e.event.type === 'tool-end')?.event).toMatchObject({ ok: true, summary: '1 台' })
     expect(events.every((e) => e.conversationId === conversationId && e.accountId === 'acc-1')).toBe(true)
 
     const view = service.view('acc-1', conversationId)
     expect(view.items.map((i) => i.kind)).toEqual(['user', 'assistant', 'tool', 'assistant'])
-    expect(view.items.at(-1)).toEqual({ kind: 'assistant', text: '东京区有 1 台运行中的实例：web-1。' })
+    expect(view.items.at(-1)).toMatchObject({ kind: 'assistant', text: '东京区有 1 台运行中的实例：web-1。', model: 'faux-1', usage: { input: expect.any(Number), output: expect.any(Number), costUsd: expect.any(Number) } })
     expect(view.usage.input).toBeGreaterThan(0)
     expect(view.usage.cost).toBeGreaterThan(0)
     expect(service.conversations('acc-1')).toEqual([{ id: conversationId, title: '列出运行中的 EC2', updatedAt: expect.any(Number) }])
@@ -291,10 +448,10 @@ return { checked: rows.length, running: rows.filter((r) => r.Reservations[0].Ins
     expect(aws).toHaveBeenCalledTimes(LIMITS.maxToolCalls + 5)
     expect(toolResult).toContain(`{\\"checked\\":${LIMITS.maxToolCalls + 5},\\"running\\":${LIMITS.maxToolCalls + 5}}`)
     expect(events.map((e) => e.event)).not.toContainEqual(expect.objectContaining({ type: 'note' }))
-    expect(events.find((e) => e.event.type === 'tool-start')?.event).toEqual({ type: 'tool-start', id: expect.any(String), label: '运行脚本', code })
+    expect(events.find((e) => e.event.type === 'tool-start')?.event).toEqual({ type: 'tool-start', id: expect.any(String), label: '运行脚本', code, t: expect.any(Number) })
     const calls = [`ec2:DescribeInstances ×${LIMITS.maxToolCalls + 5}`]
     expect(events.find((e) => e.event.type === 'tool-end')?.event).toMatchObject({ ok: true, summary: `${LIMITS.maxToolCalls + 5} 次调用`, calls })
-    expect(service.view('acc-1', conversationId).items.find((i) => i.kind === 'tool')).toEqual({ kind: 'tool', id: expect.any(String), label: '运行脚本', status: 'ok', summary: `${LIMITS.maxToolCalls + 5} 次调用`, code, calls })
+    expect(service.view('acc-1', conversationId).items.find((i) => i.kind === 'tool')).toEqual({ kind: 'tool', id: expect.any(String), label: '运行脚本', status: 'ok', summary: `${LIMITS.maxToolCalls + 5} 次调用`, code, calls, ms: expect.any(Number) })
     const audit = store.auditEntries()
     expect(audit.map((a) => [a.type, (a.data as { tool?: string }).tool])).toEqual([['tool_call', 'run_script']])
     expect(JSON.stringify(audit)).not.toContain('InstanceIds')
@@ -321,6 +478,22 @@ return { checked: rows.length, running: rows.filter((r) => r.Reservations[0].Ins
     ])
     const items = service.view('acc-1', conversationId).items
     expect(items.map((i) => (i.kind === 'tool' ? `tool:${i.status}` : i.kind === 'approval' ? `approval:${i.approval.state}` : i.kind))).toEqual(['user', 'tool:ok', 'approval:allowed', 'assistant'])
+  })
+
+  it('excludes the time spent waiting for approval from tool duration', async () => {
+    const { service, events, done } = setup([
+      fauxAssistantMessage([fauxToolCall('aws_read', { service: 'sqs', action: 'GetQueueUrl', params: { QueueName: 'q' }, reason: 'check' })], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('done')
+    ])
+    const { conversationId } = await service.send('acc-1', null, 'check')
+    await vi.waitFor(() => expect(events.some((e) => e.event.type === 'approval')).toBe(true))
+    const pending = events.find((e) => e.event.type === 'approval')!.event
+    if (pending.type !== 'approval') throw new Error('no approval')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    service.decideApproval('acc-1', conversationId, pending.approval.id, 'once')
+    await done()
+    const tool = service.view('acc-1', conversationId).items.find((i) => i.kind === 'tool')
+    expect(tool?.kind === 'tool' && tool.ms).toBeLessThan(200)
   })
 
   it('asks before a sensitive read; a denial reaches the model and AWS is never called', async () => {
@@ -475,6 +648,25 @@ const lastText = (context: { messages: unknown[] }): string => {
 }
 
 describe('AiService cards', () => {
+  it('rejects card clicks while a regeneration waits for model setup', async () => {
+    let release!: (key: string) => void
+    let resolving = false
+    const s = setup([fauxAssistantMessage([renderCard(TABLE_CARD)], { stopReason: 'toolUse' }), fauxAssistantMessage('old'), fauxAssistantMessage('new')], {
+      runKeyCommand: () => { resolving = true; return new Promise((resolve) => { release = resolve }) }
+    })
+    const { conversationId } = await s.service.send('acc-1', null, 'list')
+    await s.done()
+    const card = cardsIn(s.events)[0]
+    s.config.save({ keyMode: 'command', keyCommand: 'fake' })
+    s.events.length = 0
+    const regenerate = s.service.regenerate('acc-1', conversationId, 0, 'list', 'list again')
+    await vi.waitFor(() => expect(resolving).toBe(true))
+    await expect(s.service.cardAction('acc-1', conversationId, card.id, 'more')).rejects.toThrow('还在处理中')
+    release(KEY)
+    await regenerate
+    await s.done()
+    expect(s.service.view('acc-1', conversationId).items.some((i) => i.kind === 'user' && i.cardAction)).toBe(false)
+  })
   it('render_card → card shown and stored → reply click → the next turn gets [card_action]', async () => {
     let toolResult = ''
     let injected = ''
@@ -515,7 +707,7 @@ describe('AiService cards', () => {
     expect(events.map((e) => e.event)).toContainEqual({ type: 'user', text: `「详情」 · ${ROW}` })
     const view = service.view('acc-1', conversationId)
     expect(view.items.map((i) => i.kind)).toEqual(['user', 'assistant', 'card', 'assistant', 'user', 'assistant'])
-    expect(view.items[4]).toEqual({ kind: 'user', text: `「详情」 · ${ROW}` })
+    expect(view.items[4]).toEqual({ kind: 'user', text: `「详情」 · ${ROW}`, cardAction: true, ordinal: 1 })
     expect(view.items[2]).toMatchObject({ kind: 'card', card: { id: card.id, state: 'resolved' } })
 
     // History alone (a restart: no in-memory state) shows the stored card, resolved.
@@ -603,6 +795,27 @@ describe('AiService cards', () => {
     expect(types(events).indexOf('user')).toBeLessThan(types(events).indexOf('done'))
     expect(new Set(events.filter((e) => e.event.type !== 'card-state').map((e) => e.runId)).size).toBe(2)
     expect(service.view('acc-1', conversationId).items.slice(-3).map((i) => i.kind)).toEqual(['assistant', 'user', 'assistant'])
+  })
+
+  it('stores a failed queued turn error after the prior reply and keeps the card available', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let key: string | undefined = KEY
+    const s = setup([
+      fauxAssistantMessage([renderCard(TABLE_CARD)], { stopReason: 'toolUse' }),
+      async () => { await gate; return fauxAssistantMessage('prior reply') }
+    ], { keys: { get: () => key, has: () => !!key, set: () => ({ ok: true, persisted: false }), delete: () => {}, canPersist: () => false } })
+    const { conversationId } = await s.service.send('acc-1', null, 'q')
+    await until(() => cardsIn(s.events).length === 1)
+    const [card] = cardsIn(s.events)
+    await s.service.cardAction('acc-1', conversationId, card.id, 'more')
+    key = undefined
+    release()
+    await s.done()
+    const items = s.service.view('acc-1', conversationId).items
+    expect(items.at(-2)).toMatchObject({ kind: 'assistant', text: 'prior reply' })
+    expect(items.at(-1)).toMatchObject({ kind: 'assistant', error: expect.stringContaining('API key'), retryable: false })
+    expect(items.find((i) => i.kind === 'card')).toMatchObject({ card: { state: 'active' } })
   })
 
   it('stopping drops queued replies and frees their cards', async () => {
@@ -825,8 +1038,8 @@ describe('AiService page context', () => {
     const view = service.view('acc-1', conversationId)
     expect(view.pageContext).toBe(true)
     expect(view.items.filter((i) => i.kind === 'user')).toEqual([
-      { kind: 'user', text: '这个桶是干嘛的', page: 'S3 · patch-bucket · 对象' },
-      { kind: 'user', text: '那这个呢', page: 'EC2 · i-0123456789abcdef0' }
+      { kind: 'user', text: '这个桶是干嘛的', page: 'S3 · patch-bucket · 对象', ordinal: 0 },
+      { kind: 'user', text: '那这个呢', page: 'EC2 · i-0123456789abcdef0', ordinal: 1 }
     ])
     expect(service.pageContext('acc-1')?.label).toBe('EC2 · i-0123456789abcdef0')
     opts.page = { url: 'https://docs.aws.amazon.com/', title: 'Docs' }
@@ -842,7 +1055,7 @@ describe('AiService page context', () => {
     expect(seen[0].system).not.toContain('<current_page>')
     expect(seen[0].tools).not.toContain('read_current_page')
     expect(service.view('acc-1', conversationId).pageContext).toBe(false)
-    expect(service.view('acc-1', conversationId).items[0]).toEqual({ kind: 'user', text: '这个桶呢' })
+    expect(service.view('acc-1', conversationId).items[0]).toEqual({ kind: 'user', text: '这个桶呢', ordinal: 0 })
 
     expect(() => service.setPageContext('acc-2', conversationId, true)).toThrow('对话不存在')
     service.setPageContext('acc-1', conversationId, true)
@@ -881,7 +1094,7 @@ describe('AiService page context', () => {
     expect(readPage).toHaveBeenCalledWith('acc-1')
     expect(result).toContain('PAGE-TEXT-7f3')
     expect(result).toContain('page:read_current_page')
-    expect(events.map((e) => e.event)).toContainEqual({ type: 'tool-start', id: expect.any(String), label: '读取当前页面' })
+    expect(events.map((e) => e.event)).toContainEqual({ type: 'tool-start', id: expect.any(String), label: '读取当前页面', t: expect.any(Number) })
     expect(service.view('acc-1', conversationId).items).toContainEqual(expect.objectContaining({ kind: 'tool', label: '读取当前页面', status: 'ok' }))
     const audits = store.auditEntries()
     expect(audits).toContainEqual(expect.objectContaining({ type: 'tool_call', data: expect.objectContaining({ tool: 'read_current_page', ok: true, chars: 25 }) }))
@@ -997,7 +1210,7 @@ describe('AiService quick replies', () => {
     expect(faux.state.callCount).toBe(4)
     expect(events.map((e) => e.event)).toContainEqual({ type: 'error', message: '助手没有给出文字回复' })
     expect(types(events)).not.toContain('replies')
-    expect(service.view('acc-1', conversationId).items.map((i) => i.kind)).toEqual(['user', 'tool'])
+    expect(service.view('acc-1', conversationId).items.map((i) => i.kind)).toEqual(['user', 'tool', 'assistant'])
   })
 
   it('a chip click is an ordinary send: control prefixes are refused there too, and the chips are gone after it', async () => {

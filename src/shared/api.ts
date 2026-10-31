@@ -123,6 +123,8 @@ export interface AiApi {
    * Progress comes via onEvent.
    */
   send(accountId: string, conversationId: string | null, text: string, page?: boolean): Promise<AiSendResult>
+  /** Rerun the user turn at this ordinal if its original text still matches. */
+  regenerate(accountId: string, conversationId: string, userOrdinal: number, expectedText: string, text?: string): Promise<AiSendResult>
   /** The current page as the model would get it (sanitized URL, title, parsed resource); null off the console. */
   pageContext(accountId: string): Promise<PageContext | null>
   /** The chip's ×: the conversation stops (or starts again) sending the current page. */
