@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>AWS Console Hub (small)</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#31435a" />
+      <stop offset="1" stop-color="#141b25" />
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#ffc95e" />
+      <stop offset="1" stop-color="#f57c00" />
+    </linearGradient>
+  </defs>
+
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="url(#bg)" />
+
+  <!-- Simplified stack for 16-64px: bigger cards, thicker gaps, no fine detail.
+       Every feature here stays >= 1px once downsampled to 32px. -->
+  <rect x="314" y="228" width="520" height="360" rx="64" fill="#a35f0f" />
+
+  <rect x="218" y="298" width="588" height="428" rx="98" fill="#141b25" />
+  <rect x="252" y="332" width="520" height="360" rx="64" fill="#de880c" />
+
+  <rect x="156" y="402" width="588" height="428" rx="98" fill="#141b25" />
+  <rect x="190" y="436" width="520" height="360" rx="64" fill="url(#front)" />
+
+  <!-- single bold screen block: reads as a window even at 16px -->
+  <rect x="250" y="520" width="400" height="200" rx="40" fill="#16202c" />
+</svg>

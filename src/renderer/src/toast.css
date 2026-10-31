@@ -1,0 +1,90 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* The overlay view is transparent: only the toasts themselves paint. */
+html,
+body {
+  background: transparent;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif;
+  font-size: 12px;
+  color: #1b2027;
+}
+
+/* Padding leaves room for the shadow inside the view's bounds. */
+.toast-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.toast-stack:empty {
+  padding: 0;
+}
+
+.toast {
+  display: flex;
+  gap: 8px;
+  padding: 9px 9px 9px 11px;
+  border-radius: 8px;
+  border: 1px solid #c6cdd6;
+  background: #ffffff;
+  box-shadow: 0 6px 18px rgba(20, 30, 45, 0.18);
+}
+
+.toast.error {
+  background: #fdecea;
+  border-color: #efb8b0;
+  border-left: 3px solid #d13212;
+}
+
+.toast.info {
+  border-left: 3px solid #0972d3;
+}
+
+.toast-message {
+  flex: 1;
+  min-width: 0;
+  max-height: 7.5em;
+  overflow-y: auto;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.toast-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  flex: none;
+}
+
+.toast-count {
+  padding: 2px 4px;
+  color: #6b7684;
+  font-variant-numeric: tabular-nums;
+}
+
+.toast-actions button {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #6b7684;
+  font: inherit;
+  cursor: pointer;
+}
+
+.toast-actions button:hover {
+  background: rgba(0, 0, 0, 0.07);
+  color: #1b2027;
+}
+
+.toast-actions button:focus-visible {
+  outline: 2px solid #0972d3;
+}
