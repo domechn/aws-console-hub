@@ -146,7 +146,7 @@ const RequestBlock = Type.Object({ type: Type.Literal('request'), action: Str(15
 /**
  * Card v2: the readable change preview that replaces `diff` (main/ai/changes/common.ts `Change`). A headline, then by
  * kind: labelled fields (create, request), changed items only (modify), state chips (state), what goes and what stays
- * (delete). Values are display strings main formatted; long ones are cut on screen with 展开.
+ * (delete). Values are display strings main formatted; the renderer shows them in full.
  */
 const ChangeBlock = Type.Object({
   type: Type.Literal('change'),

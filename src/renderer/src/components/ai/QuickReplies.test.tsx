@@ -49,29 +49,29 @@ describe('visibleReplies', () => {
 })
 
 describe('QuickReplies', () => {
-  it('renders keyboard-reachable buttons and sends nothing by itself', () => {
+  it('a 「接下来」 list of keyboard-reachable buttons that sends nothing by itself', () => {
     const onSend = vi.fn()
-    const html = renderToStaticMarkup(<QuickReplies options={STOP} onSend={onSend} />)
+    const html = renderToStaticMarkup(<QuickReplies options={[{ label: '看 CPU 曲线', text: '看 worker-1 的 CPU 曲线' }, ...STOP]} onSend={onSend} />)
     expect(html).toContain('role="group" aria-label="快捷回复"')
-    expect(html.match(/<button type="button"/g)).toHaveLength(2)
-    expect(html).toContain('>停止</button>')
+    expect(html).toContain('>接下来</div>')
+    expect(html.match(/<button type="button"/g)).toHaveLength(3)
+    expect(html).toMatch(/class="ai-reply" title="看 worker-1 的 CPU 曲线"><svg[^]*?<\/svg><span>看 CPU 曲线<\/span><\/button>/)
     expect(onSend).not.toHaveBeenCalled()
   })
 
-  it('destructive-sounding chips get the amber warn style (and nothing else changes)', () => {
-    const html = renderToStaticMarkup(
-      <QuickReplies options={[...STOP, { label: '是', text: 'Delete the bucket' }, { label: '清空', text: '清空' }, { label: '查看', text: '查看详情' }]} onSend={() => {}} />
-    )
-    expect(html).toContain('class="ai-reply-chip" title="停止">停止<')
-    expect(html).toContain('class="ai-reply-chip warn" title="终止这台实例">终止<')
-    expect(html).toContain('class="ai-reply-chip warn" title="Delete the bucket">是<')
-    expect(html).toContain('class="ai-reply-chip warn" title="清空">清空<')
-    expect(html).toContain('class="ai-reply-chip" title="查看详情">查看<')
+  it('replies that read like a change get the amber warn style and icon (and nothing else changes)', () => {
+    const warn = ['停止', '终止这台实例', 'Delete the bucket', '清空', '重启 web-1', '修改超时', '撤销授权', 'Reboot it']
+    const plain = ['查看详情', '列出实例', 'Show the logs']
+    const html = renderToStaticMarkup(<QuickReplies options={[...warn, ...plain].map((text, i) => ({ label: `选项${i}`, text }))} onSend={() => {}} />)
+    for (const t of warn) expect(html).toContain(`class="ai-reply warn" title="${t}"`)
+    for (const t of plain) expect(html).toContain(`class="ai-reply" title="${t}"`)
+    // Not by colour alone: a warning triangle instead of the arrow.
+    expect(html.match(/M12 4 21 19.5H3z/g)).toHaveLength(warn.length)
   })
 
-  it('a click hands the chip text to the composer send, exactly as typed', () => {
+  it('a click hands the reply text to the composer send, exactly as typed', () => {
     const onSend = vi.fn()
-    const buttons = (QuickReplies({ options: STOP, onSend }).props.children as ReactElement<{ onClick: () => void }>[])
+    const buttons = (QuickReplies({ options: STOP, onSend }).props.children as [unknown, ReactElement<{ onClick: () => void }>[]])[1]
     buttons[1].props.onClick()
     expect(onSend).toHaveBeenCalledExactlyOnceWith('终止这台实例')
   })

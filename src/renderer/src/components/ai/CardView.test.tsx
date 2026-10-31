@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { Block, Card } from '../../../../shared/cards'
@@ -83,6 +85,7 @@ describe('CardView', () => {
     expect(done).toContain('<th scope="col">会改变什么</th>')
     expect(done).not.toMatch(/<img|<b>/)
     expect(done).toContain('&lt;b&gt;新策略&lt;/b&gt;')
+    expect(done).toContain('class="ai-table-scroll"><table class="ai-table ai-change-table"')
     // A model card never draws one.
     expect(render(card({ blocks: [{ type: 'analysis', status: 'done', calls: 0 }] }))).not.toContain('ai-analysis')
   })
@@ -102,9 +105,8 @@ describe('CardView', () => {
     expect(create).toContain('在 internal-tools · ap-northeast-1 创建 1 台 t4g.small')
     expect(create).toContain('<dt>实例类型</dt>')
     expect(create).toContain('按需参考价')
-    // Long values are cut with 展开.
-    expect(create).toContain('展开')
-    expect(create).not.toContain('x'.repeat(300))
+    expect(create).toContain('x'.repeat(300))
+    expect(create).not.toContain('展开')
 
     const modify = system({
       type: 'change',
@@ -121,6 +123,8 @@ describe('CardView', () => {
     expect(modify).toContain('<td class="after">prod</td>')
     expect(modify).not.toMatch(/ai-diff|>[+−~]</)
     expect(system({ type: 'change', kind: 'modify', summary: 's', rows: [{ item: 'a', before: '1', after: '2' }], heads: { before: '提案时', after: '确认时' } })).toContain('<th scope="col">确认时</th>')
+    const long = 'z'.repeat(300)
+    expect(system({ type: 'change', kind: 'modify', summary: 's', rows: [{ item: 'a', before: long, after: long }] })).toContain(long)
 
     const state = system({ type: 'change', kind: 'state', summary: 's', states: [{ name: 'web-1（i-0abc）', from: '运行中', to: '已停止' }] })
     expect(state).toMatch(/web-1（i-0abc）<\/span><span class="ai-chip">运行中<\/span>.*已停止/)
@@ -137,16 +141,106 @@ describe('CardView', () => {
     expect(render(card({ blocks: [{ type: 'change', kind: 'state', summary: 'MODEL-SAYS', states: [] }] }))).not.toContain('MODEL-SAYS')
   })
 
+  it('shows exact request JSON open before proposal controls, including long values', () => {
+    const exact = '{"Value":"' + 'q'.repeat(350) + '"}'
+    const html = render(card({ origin: 'system', blocks: [{ type: 'change', kind: 'request', summary: '发送', fields: [{ label: 'Value', value: 'q'.repeat(350) }], raw: exact }] }))
+    expect(html).toContain(exact.replaceAll('"', '&quot;'))
+    expect(html).toMatch(/<details class="ai-change-raw" open=""/)
+    expect(html).not.toContain('展开')
+  })
+
+  it('system facts and analysis values show all text without an expand control', () => {
+    const long = '长'.repeat(320)
+    const html = render(card({
+      origin: 'system',
+      blocks: [
+        { type: 'kv', items: [{ label: '事实', value: long }] },
+        { type: 'analysis', status: 'done', calls: 0, result: {
+          summary: '影响', changes: [{ label: '参数', before: long, after: long }],
+          impact: [], exposure: { level: 'none', who: [] },
+          reversibility: { level: 'unknown', how: '' }, risk: { level: 'low', reasons: [] },
+          uncertainties: [], confidence: 'low'
+        } }
+      ]
+    }))
+    expect(html.match(new RegExp(long, 'g'))).toHaveLength(3)
+    expect(html).not.toContain('展开</button>')
+    const model = render(card({ blocks: [{ type: 'kv', items: [{ label: '事实', value: long }] }] }))
+    expect(model).toContain('展开</button>')
+  })
+
+  it('old diffs show missing values as ∅', () => {
+    const html = render(card({ origin: 'system', blocks: [{ type: 'diff', lines: [
+      { path: 'a', op: 'add', after: undefined },
+      { path: 'b', op: 'remove', before: undefined }
+    ] }] }))
+    expect(html.match(/∅/g)).toHaveLength(2)
+  })
+
   it('pages tables over 20 rows and offers TSV copy', () => {
     const html = render(card({ blocks: [table(45)], actions: [{ id: 'detail', label: '详情', kind: 'reply' }] }))
+    expect(html).toContain('class="ai-table-scroll ai-model-table-scroll"')
     expect(html.match(/<tr>/g)).toHaveLength(21) // header + 20
     expect(html).toContain('1 / 3')
     expect(html).toContain('复制为 TSV')
     expect(html).toContain('aria-label="详情：i-0"')
-    // The action column has a visible header of its own.
-    expect(html).toContain('<th scope="col" class="ai-row-actions">操作</th>')
+    // The action column is named for screen readers; it takes no room for a visible header.
+    expect(html).toContain('<th scope="col" class="ai-row-actions" aria-label="操作"></th>')
     expect(html).toContain('<td class="ai-row-actions"><span class="ai-row-actions-inner">')
     expect(tableTsv({ type: 'table', columns: [{ key: 'a', label: 'A' }], rows: [{ id: 'r', cells: { a: 'x\ty\nz' } }] })).toBe('A\nx y z')
+  })
+
+  it('row actions: the console link is an icon named for its row; replies (red ones in red) and copies sit in the ⋯ menu; no sticky column', () => {
+    const html = render(
+      card({
+        blocks: [
+          {
+            type: 'table',
+            columns: [
+              { key: 'name', label: '名称' },
+              { key: 'type', label: '类型' },
+              { key: 'az', label: '可用区' },
+              { key: 'cpu', label: 'CPU · 1h', align: 'right' }
+            ],
+            rows: [{ id: 'i-0abc', cells: { name: 'worker-1', type: 'c6g.large', az: '1a', cpu: '71%' }, actions: ['open', 'logs', 'stop', 'cp'] }]
+          }
+        ],
+        actions: [
+          { id: 'open', label: '打开', kind: 'open-console', url: 'https://console.aws.amazon.com/ec2/home#InstanceDetails:instanceId={row}' },
+          { id: 'logs', label: '查日志', kind: 'reply' },
+          { id: 'stop', label: '停止…', kind: 'reply', style: 'danger' },
+          { id: 'cp', label: '复制 id', kind: 'copy', text: '{row}' }
+        ]
+      })
+    )
+    expect(html).toMatch(/<button type="button" class="ai-row-icon" aria-label="打开：i-0abc" title="打开（在 Console 中打开）"><svg/)
+    expect(html).toMatch(/<button type="button" class="ai-row-icon" popovertarget="([^"]+)" aria-label="更多操作：i-0abc" title="更多操作"><svg[^]*?<div id="\1" popover="auto" class="ai-row-menu" role="group" aria-label="操作：i-0abc">/i)
+    const menu = html.slice(html.indexOf('class="ai-row-menu"'), html.indexOf('</div>', html.indexOf('class="ai-row-menu"')))
+    expect(menu).toContain('aria-label="查日志：i-0abc">查日志</button>')
+    expect(menu).toMatch(/class="ai-card-btn danger"[^>]*aria-label="停止…：i-0abc">停止…<\/button>/)
+    expect(menu).toContain('>复制 id</button>')
+    expect(menu).not.toContain('打开')
+    // A row with only a console link has no ⋯.
+    const linkOnly = render(
+      card({
+        blocks: [{ type: 'table', columns: [{ key: 'name', label: '名称' }], rows: [{ id: 'r1', cells: { name: 'a' }, actions: ['open'] }] }],
+        actions: [{ id: 'open', label: '打开', kind: 'open-console', url: 'https://console.aws.amazon.com/' }]
+      })
+    )
+    expect(linkOnly).not.toContain('更多操作')
+    // The narrow (≤ 340px) list: name and the right-aligned number on line 1, the rest joined on line 2.
+    expect(html).toContain(
+      '<div class="ai-table-list-l1"><span class="ai-table-list-name">worker-1</span><span class="ai-table-list-num">71%</span></div><div class="ai-table-list-l2">c6g.large · 1a</div>'
+    )
+  })
+
+  it('the table CSS: the action column is not sticky, rows are 34px, the list form takes over at ≤ 340px', () => {
+    const css = readFileSync(join(__dirname, '../../styles.css'), 'utf8')
+    const actions = css.slice(css.indexOf('.ai-table .ai-row-actions {'), css.indexOf('}', css.indexOf('.ai-table .ai-row-actions {')))
+    expect(actions).not.toContain('sticky')
+    expect(css).toMatch(/\.ai-table th,\n\.ai-table td \{\n {2}height: 34px;/)
+    expect(css).toMatch(/@container ai-panel \(max-width: 340px\) \{\n {2}\.ai-model-table-scroll \{\n {4}display: none;/)
+    expect(css).toContain('container: ai-panel / inline-size;')
   })
 
   it('greys a handled card: state note, buttons disabled (copy still works)', () => {

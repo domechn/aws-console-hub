@@ -148,7 +148,7 @@ key 只能写入。界面上只显示「已设置 / 未设置」，任何地方�
 **什么自动执行，什么先问你**：
 
 - **自动执行**：EC2、S3、Lambda、RDS、CloudWatch、Logs、ECS、DynamoDB、CloudFormation、IAM、STS（只有 GetCallerIdentity）、Auto Scaling 的普通查询（`Describe*` / `List*` / `Get*` 等），以及面板里的专用查询工具。
-- **先问你（审批卡）**：其他服务的查询（SQS、SNS、KMS、Route 53、EKS、ECR、ELB、API Gateway、EventBridge、Step Functions、CloudTrail、ElastiCache、Kinesis、GuardDuty、Organizations、ACM、CloudFront、SSM、Secrets Manager）；敏感读取（密钥、SSM SecureString、S3 对象内容、DynamoDB 表数据（只允许 SELECT）、日志正文、实例密码 / 启动脚本、签发临时凭证、命令输出等）；参数里有 URL、别的账号的资源、或者不是本账号的桶。名称看不出是不是只读的操作不走审批卡，只能作为「通用请求」提出（要输入操作名）。助手会暂停，面板里出现一张盾牌图标的「需要你的审批」卡片：操作、账号和 region、应用为什么要问你（如「sqs 不在默认自动允许的服务里，需要你确认」）、助手给出的理由（标明是助手说的）、**将原样发送的参数**（只有密码、密钥这类值显示为「已隐藏 · N 个字符」；没有参数时写「无参数」）、请求 ID 和参数校验值。按钮：「允许一次」「拒绝」（卡片上按 esc 也是拒绝），下面一行较淡的「本对话中始终允许 service:action（此账号 · 此区域）」（只有普通查询才有）。倒计时写着「4:53 后自动拒绝」，最后一分钟变红；不处理视为拒绝，点「停止」也会作废。拒绝后助手会收到「用户拒绝了这次调用」，10 分钟内同一个操作不会再来问你。
+- **先问你（审批卡）**：其他服务的查询（SQS、SNS、KMS、Route 53、EKS、ECR、ELB、API Gateway、EventBridge、Step Functions、CloudTrail、ElastiCache、Kinesis、GuardDuty、Organizations、ACM、CloudFront、SSM、Secrets Manager）；敏感读取（密钥、SSM SecureString、S3 对象内容、DynamoDB 表数据（只允许 SELECT）、日志正文、实例密码 / 启动脚本、签发临时凭证、命令输出等）；参数里有 URL、别的账号的资源、或者不是本账号的桶。名称看不出是不是只读的操作不走审批卡，只能作为「通用请求」提出（要输入操作名）。助手会暂停，面板里出现一张盾牌图标的「需要你的审批」卡片：操作、账号和 region、应用为什么要问你（如「sqs 不在默认自动允许的服务里，需要你确认」）、助手给出的理由（标明是助手说的）、**将原样发送的参数**（只有密码、密钥这类值显示为「已隐藏 · N 个字符」；没有参数时写「无参数」）、请求 ID 和参数校验值。按钮：「允许一次」「拒绝」（卡片上按 esc 也是拒绝），下面一行较淡的「本对话始终允许此操作」（只有普通查询才有；范围是这个 service:action、此账号、此区域，写在提示里）。倒计时写着「4:53 后自动拒绝」，最后一分钟变红；不处理视为拒绝，点「停止」也会作废。拒绝后助手会收到「用户拒绝了这次调用」，10 分钟内同一个操作不会再来问你。
 - **列表以外的服务**：应用直接告诉助手「暂不支持执行 xxx」，不会出现卡片。
 - 允许之后的结果照样脱敏（密码、密钥、SecureString、私钥等显示为 `[redacted]`）和截断，再发给你选的模型服务商。S3 对象最多读前 16 KB。
 

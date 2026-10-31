@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   BEDROCK_PROVIDER_ID,
+  CUSTOM_PROVIDER_ID,
   type AiConfigView,
+  type AiModelInfo,
   type ApprovalDecision,
   type CardActionResult,
   type ChatItem,
@@ -13,14 +15,17 @@ import {
 } from '../../../../shared/ai'
 import type { FormValues } from '../../../../shared/cards'
 import type { AwsAccount } from '../../../../shared/types'
-import { aiReady, allowWriteWarning, applyEvent, formatMonth, formatUsage, hiddenPending, ipcError, pendingApprovals, pendingProposals, visibleReplies } from '../../ai'
+import { aiReady, allowWriteWarning, applyEvent, hiddenPending, ipcError, pendingApprovals, pendingProposals, pendingStatus, visibleReplies } from '../../ai'
+import { IconPause } from '../icons'
+import { ActivityGroup, groupTools, type NonToolItem } from './ActivityGroup'
 import { ApprovalCard } from './ApprovalCard'
 import { CardSkeleton, CardView } from './CardView'
+import { Composer, draftKey, draftStore, restoreFailedSend, scopedContent } from './Composer'
+import { EmptyState } from './EmptyState'
 import { Markdown } from './Markdown'
 import { PageChip } from './PageChip'
 import { ProposalCard } from './ProposalCard'
 import { QuickReplies } from './QuickReplies'
-import { ToolRow } from './ToolRow'
 
 export const PANEL_MIN_WIDTH = 320
 export const PANEL_MAX_WIDTH = 640
@@ -31,6 +36,8 @@ interface Props {
   width: number
   onResize: (width: number, done: boolean) => void
   onOpenSettings: () => void
+  /** The model chip saved a new model (ai:config-save); the app keeps the config. */
+  onConfig: (config: AiConfigView) => void
   onClose: () => void
   /** The account's「允许 AI 助手提出变更」switch, saved like the account modal does. */
   onSetAllowWrite: (allow: boolean) => Promise<void>
@@ -40,12 +47,10 @@ interface Props {
   pageKey: string
 }
 
-const SUGGESTIONS = ['列出当前 region 运行中的 EC2 实例', '本月成本前五的服务是哪些？', '有哪些 Lambda 函数？最近一小时谁报错了？', '列出所有 S3 存储桶']
-
 const ai = window.api.ai
 
 /** Right-hand chat panel. A sibling of the console column, so the native console view narrows instead of covering it. */
-export function AssistantPanel({ account, config, width, onResize, onOpenSettings, onClose, onSetAllowWrite, focusToken, pageKey }: Props): React.JSX.Element {
+export function AssistantPanel({ account, config, width, onResize, onOpenSettings, onConfig, onClose, onSetAllowWrite, focusToken, pageKey }: Props): React.JSX.Element {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [items, setItems] = useState<ChatItem[]>([])
@@ -55,6 +60,10 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const [running, setRunning] = useState<ReadonlySet<string>>(new Set())
   const [notice, setNotice] = useState<string | null>(null)
   const [input, setInput] = useState('')
+  const [viewScope, setViewScope] = useState(() => draftKey(account?.id ?? null, null))
+  const [drafts] = useState(draftStore)
+  // The configured provider's catalog, for the model chip.
+  const [models, setModels] = useState<AiModelInfo[]>([])
   // Chips the user started typing over (by their suggest_replies call id).
   const [dismissedReplies, setDismissedReplies] = useState<string | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -68,53 +77,73 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stickRef = useRef(true)
   const currentRef = useRef<string | null>(null)
-  currentRef.current = conversationId
+  const accountRef = useRef<string | null>(null)
   /** Last conversation shown per account, so switching accounts and back returns to it. */
   const lastByAccount = useRef(new Map<string, string | null>())
 
   const accountId = account?.id ?? null
+  accountRef.current = accountId
+  const scope = draftKey(accountId, conversationId)
+  currentRef.current = scope
+  const { items: visibleItems, input: visibleInput } = scopedContent(scope, viewScope, items, input)
   const ready = aiReady(config)
   const busy = conversationId !== null && running.has(conversationId)
 
   const loadConversation = useCallback(async (accId: string, id: string | null) => {
-    currentRef.current = id
+    const target = draftKey(accId, id)
+    currentRef.current = target
     setConversationId(id)
+    setViewScope(target)
+    setItems([])
+    setUsage(null)
     lastByAccount.current.set(accId, id)
     setNotice(null)
+    setInput(drafts.get(draftKey(accId, id)))
     if (!id) {
-      setItems([])
       setPageOn(true)
-      setUsage(null)
       void ai.usage().then(setMonth)
       return
     }
     try {
       const view = await ai.history(accId, id)
-      if (currentRef.current !== id) return
+      if (currentRef.current !== target) return
       setItems(view.items)
       setPageOn(view.pageContext)
       setUsage(view.usage)
       setMonth(view.month)
       stickRef.current = true
     } catch (err) {
-      setNotice(ipcError(err))
+      if (currentRef.current === target) setNotice(ipcError(err))
     }
-  }, [])
+  }, [drafts])
+
+  // Every keystroke, so switching away keeps the text without asking the input for it.
+  const setDraft = (text: string): void => {
+    setInput(text)
+    if (accountId) drafts.set(currentRef.current ?? scope, text)
+  }
 
   const refreshList = useCallback(async (accId: string): Promise<ConversationSummary[]> => {
     const list = await ai.conversations(accId)
-    setConversations(list)
+    if (accountRef.current === accId) setConversations(list)
     return list
   }, [])
 
   // Each account has its own conversations.
   useEffect(() => {
+    const target = draftKey(accountId, null)
+    currentRef.current = target
+    setConversationId(null)
+    setViewScope(target)
+    setItems([])
+    setUsage(null)
     if (!accountId) {
       setConversations([])
-      setConversationId(null)
-      setItems([])
+      setInput('')
       return
     }
+    setConversations([])
+    setInput(drafts.get(target))
     let cancelled = false
     void refreshList(accountId).then((list) => {
       if (cancelled) return
@@ -125,7 +154,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     return () => {
       cancelled = true
     }
-  }, [accountId, refreshList, loadConversation])
+  }, [accountId, refreshList, loadConversation, drafts])
 
   useEffect(
     () =>
@@ -138,9 +167,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           })
           if (acc === accountId) void refreshList(acc)
           // The stored transcript is the truth; the live items were a preview of it.
-          if (id === currentRef.current) {
+          if (draftKey(acc, id) === currentRef.current) {
             void ai.history(acc, id).then((view) => {
-              if (currentRef.current !== id) return
+              if (currentRef.current !== draftKey(acc, id)) return
               setItems(view.items)
               setUsage(view.usage)
               setMonth(view.month)
@@ -155,7 +184,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
         }
         // Month totals cover every conversation: any reply updates them.
         if (event.type === 'usage') setMonth(event.month)
-        if (id !== currentRef.current) return
+        if (draftKey(acc, id) !== currentRef.current) return
         if (event.type === 'usage') setUsage(event.usage)
         else if (event.type === 'error') setNotice(event.message)
         else setItems((prev) => applyEvent(prev, event))
@@ -182,6 +211,24 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       cancelled = true
     }
   }, [accountId, pageKey])
+
+  const provider = config?.provider ?? ''
+  useEffect(() => {
+    if (!provider || provider === CUSTOM_PROVIDER_ID) return setModels([])
+    let cancelled = false
+    ai.models(provider).then(
+      (list) => !cancelled && setModels(list),
+      () => !cancelled && setModels([])
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [provider])
+
+  // Global, like the settings: the next turn of every conversation uses it.
+  const pickModel = (model: string): void => {
+    ai.saveConfig({ model }).then(onConfig, (err) => setNotice(ipcError(err)))
+  }
 
   const togglePage = (on: boolean): void => {
     setPageOn(on)
@@ -225,26 +272,34 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
 
   const send = async (text: string): Promise<void> => {
     if (!accountId || !text.trim() || busy) return
+    const sentScope = scope
     setNotice(null)
-    setInput('')
+    setDraft('')
     stickRef.current = true
-    const previous = items
+    const previous = visibleItems
     setItems((prev) => [...prev, { kind: 'user', text: text.trim() }])
     try {
       const { conversationId: id, warning } = await ai.send(accountId, conversationId, text, pageOn)
-      if (warning) setNotice(warning)
+      if (warning && currentRef.current === sentScope) setNotice(warning)
       setRunning((prev) => new Set(prev).add(id))
+      void refreshList(accountId)
       if (id !== conversationId) {
-        currentRef.current = id
+        const nextScope = draftKey(accountId, id)
+        if (currentRef.current !== sentScope) return
+        currentRef.current = nextScope
         setConversationId(id)
+        setViewScope(nextScope)
         lastByAccount.current.set(accountId, id)
-        void refreshList(accountId)
       }
     } catch (err) {
       // Nothing was sent: give the text back.
-      setItems(previous)
-      setInput(text)
-      setNotice(ipcError(err))
+      const restored = restoreFailedSend(drafts.get(sentScope), text)
+      drafts.set(sentScope, restored)
+      if (currentRef.current === sentScope) {
+        setItems(previous)
+        setInput(restored)
+        setNotice(ipcError(err))
+      }
     }
   }
 
@@ -252,16 +307,14 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     if (conversationId) void ai.abort(conversationId)
   }
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-    // An IME composing Chinese uses Enter to commit the candidate, not to send.
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault()
-      void send(input)
-    } else if (e.key === 'Escape') {
-      e.preventDefault()
-      if (busy) stop()
-      else onClose()
-    }
+  // A suggestion goes into the input for the user to edit or send; it is never sent by itself.
+  const fill = (text: string): void => {
+    setDraft(text)
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      el?.focus()
+      el?.setSelectionRange(text.length, text.length)
+    })
   }
 
   const remove = async (): Promise<void> => {
@@ -342,8 +395,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     ai.revokeAllow(accountId, conversationId, key).then(refreshAllows, (err) => setNotice(ipcError(err)))
   }
 
-  const pendingCalls = pendingApprovals(items)
-  const pending = pendingProposals(items)
+  const pendingCalls = pendingApprovals(visibleItems)
+  const pending = pendingProposals(visibleItems)
   // The waiting call first (the answer is paused on it).
   const pendingIds = [...pendingCalls.map((id) => `approval-${id}`), ...pending.map((id) => `proposal-${id}`)]
   const pendingKey = pendingIds.join(' ')
@@ -371,7 +424,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     return () => io.disconnect()
   }, [pendingKey])
   const hidden = hiddenPending(pendingIds, outOfView)
-  const shownReplies = busy ? null : visibleReplies(items)
+  const status = pendingStatus(pendingCalls.length, pending.length, hidden.length > 0)
+  const shownReplies = busy ? null : visibleReplies(visibleItems)
   const replies = shownReplies && shownReplies.id !== dismissedReplies ? shownReplies : null
   const current = conversations.find((c) => c.id === conversationId)
   const allowed = allows.filter((a) => a.conversationId === conversationId)
@@ -457,28 +511,6 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
         </div>
       )}
 
-      {/* Only while a waiting card is scrolled out of the list: in the flow above it, so it never covers a message. */}
-      {hidden.length > 0 && (
-        <div className="ai-pending-banner" role="status">
-          <span aria-hidden>⚠</span>
-          <span className="ai-pending-text">
-            {[pendingCalls.length && `${pendingCalls.length} 个调用等待你审批`, pending.length && `${pending.length} 个变更提案等待你确认`].filter(Boolean).join('，')}
-          </span>
-          <button
-            type="button"
-            className="ai-card-btn"
-            onClick={() => {
-              // To the card and onto it, so Tab goes on to its buttons.
-              const card = document.getElementById(hidden[0])
-              card?.scrollIntoView({ block: 'center' })
-              card?.focus({ preventScroll: true })
-            }}
-          >
-            查看
-          </button>
-        </div>
-      )}
-
       {allowed.length > 0 && (
         <div className="ai-allows" role="group" aria-label="本对话已允许的动作">
           <span className="ai-dim small">本对话已允许：</span>
@@ -526,36 +558,35 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
             </button>
             <p className="ai-dim small">资源名、标签、日志等查询结果会发送给你选择的 LLM 服务商（用 Bedrock 时是你自己 AWS 账号里的 Bedrock）。</p>
           </div>
-        ) : items.length === 0 ? (
-          <div className="ai-empty">
-            <p>
-              在「<span className="dot" style={{ background: account.color }} />
-              {account.name}」里{account.aiAllowWrite ? '查询，或让助手提出变更（每项需你确认）' : '查询（只读）'}。试试：
-            </p>
-            <div className="ai-suggestions">
-              {SUGGESTIONS.map((s) => (
-                <button key={s} onClick={() => void send(s)}>
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
+        ) : visibleItems.length === 0 ? (
+          <EmptyState
+            account={account}
+            page={page}
+            recent={conversations.filter((c) => c.id !== conversationId)}
+            onPick={fill}
+            onOpen={(id) => void loadConversation(account.id, id)}
+            onAllowWrite={() => void toggleWrite()}
+          />
         ) : (
-          items.map((item, i) => (
-            <Item
-              key={item.kind === 'tool' || item.kind === 'card' || item.kind === 'proposal' || item.kind === 'approval' ? item.id : i}
-              item={item}
-              onLink={openLink}
-              onCardAction={cardAction}
-              onProposal={proposalAction}
-              onApproval={approvalAction}
-              accountColor={account.color}
-            />
-          ))
+          groupTools(visibleItems).map((item, i) =>
+            Array.isArray(item) ? (
+              <ActivityGroup key={item[0].id} tools={item} />
+            ) : (
+              <Item
+                key={item.kind === 'card' || item.kind === 'proposal' || item.kind === 'approval' ? item.id : i}
+                item={item}
+                onLink={openLink}
+                onCardAction={cardAction}
+                onProposal={proposalAction}
+                onApproval={approvalAction}
+                accountColor={account.color}
+              />
+            )
+          )
         )}
         {replies && <QuickReplies options={replies.options} onSend={(text) => void send(text)} />}
-        {/* Not while paused on an approval: its tool row already says the run waits for the user. */}
-        {busy && pendingCalls.length === 0 && items[items.length - 1]?.kind !== 'assistant' && items[items.length - 1]?.kind !== 'replies' && (
+        {/* Not while paused on an approval: the Activity line and the status line already say the run waits for the user. */}
+        {busy && pendingCalls.length === 0 && visibleItems[visibleItems.length - 1]?.kind !== 'assistant' && visibleItems[visibleItems.length - 1]?.kind !== 'replies' && (
           <div className="ai-thinking">
             <span className="spinner" />
           </div>
@@ -563,43 +594,53 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
         {notice && <div className="ai-notice">{notice}</div>}
       </div>
 
-      {account && ready && (
+      {account && ready && config && (
         <footer className="ai-footer">
-          <PageChip page={page} on={pageOn} readPage={config?.readPage !== false} onToggle={togglePage} />
-          <textarea
-            ref={inputRef}
-            value={input}
-            rows={3}
-            maxLength={8000}
-            aria-label="给 AI 助手的消息"
-            placeholder="问点什么…（↵ 发送，⇧↵ 换行）"
-            onChange={(e) => {
-              setInput(e.target.value)
-              // Typing means the user is writing their own answer: the chips go.
-              if (e.target.value && shownReplies) setDismissedReplies(shownReplies.id)
-            }}
-            onKeyDown={onKeyDown}
-          />
+          {status && (
+            // Says why the answer stopped and can bring the card into view; never a way to allow (only the card, next to its parameters, does that).
+            <div className="ai-status-line" role="status">
+              <IconPause />
+              <span className="ai-status-text">{status}</span>
+              {hidden.length > 0 && (
+                <button
+                  type="button"
+                  className="ai-card-btn"
+                  // Scroll only: the focus stays where the user left it, so a ↵ typed next can't land on the card.
+                  onClick={() => document.getElementById(hidden[0])?.scrollIntoView({ block: 'center' })}
+                >
+                  {hidden[0].startsWith('approval-') ? '跳到审批' : '跳到提案'}
+                </button>
+              )}
+            </div>
+          )}
+          {/* Always in view, not in the usage popover: it may be why a turn is refused. */}
           {month?.budget && (
             <div className={`ai-budget-note${month.blocked ? ' blocked' : ''}`} role="status">
               {month.budget}
             </div>
           )}
-          <div className="ai-footer-row">
-            <span className="ai-usage" title={`按模型目录价估算，仅供参考${usage && (usage.input || usage.output) ? `\n本对话：${formatUsage(usage)}` : ''}`}>
-              {usage && (usage.input || usage.output) ? <span className="ai-usage-line">本对话 {formatUsage(usage)}</span> : null}
-              {month && (month.totals.input || month.totals.output) ? <span className="ai-usage-line">{formatMonth(month)}</span> : null}
-            </span>
-            {busy ? (
-              <button className="ai-send stop" onClick={stop} title="停止生成（esc）">
-                停止生成
-              </button>
-            ) : (
-              <button className="ai-send primary" disabled={!input.trim()} onClick={() => void send(input)}>
-                发送
-              </button>
-            )}
-          </div>
+          <Composer
+            scope={scope}
+            value={visibleInput}
+            onChange={(text) => {
+              setDraft(text)
+              // Typing means the user is writing their own answer: the chips go.
+              if (text && shownReplies) setDismissedReplies(shownReplies.id)
+            }}
+            onSend={() => void send(visibleInput)}
+            onStop={stop}
+            onClose={onClose}
+            busy={busy}
+            history={visibleItems.flatMap((i) => (i.kind === 'user' ? [i.text] : []))}
+            inputRef={inputRef}
+            chip={page !== undefined && <PageChip page={page} on={pageOn} readPage={config.readPage !== false} onToggle={togglePage} />}
+            config={config}
+            models={models}
+            onModel={pickModel}
+            onOpenSettings={onOpenSettings}
+            usage={usage}
+            month={month}
+          />
         </footer>
       )}
     </aside>
@@ -607,7 +648,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
 }
 
 interface ItemProps {
-  item: ChatItem
+  item: NonToolItem
   onLink: (url: string) => void
   onCardAction: (cardId: string, actionId: string, rowId?: string, values?: FormValues) => Promise<CardActionResult>
   onProposal: (proposalId: string, confirm: boolean, typed?: string) => Promise<CardActionResult>
@@ -630,7 +671,6 @@ function Item({ item, onLink, onCardAction, onProposal, onApproval, accountColor
   }
   // Chips are drawn once, under the last reply (visibleReplies), not in place.
   if (item.kind === 'replies') return null
-  if (item.kind === 'tool') return <ToolRow item={item} />
   if (item.kind === 'note') return <div className="ai-dim small">{item.text}</div>
   if (item.kind === 'approval') {
     const id = item.approval.id

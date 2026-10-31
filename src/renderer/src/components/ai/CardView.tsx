@@ -3,6 +3,7 @@ import type { CardActionResult } from '../../../../shared/ai'
 import type { Block, Card, CardAction, CardState, Field, FormValues } from '../../../../shared/cards'
 import { fieldError, fillRow, SYSTEM_BLOCK_TYPES } from '../../../../shared/cardRules'
 import { ipcError } from '../../ai'
+import { IconExternal, IconMore } from '../icons'
 import { Markdown, safeHref } from './Markdown'
 
 /**
@@ -32,6 +33,7 @@ interface Props {
 /** What the blocks need from the card. */
 interface Ctx {
   live: boolean
+  system: boolean
   actions: Map<string, CardAction>
   run: (a: CardAction, rowId?: string, values?: FormValues) => void
   copy: (text: string, key: string) => void
@@ -76,8 +78,8 @@ export function CardView({ card, onAction, onLink, accountColor }: Props): React
       .then((r) => !r.ok && setError(r.error), (err) => setError(ipcError(err)))
       .finally(() => setBusy(false))
   }
-  const ctx: Ctx = { live: state === 'active' && !busy, actions: new Map(actions.map((a) => [a.id, a])), run, copy, copied, onLink }
   const system = card.origin === 'system'
+  const ctx: Ctx = { live: state === 'active' && !busy, system, actions: new Map(actions.map((a) => [a.id, a])), run, copy, copied, onLink }
 
   return (
     <section
@@ -135,6 +137,39 @@ function ActionButton({ action: a, rowId, ctx }: { action: CardAction; rowId?: s
   )
 }
 
+/**
+ * A table row's actions in two 24px icons, so the column never covers the data: the first console link, and ⋯ for
+ * the rest (replies, copies; red ones stay red), named in full. The menu is a native popover: it sits in the top
+ * layer (the table's scroll box can't clip it) and closes on esc or a click outside.
+ */
+function RowActions({ ids, rowId, ctx }: { ids: string[]; rowId: string; ctx: Ctx }): React.JSX.Element {
+  const menuId = useId()
+  const acts = ids.flatMap((id) => ctx.actions.get(id) ?? [])
+  const link = acts.find((a) => a.kind === 'open-console')
+  const rest = acts.filter((a) => a !== link)
+  return (
+    <span className="ai-row-actions-inner">
+      {link && (
+        <button type="button" className="ai-row-icon" disabled={!ctx.live} aria-label={`${link.label}：${rowId}`} title={`${link.label}（在 Console 中打开）`} onClick={() => ctx.run(link, rowId)}>
+          <IconExternal />
+        </button>
+      )}
+      {rest.length > 0 && (
+        <>
+          <button type="button" className="ai-row-icon" popoverTarget={menuId} aria-label={`更多操作：${rowId}`} title="更多操作">
+            <IconMore />
+          </button>
+          <div id={menuId} popover="auto" className="ai-row-menu" role="group" aria-label={`操作：${rowId}`} onClick={(e) => (e.target as Element).closest('button') && e.currentTarget.hidePopover()}>
+            {rest.map((a) => (
+              <ActionButton key={a.id} action={a} rowId={rowId} ctx={ctx} />
+            ))}
+          </div>
+        </>
+      )}
+    </span>
+  )
+}
+
 /** Long text cut to `max` characters with 展开 / 收起. */
 function Truncated({ text, max }: { text: string; max: number }): React.JSX.Element {
   const [open, setOpen] = useState(false)
@@ -160,7 +195,7 @@ function BlockView({ block: b, ctx }: { block: Block; ctx: Ctx }): React.JSX.Ele
             <div key={i} className="ai-kv-row">
               <dt>{it.label}</dt>
               <dd>
-                <Truncated text={it.value} max={200} />
+                {ctx.system ? it.value : <Truncated text={it.value} max={200} />}
                 {it.copy && (
                   <button type="button" className="ai-link-btn" aria-label={`复制${it.label}`} onClick={() => ctx.copy(it.value, `kv:${i}`)}>
                     {ctx.copied === `kv:${i}` ? '已复制' : '复制'}
@@ -213,9 +248,9 @@ function BlockView({ block: b, ctx }: { block: Block; ctx: Ctx }): React.JSX.Ele
           {b.lines.map((l, i) => (
             <li key={i} className={l.op}>
               <span aria-hidden>{l.op === 'add' ? '+' : l.op === 'remove' ? '−' : '~'}</span> <code>{l.path}</code>{' '}
-              {l.op !== 'add' && <span className="before">{shortJson(l.before)}</span>}
+              {l.op !== 'add' && <span className="before">{JSON.stringify(l.before) ?? '∅'}</span>}
               {l.op === 'change' && ' → '}
-              {l.op !== 'remove' && <span className="after">{shortJson(l.after)}</span>}
+              {l.op !== 'remove' && <span className="after">{JSON.stringify(l.after) ?? '∅'}</span>}
             </li>
           ))}
         </ul>
@@ -298,7 +333,7 @@ function ChangeView({ block: b }: { block: ChangeBlock }): React.JSX.Element {
             <div key={i} className="ai-kv-row">
               <dt>{f.label}</dt>
               <dd>
-                <Truncated text={f.value} max={200} />
+                {f.value}
                 {f.note && <div className="ai-dim small">{f.note}</div>}
               </dd>
             </div>
@@ -329,10 +364,10 @@ function ChangeView({ block: b }: { block: ChangeBlock }): React.JSX.Element {
                 <tr key={i}>
                   <th scope="row">{r.item}</th>
                   <td className="before">
-                    <Truncated text={r.before} max={120} />
+                    {r.before}
                   </td>
                   <td className="after">
-                    <Truncated text={r.after} max={120} />
+                    {r.after}
                   </td>
                 </tr>
               ])}
@@ -378,7 +413,7 @@ function ChangeView({ block: b }: { block: ChangeBlock }): React.JSX.Element {
         </div>
       )}
       {b.raw !== undefined && (
-        <details className="ai-change-raw">
+        <details className="ai-change-raw" open>
           <summary>原始 JSON（实际发送的内容）</summary>
           <pre className="ai-request-params" tabIndex={0} aria-label="请求参数">
             {b.raw}
@@ -444,10 +479,10 @@ function AnalysisView({ block: b }: { block: AnalysisBlock }): React.JSX.Element
                 <tr key={i}>
                   <th scope="row">{c.label}</th>
                   <td className="before">
-                    <Truncated text={c.before} max={120} />
+                    {c.before}
                   </td>
                   <td className="after">
-                    <Truncated text={c.after} max={120} />
+                    {c.after}
                   </td>
                 </tr>
               ))}
@@ -523,11 +558,6 @@ function AnalysisView({ block: b }: { block: AnalysisBlock }): React.JSX.Element
 const CONSEQUENCE: Record<string, string> = { downtime: '停机', irreversible: '不可恢复', cost: '费用', dependency: '依赖', 'blast-radius': '影响范围', data: '数据' }
 const RISK: Record<string, string> = { low: '低', medium: '中', high: '高', destructive: '破坏性' }
 
-function shortJson(v: unknown): string {
-  const s = typeof v === 'string' ? v : (JSON.stringify(v) ?? '∅')
-  return s.length > 200 ? `${s.slice(0, 200)}…` : s
-}
-
 function ClampedMarkdown({ text, onLink }: { text: string; onLink: (url: string) => void }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const long = text.length > 800 || text.split('\n').length > 16
@@ -569,10 +599,13 @@ function TableView({ block: b, ctx }: { block: TableBlock; ctx: Ctx }): React.JS
   const withActions = b.rows.some((r) => r.actions?.length)
   const sortable = b.sort !== false
   const toggle = (key: string): void => setSort((s) => (s?.key !== key ? { key, dir: 1 } : s.dir === 1 ? { key, dir: -1 } : null))
+  const [first, ...more] = b.columns
+  const numbers = more.filter((c) => c.align === 'right')
+  const others = more.filter((c) => c.align !== 'right')
 
   return (
     <div className="ai-table-block">
-      <div className="ai-table-scroll">
+      <div className="ai-table-scroll ai-model-table-scroll">
         <table className="ai-table">
           <thead>
             <tr>
@@ -593,11 +626,7 @@ function TableView({ block: b, ctx }: { block: TableBlock; ctx: Ctx }): React.JS
                   )}
                 </th>
               ))}
-              {withActions && (
-                <th scope="col" className="ai-row-actions">
-                  操作
-                </th>
-              )}
+              {withActions && <th scope="col" className="ai-row-actions" aria-label="操作" />}
             </tr>
           </thead>
           <tbody>
@@ -610,12 +639,7 @@ function TableView({ block: b, ctx }: { block: TableBlock; ctx: Ctx }): React.JS
                 ))}
                 {withActions && (
                   <td className="ai-row-actions">
-                    <span className="ai-row-actions-inner">
-                      {(r.actions ?? []).flatMap((id) => {
-                        const a = ctx.actions.get(id)
-                        return a ? [<ActionButton key={id} action={a} rowId={r.id} ctx={ctx} />] : []
-                      })}
-                    </span>
+                    <RowActions ids={r.actions ?? []} rowId={r.id} ctx={ctx} />
                   </td>
                 )}
               </tr>
@@ -623,6 +647,25 @@ function TableView({ block: b, ctx }: { block: TableBlock; ctx: Ctx }): React.JS
           </tbody>
         </table>
       </div>
+      {/* The narrow form (panel ≤ 340px, CSS picks one): first column and the right-aligned (number) columns, then the rest on a second line. */}
+      <ul className="ai-table-list">
+        {shown.map((r) => (
+          <li key={r.id}>
+            <div className="ai-table-list-main">
+              <div className="ai-table-list-l1">
+                <span className="ai-table-list-name">{r.cells[first.key] ?? ''}</span>
+                {numbers.map((c) => (
+                  <span key={c.key} className="ai-table-list-num">
+                    {r.cells[c.key] ?? ''}
+                  </span>
+                ))}
+              </div>
+              <div className="ai-table-list-l2">{others.flatMap((c) => (r.cells[c.key] ? [r.cells[c.key]] : [])).join(' · ')}</div>
+            </div>
+            {withActions && <RowActions ids={r.actions ?? []} rowId={r.id} ctx={ctx} />}
+          </li>
+        ))}
+      </ul>
       <div className="ai-table-foot">
         <span>{b.rows.length} 行</span>
         {pages > 1 && (

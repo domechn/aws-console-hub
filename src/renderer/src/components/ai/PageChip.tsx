@@ -1,4 +1,5 @@
 import type { PageContext } from '../../../../shared/ai'
+import { IconClose, IconPage } from '../icons'
 
 /** What the assistant will get as the current page this turn, with the conversation's off switch. */
 export function PageChip({ page, on, readPage, onToggle }: { page: PageContext | null | undefined; on: boolean; readPage: boolean; onToggle: (on: boolean) => void }): React.JSX.Element | null {
@@ -21,9 +22,10 @@ export function PageChip({ page, on, readPage, onToggle }: { page: PageContext |
     : '当前标签页不是 AWS Console 页面，不会发送页面信息。'
   return (
     <div className={`ai-page-chip${page?.resource ? '' : ' dim'}`} title={tip}>
+      <IconPage />
       <span className="ai-page-label">{page ? `当前页面：${page.label}` : '当前页面不是 AWS Console'}</span>
       <button type="button" className="ai-page-off" aria-label="本对话不发送当前页面" title="本对话不发送当前页面" onClick={() => onToggle(false)}>
-        ×
+        <IconClose />
       </button>
     </div>
   )

@@ -17,6 +17,30 @@ const STATE_NOTE: Record<Exclude<ApprovalState, 'pending'>, string> = {
 }
 const ARM_MS = 1000
 
+/** The parts of a keydown that decide; a React.KeyboardEvent fits. */
+interface Key {
+  key: string
+  repeat: boolean
+  metaKey: boolean
+  ctrlKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+  target: unknown
+  currentTarget: unknown
+}
+
+/**
+ * A key on the approval card (plan ai-ux-redesign §3.4). esc denies from anywhere in the card. ↵ allows once and
+ * ⌘↵ / Ctrl+↵ allows for the conversation (only if main offers it), and only when the card itself has the focus
+ * (a button inside it handles its own ↵), the allow buttons have armed, and the key isn't held down.
+ */
+export function approvalKey(e: Key, armed: boolean, sessionAllowed: boolean): ApprovalDecision | null {
+  if (e.key === 'Escape') return 'deny'
+  if (e.key !== 'Enter' || e.repeat || !armed || e.target !== e.currentTarget || e.shiftKey || e.altKey) return null
+  if (!e.metaKey && !e.ctrlKey) return 'once'
+  return sessionAllowed ? 'session' : null
+}
+
 /** The countdown's clock: `tick` once a second until the returned stop is called. */
 export function everySecond(tick: () => void): () => void {
   const t = setInterval(tick, 1000)
@@ -76,14 +100,16 @@ export function ApprovalCard({ approval: a, accountColor, onDecide }: Props): Re
       className={`ai-approval ${state}`}
       id={`approval-${a.id}`}
       role="group"
-      tabIndex={-1}
+      // Tab reaches the card, but nothing moves the focus onto it by itself: a ↵ meant for the input must never land here.
+      tabIndex={0}
       aria-label={`需要你的审批：${key}`}
+      aria-describedby={live ? `approval-keys-${a.id}` : undefined}
       onKeyDown={(e) => {
-        // esc on the card denies: the safe default, and never something a held key can turn into an allow.
-        if (e.key === 'Escape' && live) {
-          e.stopPropagation()
-          decide('deny')
-        }
+        const d = live ? approvalKey(e, armed, a.sessionAllowed) : null
+        if (!d) return
+        e.preventDefault()
+        e.stopPropagation()
+        decide(d)
       }}
     >
       <div className="ai-approval-head">
@@ -151,10 +177,10 @@ export function ApprovalCard({ approval: a, accountColor, onDecide }: Props): Re
           {/* A read approval: allow and deny weigh the same; red is kept for strong (write) confirmations. */}
           <div className="ai-proposal-actions ai-approval-actions">
             <button type="button" className="ai-card-btn" disabled={!armed || busy} onClick={() => decide('once')}>
-              允许一次
+              允许一次<kbd aria-hidden>↵</kbd>
             </button>
             <button type="button" className="ai-card-btn" disabled={busy} onClick={() => decide('deny')}>
-              拒绝
+              拒绝<kbd aria-hidden>Esc</kbd>
             </button>
           </div>
           {a.sessionAllowed && (
@@ -162,12 +188,16 @@ export function ApprovalCard({ approval: a, accountColor, onDecide }: Props): Re
               type="button"
               className="ai-link-btn ai-approval-session"
               disabled={!armed || busy}
-              title={`${key} · ${a.accountName} ${a.awsAccountId} · ${a.region}\n之后同一账号、同一区域的这个动作不再询问，参数可以不同。可在 AI 设置里撤销`}
+              title={`${key} · ${a.accountName} ${a.awsAccountId} · ${a.region}\n之后同一账号、同一区域的这个动作不再询问，参数可以不同。可在 AI 设置里撤销\n焦点在卡片上时也可按 ⌘↵ / Ctrl+↵`}
               onClick={() => decide('session')}
             >
               本对话始终允许此操作
             </button>
           )}
+          {/* Shown only while the card itself has the focus: that is the only place these keys work. */}
+          <p className="ai-approval-keys" id={`approval-keys-${a.id}`}>
+            焦点在审批卡上：<kbd>↵</kbd> 允许一次 · <kbd>Esc</kbd> 拒绝{a.sessionAllowed ? ' · ⌘↵ / Ctrl+↵ 本对话始终允许' : ''} · <kbd>Tab</kbd> 逐项查看
+          </p>
         </>
       )}
 

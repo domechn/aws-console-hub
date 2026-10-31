@@ -66,19 +66,29 @@ export function visibleReplies(items: ChatItem[], now = Date.now()): Extract<Cha
   return items[at] as Extract<ChatItem, { kind: 'replies' }>
 }
 
-/** Proposals still waiting for the user (the pending banner). */
+/** Proposals still waiting for the user (the status line above the input). */
 export const pendingProposals = (items: ChatItem[], now = Date.now()): string[] =>
   items.flatMap((i) => (i.kind === 'proposal' && i.proposal.state === 'pending' && i.proposal.expiresAt > now ? [i.proposal.id] : []))
 
-/** Calls paused on an approval card (the pending banner lists them first: the answer waits on them). */
+/** Calls paused on an approval card (the status line jumps to them first: the answer waits on them). */
 export const pendingApprovals = (items: ChatItem[], now = Date.now()): string[] =>
   items.flatMap((i) => (i.kind === 'approval' && i.approval.state === 'pending' && i.approval.expiresAt > now ? [i.approval.id] : []))
 
 /**
- * Pending card element ids scrolled out of the message list, in order: the banner shows only while this is non-empty.
- * `outOfView` may hold stale ids of decided cards; only pending ones count.
+ * Pending card element ids scrolled out of the message list, in order: the status line offers its jump button only
+ * while this is non-empty. `outOfView` may hold stale ids of decided cards; only pending ones count.
  */
 export const hiddenPending = (cardIds: string[], outOfView: ReadonlySet<string>): string[] => cardIds.filter((id) => outOfView.has(id))
+
+/** The status line above the input: always while the answer waits on an approval; proposals (they pause nothing) once a card is out of view. */
+export function pendingStatus(calls: number, proposals: number, anyHidden: boolean): string {
+  return [
+    calls > 1 ? `回答已暂停，等你处理上面的 ${calls} 个审批` : calls === 1 ? '回答已暂停，等你处理上面的审批' : '',
+    proposals > 0 && (calls > 0 || anyHidden) ? `${proposals} 个变更提案等待你确认` : ''
+  ]
+    .filter(Boolean)
+    .join('；')
+}
 
 /** An approval's countdown colour: amber under two minutes, red under one. */
 export const countdownTone = (ms: number): '' | 'soon' | 'urgent' => (ms < 60_000 ? 'urgent' : ms < 120_000 ? 'soon' : '')
@@ -119,7 +129,7 @@ export function formatUsd(n: number): string {
 }
 
 /** The estimate, "+" when some replies had no price; null when none had one. */
-function formatCost(u: UsageTotals): string | null {
+export function formatCost(u: UsageTotals): string | null {
   return !u.costUnknown ? formatUsd(u.cost) : u.cost ? `${formatUsd(u.cost)}+` : null
 }
 
@@ -128,7 +138,7 @@ export function formatUsage(u: UsageTotals): string {
   return `输入 ${formatTokens(u.input)} / 输出 ${formatTokens(u.output)}${cached} tokens · ${formatCost(u) ?? '费用未知'}`
 }
 
-/** The footer's month line: tokens in + out, and the estimate only when there is one (the chat line says "费用未知"). */
+/** The usage popover's month line: tokens in + out, and the estimate only when there is one (the chat line says "费用未知"). */
 export function formatMonth(m: MonthUsage): string {
   const cost = formatCost(m.totals)
   return `本月 ${formatTokens(m.totals.input + m.totals.output)} tokens${cost ? ` · ${cost}` : ''}`

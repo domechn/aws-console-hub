@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { ApprovalView, ProposalView } from '../../../../shared/ai'
-import { applyEvent, countdownTone, hiddenPending, pendingApprovals } from '../../ai'
-import { ApprovalCard, everySecond } from './ApprovalCard'
+import { applyEvent, countdownTone, hiddenPending, pendingApprovals, pendingStatus } from '../../ai'
+import { ApprovalCard, approvalKey, everySecond } from './ApprovalCard'
 import { ProposalCard } from './ProposalCard'
 
 const approval = (patch: Partial<ApprovalView> = {}): ApprovalView => ({
@@ -74,6 +74,13 @@ describe('ApprovalCard', () => {
     expect(none).not.toContain('ai-request-params')
   })
 
+  it('shows long approval parameters in full before any allow control', () => {
+    const value = 'v'.repeat(400)
+    const html = render(approval({ params: `{"Value":"${value}"}` }))
+    expect(html).toContain(value)
+    expect(html.indexOf(value)).toBeLessThan(html.indexOf('允许一次'))
+  })
+
   it('layout: allow once, then deny, then the quiet session link with its full scope in the tooltip and chips', () => {
     const html = render(approval({ sessionAllowed: true, service: 'ssm', action: 'DescribeParameters' }))
     expect(html.indexOf('允许一次')).toBeLessThan(html.indexOf('>拒绝<'))
@@ -135,6 +142,67 @@ describe('ApprovalCard', () => {
   })
 })
 
+describe('ApprovalCard keyboard (plan ai-ux-redesign §3.4)', () => {
+  const card = { id: 'card' }
+  const key = (patch: Partial<Parameters<typeof approvalKey>[0]> = {}): Parameters<typeof approvalKey>[0] => ({
+    key: 'Enter',
+    repeat: false,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: card,
+    currentTarget: card,
+    ...patch
+  })
+
+  it('↵ on the card does nothing until the allow buttons arm (1 s after the card appears), then allows once', () => {
+    expect(approvalKey(key(), false, true)).toBeNull()
+    expect(approvalKey(key(), true, false)).toBe('once')
+    // The card is reachable with Tab but never takes the focus itself; its key line is tied to it.
+    const html = render(approval())
+    expect(html).toMatch(/role="group" tabindex="0"/)
+    expect(html).not.toMatch(/autofocus/i)
+    expect(html).toContain('aria-describedby="approval-keys-a-0123456789ab"')
+    expect(html).toMatch(/允许一次<kbd aria-hidden="true">↵<\/kbd>/)
+    expect(html).toMatch(/拒绝<kbd aria-hidden="true">Esc<\/kbd>/)
+  })
+
+  it('a held ↵ (e.repeat) never allows', () => {
+    expect(approvalKey(key({ repeat: true }), true, true)).toBeNull()
+    expect(approvalKey(key({ repeat: true, metaKey: true }), true, true)).toBeNull()
+  })
+
+  it('↵ (or ⌘↵) with the focus in the input, or on anything but the card itself, never allows', () => {
+    const textarea = { tagName: 'TEXTAREA' }
+    const button = { tagName: 'BUTTON' }
+    for (const target of [textarea, button]) {
+      expect(approvalKey(key({ target }), true, true)).toBeNull()
+      expect(approvalKey(key({ target, metaKey: true }), true, true)).toBeNull()
+      expect(approvalKey(key({ target, ctrlKey: true }), true, true)).toBeNull()
+    }
+    // ⇧↵ / ⌥↵ (the input's newline habits) are not an allow either.
+    expect(approvalKey(key({ shiftKey: true }), true, true)).toBeNull()
+    expect(approvalKey(key({ altKey: true }), true, true)).toBeNull()
+  })
+
+  it('esc denies from anywhere in the card, armed or not, held or not', () => {
+    expect(approvalKey(key({ key: 'Escape' }), false, false)).toBe('deny')
+    expect(approvalKey(key({ key: 'Escape', target: { tagName: 'BUTTON' }, repeat: true }), true, true)).toBe('deny')
+    expect(approvalKey(key({ key: 'a' }), true, true)).toBeNull()
+  })
+
+  it('⌘↵ / Ctrl+↵ allows for the conversation only when main offers it (and is not a plain allow otherwise)', () => {
+    expect(approvalKey(key({ metaKey: true }), true, false)).toBeNull()
+    expect(approvalKey(key({ ctrlKey: true }), true, false)).toBeNull()
+    expect(approvalKey(key({ metaKey: true }), true, true)).toBe('session')
+    expect(approvalKey(key({ ctrlKey: true }), true, true)).toBe('session')
+    expect(approvalKey(key({ metaKey: true }), false, true)).toBeNull()
+    expect(render(approval({ sessionAllowed: true }))).toContain('⌘↵ / Ctrl+↵ 本对话始终允许')
+    expect(render(approval({ sessionAllowed: false }))).not.toContain('⌘↵')
+  })
+})
+
 describe('approval events in the panel', () => {
   it('puts the card under its call, marks the row waiting, and runs it on after the decision', () => {
     let items = applyEvent([{ kind: 'user', text: 'q' }], { type: 'tool-start', id: 'call-1', label: '调用 sqs:ListQueues' })
@@ -146,9 +214,20 @@ describe('approval events in the panel', () => {
     expect(pendingApprovals(items)).toEqual([])
   })
 
-  it('the pending banner shows only for waiting cards the list has scrolled away, first in order', () => {
+  it('the status line: always while the answer waits on an approval; proposals once out of view; never anything that allows', () => {
+    expect(pendingStatus(0, 0, false)).toBe('')
+    expect(pendingStatus(1, 0, false)).toBe('回答已暂停，等你处理上面的审批')
+    expect(pendingStatus(2, 0, true)).toBe('回答已暂停，等你处理上面的 2 个审批')
+    // A proposal pauses nothing: no line while its card is on screen.
+    expect(pendingStatus(0, 1, false)).toBe('')
+    expect(pendingStatus(0, 1, true)).toBe('1 个变更提案等待你确认')
+    expect(pendingStatus(1, 2, false)).toBe('回答已暂停，等你处理上面的审批；2 个变更提案等待你确认')
+    for (const [c, p, h] of [[1, 0, true], [3, 2, true]] as const) expect(pendingStatus(c, p, h)).not.toMatch(/允许/)
+  })
+
+  it('the status line jumps only to waiting cards the list has scrolled away, first in order', () => {
     const ids = ['approval-a1', 'proposal-p1']
-    // Nothing reported out of view yet (a card just arrived, or it is on screen): no banner.
+    // Nothing reported out of view yet (a card just arrived, or it is on screen): no jump button.
     expect(hiddenPending(ids, new Set())).toEqual([])
     expect(hiddenPending(ids, new Set(['proposal-p1']))).toEqual(['proposal-p1'])
     expect(hiddenPending(ids, new Set(['proposal-p1', 'approval-a1']))).toEqual(['approval-a1', 'proposal-p1'])
@@ -210,5 +289,16 @@ describe('ProposalCard: generic and strong approval', () => {
     expect(html).not.toContain('ai-strong-banner')
     expect(html).toContain('没有专用适配器')
     expect(html).toContain('不做漂移检查')
+  })
+
+  it('both generic tiers show the exact request before confirmation', () => {
+    const value = 'v'.repeat(400)
+    for (const tier of ['B', 'C'] as const) {
+      const p = proposal({ tier, card: { ...proposal().card, blocks: [{ type: 'change', kind: 'request', summary: '发送', fields: [{ label: 'Value', value }], raw: `{"Value":"${value}"}` }] } })
+      const html = renderProposal(p)
+      expect(html).toContain(value)
+      expect(html).toMatch(/<details class="ai-change-raw" open=""/)
+      expect(html.indexOf('ai-request-params')).toBeLessThan(html.indexOf('确认执行…'))
+    }
   })
 })

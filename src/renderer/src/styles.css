@@ -13,12 +13,25 @@
   --border: #dde1e7;
   --border-strong: #c6cdd6;
   --text: #1b2027;
-  --text-dim: #6b7684;
+  /* 5.4:1 on --bg, 5.1:1 on --bg-sunken (was #6b7684, 4.3:1 on --bg-sunken). */
+  --text-dim: #5f6b7a;
   --accent: #0972d3;
   --danger: #d13212;
   --ok: #037f0c;
   --pin: #e08c00;
   --shadow: 0 16px 48px rgba(20, 30, 45, 0.18);
+  /* Semantic aliases (plan ai-ux-redesign §3.18): the AI panel uses only tokens, so a dark theme swaps this block. */
+  --warn: var(--pin);
+  --warn-ink: #8a5300;
+  --warn-bg: #fdf3e1;
+  --warn-border: #f0c98a;
+  --danger-bg: #fbeae6;
+  --ok-bg: #e5f2e6;
+  --on-accent: #ffffff;
+  --rule: #eceff3;
+  --focus: var(--accent);
+  --popover-shadow: 0 8px 24px rgba(20, 30, 45, 0.14);
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 html,
@@ -1051,6 +1064,8 @@ button.primary:disabled {
   min-height: 0;
   background: var(--bg);
   border-left: 1px solid var(--border);
+  /* The user drags the panel's width: narrow layouts follow it, not the window. */
+  container: ai-panel / inline-size;
 }
 
 .ai-resize {
@@ -1180,7 +1195,10 @@ button.primary:disabled {
 .ai-icon-btn:focus-visible,
 .ai-text-btn:focus-visible,
 .ai-conv-select:focus-visible,
-.ai-suggestions button:focus-visible {
+.ai-sugg-i:focus-visible,
+.ai-reply:focus-visible,
+.ai-composer button:focus-visible,
+.ai-pop button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -1194,14 +1212,6 @@ button.primary:disabled {
   line-height: 1.6;
 }
 
-.ai-empty .dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 4px;
-  border-radius: 50%;
-}
-
 .ai-dim {
   color: var(--text-dim);
 }
@@ -1210,63 +1220,144 @@ button.primary:disabled {
   font-size: 11px;
 }
 
-.ai-suggestions {
+/* Empty conversation (mock 02): who is asked, questions for the page, common ones, recent conversations. */
+.ai-start {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  width: 100%;
+  gap: 18px;
+  padding: 8px 4px;
+  line-height: 1.5;
 }
 
-.ai-suggestions button {
-  text-align: left;
-  padding: 7px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-sunken);
+.ai-start-who {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.ai-start-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ai-start .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.ai-sugg {
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-sugg-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ai-sugg-h svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* Suggestions and 「接下来」 are the same quiet rows: text, not accent-coloured buttons. */
+.ai-sugg-i,
+.ai-reply {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 -8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
   color: var(--text);
   font: inherit;
+  line-height: 1.5;
+  text-align: left;
   cursor: pointer;
 }
 
-.ai-suggestions button:hover {
+.ai-sugg-i:hover,
+.ai-reply:hover {
   background: var(--bg-hover);
 }
 
-/* Quick replies under the last reply: send their text like typing it would. */
+.ai-sugg-i svg,
+.ai-reply svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  color: var(--text-dim);
+}
+
+.ai-sugg-t {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-sugg-tag {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-start-cap {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ai-start-cap b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.link-btn.ai-start-link {
+  margin: 2px 0 0;
+  padding: 0;
+}
+
+/* 「接下来」 under the last reply: each row sends its text like typing it would. */
 .ai-replies {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
 }
 
-.ai-reply-chip {
-  min-height: 28px;
-  padding: 3px 10px;
-  border: 1px solid var(--accent);
-  border-radius: 12px;
-  background: var(--bg);
-  color: var(--accent);
-  font: inherit;
-  cursor: pointer;
+.ai-replies-h {
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
-.ai-reply-chip:hover {
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+.ai-reply {
+  padding: 4px 8px;
+  min-height: 30px;
 }
 
-/* Reads like a destructive answer (终止、删除…): a quiet amber outline, nothing more. */
-.ai-reply-chip.warn {
-  border-color: var(--pin);
-  color: #8a5300;
+/* Reads like a change (停止、重启、终止、删除…): amber text and a warning icon, nothing more. */
+.ai-reply.warn {
+  color: var(--warn-ink);
 }
 
-.ai-reply-chip.warn:hover {
-  background: color-mix(in srgb, var(--pin) 10%, var(--bg));
-}
-
-.ai-reply-chip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+.ai-reply.warn svg {
+  color: var(--warn);
 }
 
 .ai-msg {
@@ -1283,36 +1374,41 @@ button.primary:disabled {
   white-space: pre-wrap;
 }
 
-.ai-tool {
+/* Activity: one line per run of tool calls (plan ai-ux-redesign §3.3); expanded, a ruled list of steps. */
+.ai-act {
+  display: flex;
+  flex-direction: column;
   font-size: 12px;
   color: var(--text-dim);
 }
 
-/* One full-width line; the text is cut with an ellipsis, click shows it whole. */
-.ai-tool-row {
+.ai-act-row,
+.ai-step-row {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 2px 4px;
+  min-height: 26px;
+  padding: 3px 6px 3px 4px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 6px;
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
+}
+
+button.ai-act-row,
+button.ai-step-row {
   cursor: pointer;
 }
 
-.ai-tool-row:hover {
+button.ai-act-row:hover,
+button.ai-step-row:hover {
   background: var(--bg-hover);
 }
 
-.ai-tool-icon {
-  flex: none;
-}
-
-.ai-tool-text {
+.ai-act-text {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -1320,39 +1416,112 @@ button.primary:disabled {
   text-overflow: ellipsis;
 }
 
-.ai-tool-caret {
+.ai-act-text b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ai-act-fail {
+  color: var(--danger);
+}
+
+.ai-act-wait {
+  color: color-mix(in srgb, var(--pin) 55%, var(--text));
+}
+
+.ai-act-icon,
+.ai-act-caret {
   flex: none;
-  font-size: 10px;
+  display: inline-flex;
 }
 
-.ai-tool-detail {
-  margin: 2px 0 0 22px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--bg-sunken);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-.ai-tool-code {
-  margin: 6px 0 0;
-  max-height: 320px;
-  overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  white-space: pre;
+.ai-act-icon svg {
+  width: 14px;
+  height: 14px;
 }
 
-.ai-tool .spinner {
-  margin-left: 0;
+.ai-act-caret svg {
+  width: 12px;
+  height: 12px;
 }
 
-.ai-tool.ok .ai-tool-icon {
+.ai-act-icon .spinner {
+  margin: 1px;
+}
+
+.ai-act-icon.ok {
   color: var(--ok);
 }
 
-.ai-tool.error .ai-tool-icon {
+.ai-act-icon.error {
   color: var(--danger);
+}
+
+.ai-act-icon.waiting {
+  color: var(--pin);
+}
+
+.ai-steps {
+  list-style: none;
+  margin: 2px 0 2px 10px;
+  padding: 2px 0 2px 8px;
+  border-left: 1px solid var(--border);
+}
+
+.ai-step-row {
+  min-height: 24px;
+  color: var(--text);
+}
+
+/* Steps wrap instead of cutting: the expanded list is where the whole label and summary are read. */
+.ai-step-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-step-summary {
+  color: var(--text-dim);
+}
+
+.ai-step-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 6px 24px;
+  user-select: text;
+}
+
+.ai-calls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ai-call {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.ai-tool-code {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 /* ---------- cards ---------- */
@@ -1430,11 +1599,11 @@ button.ai-card-btn:hover:not(:disabled) {
 button.ai-card-btn.primary {
   border-color: var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 button.ai-card-btn.primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 85%, #000);
+  background: color-mix(in srgb, var(--accent) 85%, var(--text));
 }
 
 button.ai-card-btn.danger {
@@ -1450,7 +1619,10 @@ button.ai-card-btn:disabled {
 button.ai-card-btn:focus-visible,
 .ai-link-btn:focus-visible,
 .ai-sort:focus-visible,
-.ai-tool-row:focus-visible {
+.ai-act-row:focus-visible,
+.ai-step-row:focus-visible,
+.ai-tool-code:focus-visible,
+.ai-row-icon:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -1485,6 +1657,14 @@ button.ai-card-btn:focus-visible,
   padding: 6px 8px;
   border-radius: 6px;
   background: var(--bg-sunken);
+}
+
+.ai-change .ai-kv {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ai-change .ai-kv-row {
+  display: block;
 }
 
 .ai-kv dd {
@@ -1530,7 +1710,7 @@ button.ai-card-btn:focus-visible,
 .ai-tone.warn,
 .ai-risk.medium .ai-tone {
   background: color-mix(in srgb, var(--pin) 18%, var(--bg));
-  color: #8a5300;
+  color: var(--warn-ink);
 }
 
 .ai-tone.danger,
@@ -1566,8 +1746,9 @@ button.ai-card-btn:focus-visible,
 /* Cells keep their natural width (never clipped); only very long values wrap, so the table scrolls only when it must. */
 .ai-table th,
 .ai-table td {
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--border);
+  height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, var(--bg));
   white-space: nowrap;
   vertical-align: middle;
 }
@@ -1583,10 +1764,11 @@ button.ai-card-btn:focus-visible,
 }
 
 .ai-table th {
-  color: color-mix(in srgb, var(--text) 72%, var(--bg));
-  font-weight: 600;
+  height: 28px;
+  color: var(--text-dim);
+  font-weight: 400;
   font-size: 11px;
-  background: var(--bg-sunken);
+  border-bottom-color: var(--border);
 }
 
 .ai-table tbody tr:hover td {
@@ -1602,35 +1784,141 @@ button.ai-card-btn:focus-visible,
   padding: 0;
 }
 
-/* The action column stays in view while a wide table scrolls, with room between it and the data. */
+/* Two 24px icons at most and in the flow (not sticky), so the column never covers a data column. */
 .ai-table .ai-row-actions {
-  position: sticky;
-  right: 0;
-  padding-left: 8px;
+  width: 1%;
+  padding: 0 4px;
   text-align: right;
-  background: var(--bg);
-  box-shadow: -1px 0 0 var(--border);
 }
 
-.ai-table th.ai-row-actions,
-.ai-card.resolved .ai-row-actions,
-.ai-card.expired .ai-row-actions,
-.ai-card.superseded .ai-row-actions {
-  background: var(--bg-sunken);
-}
-
-/* Buttons stack when the panel is narrow instead of widening the table. */
 .ai-row-actions-inner {
   display: inline-flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 4px;
+  flex: none;
+  gap: 0;
 }
 
-.ai-row-actions .ai-card-btn {
-  min-height: 24px;
-  padding: 2px 8px;
+.ai-row-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.ai-row-icon:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.ai-row-icon:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ⋯: a native popover in the top layer, under its button (implicit anchor of popovertarget). */
+.ai-row-menu {
+  position-area: bottom span-left;
+  position-try-fallbacks: flip-block;
+  margin: 2px 0;
+  min-width: 140px;
+  max-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+}
+
+.ai-row-menu .ai-card-btn {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: var(--text);
+}
+
+.ai-row-menu .ai-card-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ai-row-menu .ai-card-btn.danger {
+  color: var(--danger);
+}
+
+/* The narrow form of a table: shown instead of it when the panel is 340px or less. */
+.ai-table-list {
+  display: none;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ai-table-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 6px 4px 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, var(--bg));
+}
+
+.ai-table-list-main {
+  flex: 1;
+  min-width: 0;
+  user-select: text;
+}
+
+.ai-table-list-l1 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.ai-table-list-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-table-list-num {
+  margin-left: auto;
+  min-width: 0;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.ai-table-list-num ~ .ai-table-list-num {
+  margin-left: 0;
+}
+
+.ai-table-list-l2 {
+  color: var(--text-dim);
   font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.ai-table-list-l2:empty {
+  display: none;
+}
+
+@container ai-panel (max-width: 340px) {
+  .ai-model-table-scroll {
+    display: none;
+  }
+
+  .ai-table-list {
+    display: block;
+  }
 }
 
 .ai-table-foot {
@@ -1757,6 +2045,7 @@ button.ai-card-btn:focus-visible,
 
 .ai-change-table td,
 .ai-change-table th {
+  white-space: normal;
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -1880,83 +2169,300 @@ button.ai-card-btn:focus-visible,
 .ai-footer {
   flex: none;
   padding: 8px 10px 10px;
-  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.ai-footer textarea {
-  resize: none;
+/* The input box (mock 07): page chip, text, then its toolbar, inside one bordered box. */
+.ai-composer {
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  padding: 7px 9px;
-  font: inherit;
-  color: var(--text);
+  border-radius: 10px;
   background: var(--bg);
+}
+
+.ai-composer:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+}
+
+.ai-composer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 6px 0;
+}
+
+/* Grows with its text from 1 to 8 lines, then scrolls inside. */
+.ai-composer textarea {
+  field-sizing: content;
+  min-height: calc(1lh + 12px);
+  max-height: calc(8lh + 12px);
+  padding: 8px 10px 4px;
+  border: 0;
   outline: none;
+  resize: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.55;
 }
 
-.ai-footer textarea:focus {
-  border-color: var(--accent);
+.ai-composer textarea::placeholder {
+  color: var(--text-dim);
 }
 
-.ai-footer-row {
+.ai-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 6px;
+}
+
+.ai-model-chip,
+.ai-cost-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ai-model-chip:hover,
+.ai-cost-chip:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.ai-model-chip svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.ai-model-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ai-cost-chip {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One button: accent with ↑ when there is text, plainly off when empty, dark ■ while generating. */
+button.ai-send {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+
+button.ai-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, var(--text));
+}
+
+button.ai-send:disabled {
+  background: var(--bg-active);
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* Neutral, not the deny red: it stops generating, it isn't an answer to the assistant. */
+button.ai-send.stop {
+  background: var(--text);
+  color: var(--bg);
+}
+
+/* The toolbar's popovers: native popovers in the top layer, above their button (implicit anchor of popovertarget). */
+.ai-pop {
+  position-area: top span-right;
+  position-try-fallbacks: flip-inline;
+  margin: 0 0 4px;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: var(--popover-shadow);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ai-cost-pop {
+  position-area: top span-left;
+  width: 280px;
+  padding-bottom: 6px;
+}
+
+.ai-pop-h {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ai-pop-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.ai-pop-i {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 4px 10px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.ai-usage {
+.ai-pop-i:hover {
+  background: var(--bg-hover);
+}
+
+.ai-pop-i.sel {
+  background: var(--bg-active);
+}
+
+.ai-pop-i svg {
+  flex: none;
+  color: var(--accent);
+}
+
+.ai-pop-main {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  font-size: 12px;
-  line-height: 1.5;
-  /* About 7.5:1 on the white panel (AA). */
-  color: #4b5563;
+}
+
+.ai-pop-l1,
+.ai-pop-l2 {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ai-pop-l1 {
+  font-size: 13px;
+}
+
+.ai-pop-l2 {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ai-pop-row {
+  padding: 2px 10px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.ai-pop-ft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--rule);
+  border-radius: 0 0 10px 10px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
-.ai-usage-line {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ai-pop-ft > span:not(.ai-spacer) {
+  flex: 1 0 100%;
+  overflow-wrap: anywhere;
+}
+
+.ai-pop-ft .link-btn {
+  margin: 0;
+  font-size: 11px;
+}
+
+/* Narrow panel: keep a compact usage entry beside the model. */
+@container ai-panel (max-width: 340px) {
+  .ai-cost-chip.always-visible {
+    display: inline-flex;
+    font-size: 0;
+  }
+
+  .ai-cost-chip.always-visible::before {
+    content: '◷';
+    font-size: 14px;
+  }
 }
 
 .ai-budget-note {
   padding: 4px 8px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--pin) 16%, var(--bg));
-  color: #7a4a00;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
   font-size: 12px;
 }
 
 .ai-budget-note.blocked {
-  background: color-mix(in srgb, var(--danger) 12%, var(--bg));
+  background: var(--danger-bg);
   color: var(--danger);
 }
 
 /* What the assistant gets as the current page; the title tooltip lists exactly what is sent. */
 .ai-page-chip {
-  align-self: flex-start;
   max-width: 100%;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 4px 2px 8px;
+  height: 22px;
+  padding: 0 2px 0 6px;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-active);
-  font-size: 12px;
-  color: #374151;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.ai-page-chip svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--text-dim);
 }
 
 .ai-page-chip.dim,
 .ai-page-chip.off {
-  color: #4b5563;
-  background: var(--bg);
+  color: var(--text-dim);
+}
+
+.ai-page-chip.off {
+  background: none;
+  border-style: dashed;
 }
 
 .ai-page-label {
@@ -1968,16 +2474,20 @@ button.ai-card-btn:focus-visible,
 
 button.ai-page-off {
   flex: none;
-  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
   border: none;
+  border-radius: 4px;
   background: none;
-  color: inherit;
-  font-size: 13px;
-  line-height: 1.4;
+  color: var(--text-dim);
   cursor: pointer;
 }
 
 button.ai-page-off:hover {
+  background: var(--bg-hover);
   color: var(--text);
 }
 
@@ -1986,24 +2496,10 @@ button.ai-page-off:hover {
   max-width: 88%;
   margin-top: -4px;
   font-size: 11px;
-  color: #4b5563;
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-button.ai-send {
-  padding: 6px 14px;
-}
-
-/* Neutral, not the deny red: it stops generating, it isn't an answer to the assistant. */
-button.ai-send.stop {
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
-  background: var(--bg);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 13px;
 }
 
 .ai-key-status {
@@ -2162,7 +2658,7 @@ button.ai-send.stop {
 
 .ai-audit-table code,
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--mono);
 }
 
 .ai-audit-table tr.forbidden_attempt td:first-child,
@@ -2356,7 +2852,7 @@ button.ai-send.stop {
   padding: 8px 10px;
   border-radius: 6px;
   background: var(--danger);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .ai-strong-banner ul {
@@ -2412,10 +2908,6 @@ button.ai-send.stop {
 .ai-analysis-evidence code {
   white-space: pre-wrap;
   word-break: break-all;
-}
-
-.ai-tool.waiting .ai-tool-icon {
-  color: var(--pin);
 }
 
 .ai-allows {
@@ -2532,7 +3024,7 @@ button.ai-send.stop {
 
 /* Under two minutes. */
 .ai-countdown.soon {
-  color: #8a5300;
+  color: var(--warn-ink);
 }
 
 .ai-approval-action {
@@ -2549,9 +3041,9 @@ button.ai-send.stop {
 
 .ai-approval-where .ai-chip {
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .ai-approval-kind {
@@ -2599,12 +3091,6 @@ button.ai-send.stop {
   font-size: 11px;
 }
 
-/* A waiting call's row while its approval card is on screen: one quiet line, the card says the rest. */
-.ai-tool.quiet {
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
 .ai-proposal-state {
   font-weight: 600;
 }
@@ -2647,30 +3133,70 @@ button.ai-send.stop {
   font-weight: 600;
 }
 
-.ai-pending-banner {
-  flex: none;
+/* Above the input: why the answer stopped. Jumps to the card at most; never allows. */
+.ai-status-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 6px 10px;
-  padding: 6px 8px 6px 10px;
-  border: 1px solid color-mix(in srgb, var(--pin) 45%, var(--border));
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--warn-border);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--pin) 16%, var(--bg));
-  color: #7a4a00;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
   font-size: 12px;
-  font-weight: 500;
 }
 
-.ai-pending-text {
+.ai-status-line svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--pin);
+}
+
+.ai-status-text {
   flex: 1;
   min-width: 0;
 }
 
-.ai-pending-banner .ai-card-btn {
+.ai-status-line .ai-card-btn {
   min-height: 24px;
   padding: 2px 10px;
   font-size: 12px;
+}
+
+/* Key hints on the approval buttons, and the card's own key line: shown only while the card itself has the focus. */
+.ai-approval kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.ai-approval-keys {
+  display: none;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.ai-approval-keys kbd {
+  margin: 0 2px;
+}
+
+.ai-approval:focus > .ai-approval-keys {
+  display: block;
 }
 
 button.ai-badge {
@@ -2682,7 +3208,7 @@ button.ai-badge {
 
 button.ai-badge.write {
   border-color: var(--pin);
-  color: #8a5300;
+  color: var(--warn-ink);
 }
 
 button.ai-badge:focus-visible {

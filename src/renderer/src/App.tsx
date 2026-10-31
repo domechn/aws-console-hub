@@ -347,6 +347,7 @@ export function App(): React.JSX.Element {
               if (done) localStorage.setItem(AI_WIDTH_KEY, String(width))
             }}
             onOpenSettings={() => setAiSettingsOpen(true)}
+            onConfig={setAiConfig}
             onClose={toggleAssistant}
             pageKey={`${navState?.url ?? ''}\n${navState?.tabs.find((t) => t.id === navState.activeTabId)?.title ?? ''}`}
             onSetAllowWrite={async (allow) => {
