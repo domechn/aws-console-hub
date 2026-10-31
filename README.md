@@ -214,3 +214,7 @@ npm run ai-audit -- --json                    # 原始记录
 ## 开发
 
 构建、架构、IPC、数据存储、会话机制与已知限制见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+
+## 许可证
+
+[MIT](LICENSE)
