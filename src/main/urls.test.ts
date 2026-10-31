@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { isConsoleUrl, isSignInUrl, windowOpenAction, consoleRegion } from './urls'
+import { isConsoleUrl, isInAppUrl, isSignInUrl, windowOpenAction, consoleRegion } from './urls'
+
+describe('isInAppUrl', () => {
+  it('excludes aws.dev and its subdomains', () => {
+    expect(isInAppUrl('https://aws.dev/internal')).toBe(false)
+    expect(isInAppUrl('https://x.aws.dev/internal')).toBe(false)
+  })
+})
 
 describe('windowOpenAction', () => {
   it('keeps the URL-less auth-flow open as a real popup', () => {
@@ -15,6 +22,8 @@ describe('windowOpenAction', () => {
 
   it('sends other web URLs to the system browser', () => {
     expect(windowOpenAction('https://github.com/x')).toBe('external')
+    expect(windowOpenAction('https://aws.dev/internal')).toBe('external')
+    expect(windowOpenAction('https://x.aws.dev/internal')).toBe('external')
     // Anyone can host pages on amazonaws.com, and http is never in-app.
     expect(windowOpenAction('https://evil.s3.amazonaws.com/x')).toBe('external')
     expect(windowOpenAction('http://console.aws.amazon.com/')).toBe('external')

@@ -7,8 +7,7 @@ const IN_APP_DOMAINS = [
   // Not amazonaws.com: anyone can host pages there (S3, ELB, API Gateway).
   'amazonaws.cn',
   'awsapps.com',
-  'awsstatic.com',
-  'aws.dev'
+  'awsstatic.com'
 ]
 
 export function isInAppUrl(url: string): boolean {

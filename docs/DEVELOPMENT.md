@@ -17,7 +17,7 @@
 - **账号切换器** — 顶栏最左的账号按钮（颜色点 + 名称，登录 / 加载中显示 spinner）或 `⌘⇧A` 打开 `AccountSwitcher.tsx` 下拉框：搜索框自动聚焦，用 `shared/fuzzy.ts` 匹配名称 / account id / role，有查询时组内按分数排序；「账号」「基础账号」两组，每行显示颜色点、名称、`accountId · role`、`⌘1-9` 提示（规则同快捷键：优先跳转账号，没有时是基础账号），悬停出 ✎ / ✕。底部是「＋ 添加账号」「＋ 添加基础账号」（走原来的 `AccountModal`）和当前账号的「重新登录」。下拉框和 ⌘K 面板互斥。没有账号时欢迎页按步骤引导添加；有账号但没选时欢迎页有「选择账号」按钮。
 - **底部最近访问条** — 固定项和最近访问在 console 下方的一行 30px 条里（`ResourceList.tsx` 的 `ResourceStrip`）：固定项（★）在前，细分隔线后是最近访问（新的在前）。每个条目是服务缩写 + 名称（过长截断）+ 账号颜色点，悬停提示完整名称 / 账号 / region / 类型 / 时间；悬停时 ★ / ✕ 按钮盖在条目尾部，不改变尺寸。条目横向滚动：滚动条隐藏，竖向滚轮转成横向，触控板横滑原生可用，两端有渐隐遮罩，溢出时显示左右翻页按钮。最前面的 ▾ 按钮或 `⌘J` 隐藏整条（存 `localStorage` 的 `recentsHidden`），隐藏后用顶栏的时钟按钮或 `⌘J` 恢复。没有记录时条里只剩 ▾ 按钮。条内不做过滤，⌘K 本来就能搜最近访问。
 - **⌘F 页内搜索** — 走 Chromium 自己的 `findInPage`，实时高亮、显示第几个 / 共几个，`↵` / `⇧↵` 上下跳，`esc` 关闭（焦点在搜索框或 console 页面里都行）。搜索条排在 console view 上方而不是浮在它上面（原生 view 画在 DOM 之上，浮层会被盖掉）。
-- **每账号标签页** — 顶栏里有标签栏，每个标签页是一个独立的 `WebContentsView`，同一账号的标签页共用该账号的 session 分区（同一个登录）。`target="_blank"` 链接和带 URL 的 `window.open` 指向 Amazon / AWS 域名时在新标签页打开并切过去（⌘/中键点击这类后台打开不切），其他 http/https 域名交给系统浏览器，其他协议一律丢弃。每个标签页各自有前进/后退/刷新/页内搜索，标题来自页面 title；切换账号时显示那个账号自己的标签页。只有不带 URL / `about:blank` 的 `window.open` 仍开真窗口，那是登录流程先拿 handle 再导航的写法，拦掉会让登录窗口凭空消失。
+- **每账号标签页** — 顶栏里有标签栏，每个标签页是一个独立的 `WebContentsView`，同一账号的标签页共用该账号的 session 分区（同一个登录）。域名列表只决定新窗口链接的去向：`target="_blank"` 链接和带 URL 的 `window.open` 指向 HTTPS 的 `amazon.com`、`amazonaws.cn`、`awsapps.com`、`awsstatic.com` 及其子域名时在新标签页打开并切过去（⌘/中键点击这类后台打开不切），其他 http/https 域名交给系统浏览器，其他协议一律丢弃；`ai:open-link` 的非 Console 链接也按此列表决定去向。已有标签页的页内导航不受此列表限制，登录流程可跳转到其他网站。每个标签页各自有前进/后退/刷新/页内搜索，标题来自页面 title；切换账号时显示那个账号自己的标签页。只有不带 URL / `about:blank` 的 `window.open` 仍开真窗口，那是登录流程先拿 handle 再导航的写法，拦掉会让登录窗口凭空消失。
 - **AI 助手（只读，M1）** — 顶栏最右的 `✦ AI` 或 `⌘I` 打开右侧面板，和 console 并排（console 变窄）。Agent 跑在主进程（pi SDK），工具只有查询，用当前账号已有的凭证管线调 AWS。详见下文「AI 助手」。
 - **会话自动续期** — console 会话快到期（提前 10 分钟）时，对最近 4 小时内用过的账号在后台重新跑一次联邦登录：登录在一个不显示的 view 里完成，新 cookie 写进同一个 session 分区，可见的标签页留在原页面不动。续期失败会每 3 分钟重试，直到会话真正过期，之后走原来的流程：某个标签页被踢到登录页时自动重新联邦，并回到该标签页最后访问的 console 页面；同账号其他停在登录页的标签页在登录完成后（或切到它们时）也会回到各自的页面。
 
@@ -179,7 +179,7 @@ src/
 - `ai-keys.json` — LLM API key 的 safeStorage 密文（base64，按 provider），只在「加密保存」且 safeStorage 可信时写
 - `ai.sqlite`（及 `-wal` / `-shm`）— AI 对话（完整的 pi 消息，含已脱敏、已裁剪的工具结果）和审计日志
 
-**凭证只存在内存里**，缓存到过期前 5 分钟为止，从不落盘。基础账号的缓存条目记着生成它的命令，改了命令就不再命中；保存时账号的 account id / role / via / 命令任一变化都会丢掉该账号的 view、cookie 和缓存。
+**凭证命令输出的临时密钥只存在内存里**，缓存到过期前 5 分钟为止，从不落盘。Console 登录 cookie 等会话数据保存在每个账号的持久分区里；删除账号或保存时改变 account id / role / via / 命令会清除该账号的 view、分区数据和凭证缓存。手动重新登录不会主动清空分区。基础账号的缓存条目记着生成它的命令，改了命令就不再命中。
 
 ### 凭证命令
 
@@ -325,7 +325,7 @@ tier B 的读（`aws_read`）在 `ApprovalStore.request` 上**暂停**：
 
 ### 发给 LLM 服务商的内容
 
-system prompt（账号名、12 位 account id、role 名、账号类型、region、时间，当前页面的去令牌 URL、标题和识别出的资源）、`read_current_page` 的页面文字（脱敏、≤ 8 KB，可关闭）、用户消息、模型自己的回复，以及工具结果：资源名和 id、标签、配置字段、指标数值、日志行（Logs Insights 查询结果）、成本数字。已脱敏：上面列出的键、环境变量值、凭证 / key 形态的字符串。**不发**：AWS 凭证、LLM API key、凭证命令、其他账号的任何东西（会话按账号隔离）。模型目录里的价格是内置的，应用不调用 pi 的 `models.refresh()`，也没有遥测（见 M0 报告）。
+system prompt（账号名、12 位 account id、role 名、账号类型、region、时间，当前页面的去令牌 URL、标题和识别出的资源）、`@` 引用的资源、`read_current_page` 的页面文字（脱敏、≤ 8 KB，可关闭）、用户消息、模型自己的回复，以及工具结果：资源名和 id、标签、配置字段、指标数值、日志行（Logs Insights 查询结果）、成本数字。已脱敏：上面列出的键、环境变量值、凭证 / key 形态的字符串。**不发**：AWS 凭证、LLM API key、凭证命令、其他账号的任何东西（会话按账号隔离）。模型目录里的价格是内置的，应用不调用 pi 的 `models.refresh()`，也没有遥测（见 M0 报告）。
 
 ### IPC（`ai/ipc.ts`，固定列表，只接受主窗口 `webContents` 的顶层 frame：`validate.ts` 的 `trustedSender`）
 
@@ -352,7 +352,7 @@ system prompt（账号名、12 位 account id、role 名、账号类型、region
 | `ai:abort` | `conversationId` | — |
 | `ai:rename` / `ai:delete` | `accountId, conversationId[, title]` | — |
 | `ai:clear` | `accountId` | — |
-| `ai:open-link` | `accountId, url` | console URL 走 `console:navigate` 同一条路径；其他 URL 按开窗策略（AWS 域名在该账号新标签页，其他 http(s) 交给系统浏览器，其他协议丢弃） |
+| `ai:open-link` | `accountId, url` | console URL 走 `console:navigate` 同一条路径；其他 URL 按开窗策略（`urls.ts` 的应用内域名在该账号新标签页，其他 http(s) 交给系统浏览器，其他协议丢弃） |
 | `ai:card-action` | `accountId, conversationId, cardId`（`c-` + 12 位 hex）`, actionId`（`[A-Za-z0-9_-]{1,32}`）`, rowId?`（可打印 ASCII ≤ 256）`, values?`（普通对象，≤ 20 个字段，值是 ≤ 1000 字的字符串 / 有限数字 / 布尔） | `{ ok: true }` / `{ ok: false, error }`；按存储的卡片校验，见「卡片」 |
 | `ai:proposal-confirm` | `accountId, conversationId, proposalId`（`p-` + 12 位 hex）`, typed?`（单行 ≤ 300 字，不能是对象） | `{ ok: true }`（执行完，结果见事件）/ `{ ok: false, error }`（被拒，提案多半还在等待）；**没有 params 参数**，多余参数不读 |
 | `ai:proposal-cancel` | `accountId, conversationId, proposalId` | 同上 |
