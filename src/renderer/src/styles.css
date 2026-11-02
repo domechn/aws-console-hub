@@ -1215,7 +1215,6 @@ button.primary:disabled {
 .ai-command-menu button[aria-selected="true"] { background: var(--bg-active); }
 .ai-header-title:focus-visible,
 .ai-header-menu button:focus-visible,
-.ai-conversation-pop input:focus-visible,
 .ai-conversation-pop button:focus-visible,
 .ai-command-menu button:focus-visible,
 .ai-old-card > summary:focus-visible,
@@ -2471,8 +2470,8 @@ button.ai-card-btn:focus-visible,
 }
 
 .ai-composer:focus-within {
-  border-color: var(--focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .ai-composer-chips {
@@ -3552,4 +3551,16 @@ button.ai-badge:focus-visible {
 html :is(button, input, select, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+html .ai-panel :is(input:not([type='checkbox']), select, textarea):focus-visible,
+html .modal.ai-settings :is(input:not([type='checkbox']), select):focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+html .ai-panel .ai-composer textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
 }

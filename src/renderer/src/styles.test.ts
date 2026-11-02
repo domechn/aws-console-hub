@@ -74,6 +74,12 @@ describe('AI panel CSS (plan ai-ux-redesign §3.18)', () => {
     expect(rule.slice(0, rule.indexOf('}'))).toMatch(/field-sizing: content;[^]*min-height: calc\(1lh \+ 12px\);[^]*max-height: calc\(8lh \+ 12px\);/)
   })
 
+  it('shows composer textarea focus on the rounded container without an inner outline', () => {
+    expect(css).toMatch(/\.ai-composer:focus-within\s*\{[^}]*border-color:\s*var\(--accent\);[^}]*box-shadow:\s*0 0 0 [23]px color-mix\(in srgb, var\(--accent\) \d+%, transparent\);/)
+    expect(css).toMatch(/html \.ai-panel \.ai-composer textarea:focus-visible\s*\{[^}]*outline:\s*none;[^}]*box-shadow:\s*none;/)
+    expect(css).toMatch(/\.ai-composer button:focus-visible,[^}]*outline:\s*2px solid var\(--accent\)/)
+  })
+
   it('change table values wrap and long labels cannot squeeze them out', () => {
     expect(css).toMatch(/\.ai-change-table td,\n\.ai-change-table th \{[^}]*white-space: normal;[^}]*overflow-wrap: anywhere;/)
     expect(css).toMatch(/\.ai-change \.ai-kv \{[^}]*grid-template-columns: minmax\(0, 1fr\);/)

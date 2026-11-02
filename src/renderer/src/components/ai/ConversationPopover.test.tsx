@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ConversationSummary } from '../../../../shared/ai'
 import { ConversationPopover, conversationKey, conversationStatus, groupConversations, searchGroups } from './ConversationPopover'
 
@@ -42,19 +42,25 @@ describe('ConversationPopover', () => {
     expect(conversationKey('Backspace', 7, 23, true)).toEqual({ delete: 7 })
   })
   it('shows title search, grouped rows, current check, count and actions', () => {
-    const html = renderToStaticMarkup(
-      <ConversationPopover
-        conversations={[row('today', 0), row('yesterday', 1)]}
-        currentId="today"
-        running={new Set(['yesterday'])}
-        open
-        onClose={() => {}}
-        onOpen={() => {}}
-        onRename={() => {}}
-        onDelete={() => {}}
-        onClear={() => {}}
-      />
-    )
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    let html: string
+    try {
+      html = renderToStaticMarkup(
+        <ConversationPopover
+          conversations={[row('today', 0), row('yesterday', 1)]}
+          currentId="today"
+          running={new Set(['yesterday'])}
+          open
+          onClose={() => {}}
+          onOpen={() => {}}
+          onRename={() => {}}
+          onDelete={() => {}}
+          onClear={() => {}}
+        />
+      )
+    } finally {
+      clock.mockRestore()
+    }
     expect(html).toContain('搜索对话标题')
     expect(html).toContain('今天')
     expect(html).toContain('昨天')
