@@ -26,7 +26,7 @@
 | 依赖 | 说明 |
 | --- | --- |
 | macOS | `titleBarStyle: 'hiddenInset'`、dock icon、`iconutil` 打包等均为 macOS 路径；其他平台能跑但体验不完整（快捷键改用 Ctrl，未实测） |
-| Node.js ≥ 22.19 | pi SDK（`@earendil-works/pi-*`）的 engines 要求：vitest 和 `npm run ai-smoke` 用开发机自己的 Node 加载 pi 和 `node:sqlite`（打包后的 app 用 Electron 43 内置的 Node 24.18.1） |
+| Node.js ≥ 22.19 | pi SDK（`@earendil-works/pi-*`）的 engines 要求：vitest 和 `npm run ai-smoke` 用开发机自己的 Node 加载 pi 和 `node:sqlite`（Electron 43.8.6 内置 Node 24.22.1） |
 | 凭证命令 | 每个基础账号自己配置，见下文「凭证命令」 |
 | 网络可达 | `signin.aws.amazon.com`、`*.console.aws.amazon.com`、`sts.us-east-1.amazonaws.com`，以及各 region 的 EC2 endpoint；用 AI 助手时还有所选 LLM 服务商的 API 地址（Bedrock 是 `bedrock-runtime.<region>.amazonaws.com`）和 AI 工具用到的 AWS 服务 endpoint（S3、Lambda、RDS、CloudWatch、Logs、ECS、DynamoDB、CloudFormation、IAM、Cost Explorer） |
 
@@ -49,6 +49,14 @@ npm run build:icons  # 用 Electron 自己把 SVG 光栅化成 icon.png / icon.i
 ```
 
 `npm run dev` 会先执行 `scripts/dev-app-name.js`：开发模式下进程跑在 `node_modules` 里的原版 `Electron.app` 中，macOS 从那个 bundle 的 `Info.plist` 取 Dock 名称，`productName` 和 `app.setName()` 都覆盖不了，所以只能就地打补丁。脚本是幂等的，非 macOS 上直接跳过。
+
+### 依赖版本与安全审计（2026-11-02）
+
+直接依赖继续在 `package.json` 中钉精确版本：Electron `43.8.6`、Vite `7.3.7`、Vitest `5.0.5`、electron-builder `26.18.0`。Vitest `3.2.7` 修复了原有的 UI 告警，但其 `@vitest/mocker` 和 `tinypool` 又被报告新漏洞，因此升到 `5.0.5`；现有测试在开发机 Node 22 上通过。`@earendil-works/pi-ai@1.4.0` 固定使用 `openai@7.19.0`，其可选 `undici` peer 没有上游固定版本；`overrides` 分别把运行时的 `undici` 钉在 `7.30.1`，把 `node-gyp` 下的 6.x 副本钉在 `6.29.1`。Node engines 仍为 `>=22.19.0`。
+
+升级后 `npm audit --omit=dev` 为 0；完整 `npm audit` 仍有 15 条 moderate，全部来自 electron-builder 的打包链（`glob` / `minimatch` 及 `@electron/asar`、`@electron/universal`、`app-builder-lib`、`dmg-builder`、`ejs` / `jake` / `filelist`、Windows installer、`rimraf` / `temp`）。已升级到当时最新的 electron-builder `26.18.0`；npm 给出的自动修复是降到 `20.23.1`。这些工具只在构建时运行，不作为应用运行时依赖打包；没有为跨多个主版本的 `minimatch` 强制 override，以免破坏打包。发布前应在目标 macOS 上重新执行 `npm run dist` 和审计。
+
+Electron `43.4.1 → 43.8.6` 覆盖沙箱 preload 缓存、证书、权限来源和 SameSite 的安全修复。应用使用 `WebContentsView` 的账号分区、会话权限处理器、`nativeTheme` 和 `safeStorage`；TypeScript 检查与构建通过。Electron 二进制在 Node 模式报告 `43.8.6` / Node `24.22.1`，但本机 Linux 的 SUID sandbox 配置阻止正常窗口启动；真实窗口行为未验证。此次网络范围仅应为 npm registry，上游 breaking-changes 页面未读取。安装时跳过了 Electron 下载脚本，但随后运行 `node node_modules/electron/cli.js --version` 意外触发二进制下载，可能访问了 npm registry 以外的 Electron 下载源。真实 AWS Console 会话未验证。
 
 ## 快捷键实现
 
