@@ -11,7 +11,15 @@ interface Msg {
 
 /** Rough tokens: ~3 chars each over the JSON (CJK and JSON punctuation both run denser than English prose). */
 export function estimateTokens(messages: Msg[]): number {
-  return Math.ceil(JSON.stringify(messages).length / 3)
+  let images = 0
+  const text = JSON.stringify(messages, function (key, value) {
+    if (key === 'data' && typeof value === 'string' && (this as { type?: string }).type === 'image') {
+      images++
+      return ''
+    }
+    return value
+  })
+  return Math.ceil(text.length / 3) + images * 1600
 }
 
 const isElided = (m: Msg): boolean =>

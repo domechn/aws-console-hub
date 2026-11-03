@@ -18,7 +18,10 @@ import type {
   SetKeyResult,
   ResourceContext,
   ResourceCandidate,
-  ConversationSearchResult
+  ConversationSearchResult,
+  AttachmentSource,
+  AttachmentPrepareResult,
+  AttachmentContent
 } from './ai'
 import type { FormValues } from './cards'
 
@@ -131,17 +134,20 @@ export interface AiApi {
   pin(accountId: string, conversationId: string, pinned: boolean): Promise<void>
   search(accountId: string, query: string): Promise<ConversationSearchResult[]>
   history(accountId: string, conversationId: string): Promise<ConversationView>
+  attachmentPrepare(accountId: string, conversationId: string | null, files: AttachmentSource[]): Promise<AttachmentPrepareResult[]>
+  attachmentDiscard(accountId: string, id: string): Promise<void>
+  attachmentGet(accountId: string, conversationId: string, attachmentId: string): Promise<AttachmentContent>
   /**
    * null starts a new conversation (`page`: its page toggle, default on). Rejects when the provider or key is missing.
    * Progress comes via onEvent.
    */
-  send(accountId: string, conversationId: string | null, text: string, page?: boolean, context?: ResourceContext): Promise<AiSendResult>
+  send(accountId: string, conversationId: string | null, text: string, page?: boolean, context?: ResourceContext, attachmentIds?: string[]): Promise<AiSendResult>
   resourceCandidates(accountId: string, query: string): Promise<ResourceCandidate[]>
   queueCancel(accountId: string, conversationId: string, queueId: string): Promise<void>
   feedback(accountId: string, conversationId: string, ordinal: number, value: 'up' | 'down' | null): Promise<void>
   denyAll(accountId: string, conversationId: string): Promise<{ approvals: number; proposals: number }>
   /** Rerun the user turn at this ordinal if its original text still matches. */
-  regenerate(accountId: string, conversationId: string, userOrdinal: number, expectedText: string, text?: string, context?: ResourceContext): Promise<AiSendResult>
+  regenerate(accountId: string, conversationId: string, userOrdinal: number, expectedText: string, text?: string, context?: ResourceContext, attachmentIds?: string[]): Promise<AiSendResult>
   /** The current page as the model would get it (sanitized URL, title, parsed resource); null off the console. */
   pageContext(accountId: string): Promise<PageContext | null>
   /** The chip's ×: the conversation stops (or starts again) sending the current page. */

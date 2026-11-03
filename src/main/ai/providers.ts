@@ -38,6 +38,7 @@ export interface CustomOpenAiConfig {
   modelId: string
   contextWindow: number
   maxTokens: number
+  customImageInput?: boolean
 }
 
 export const CUSTOM_PROVIDER_ID = 'custom-openai'
@@ -51,7 +52,7 @@ export function customOpenAiProvider(c: CustomOpenAiConfig): Provider<'openai-co
     provider: CUSTOM_PROVIDER_ID,
     baseUrl: c.baseUrl,
     reasoning: false,
-    input: ['text'],
+    input: c.customImageInput ? ['text', 'image'] : ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: c.contextWindow,
     maxTokens: c.maxTokens
@@ -204,7 +205,7 @@ const CUSTOM_LIMITS = { contextWindow: 128_000, maxTokens: 8192 }
  */
 export function resolveModel(
   models: MutableModels,
-  config: { provider: string; model: string; baseUrl: string | null; bedrockRegion?: string },
+  config: { provider: string; model: string; baseUrl: string | null; customImageInput?: boolean; bedrockRegion?: string },
   bedrockCredentials?: () => Promise<AwsCredentialsLike>
 ): Model<any> | undefined {
   if (config.provider === BEDROCK_PROVIDER_ID) {
@@ -215,9 +216,19 @@ export function resolveModel(
   }
   if (config.provider === CUSTOM_PROVIDER_ID) {
     if (!config.baseUrl || !config.model) return undefined
-    models.setProvider(customOpenAiProvider({ baseUrl: config.baseUrl, modelId: config.model, ...CUSTOM_LIMITS }))
+    models.setProvider(customOpenAiProvider({ baseUrl: config.baseUrl, modelId: config.model, customImageInput: config.customImageInput, ...CUSTOM_LIMITS }))
   }
   return models.getModel(config.provider, config.model)
+}
+
+/** Read-only image capability for settings and attachment preparation. */
+export function supportsImageInput(models: Models, config: { provider: string; model: string; baseUrl: string | null; customImageInput?: boolean }): boolean {
+  if (!config.model) return false
+  if (config.provider === CUSTOM_PROVIDER_ID) return Boolean(config.baseUrl && config.customImageInput)
+  const model = config.provider === BEDROCK_PROVIDER_ID
+    ? bedrockModel(models, config.model, 'us-east-1')
+    : models.getModel(config.provider, config.model)
+  return model?.input.includes('image') ?? false
 }
 
 /** The catalog for a provider, as the settings dropdown shows it. */

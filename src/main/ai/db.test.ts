@@ -26,7 +26,7 @@ describe('ai.sqlite', () => {
     db.close()
 
     const again = openAiDb()
-    expect(again.prepare('pragma user_version').get()).toEqual({ user_version: 8 })
+    expect(again.prepare('pragma user_version').get()).toEqual({ user_version: 10 })
     expect(new AiStore(again).conversations('a1').map((c) => c.title)).toEqual(['first'])
     again.close()
   })
@@ -159,14 +159,14 @@ describe('ai.sqlite', () => {
     old.exec('pragma user_version = 0')
     // A v1 database with one priced reply.
     migrate(old)
-    old.exec('pragma user_version = 1; drop table usage; drop table meta; drop index audit_by_t;')
+    old.exec('pragma user_version = 1; drop table attachments; drop table usage; drop table meta; drop index audit_by_t;')
     const v1 = new AiStore(old)
     const c = v1.createConversation('a1')
     old.prepare("insert into messages (conversation_id, role, content_json, created_at) values (?, 'assistant', ?, ?)").run(c, JSON.stringify({ role: 'assistant', provider: 'deepseek', model: 'm', usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0 } }), NOW)
     old.exec('alter table conversations drop column page_context')
     old.exec('alter table conversations drop column pinned; alter table messages drop column feedback')
     migrate(old)
-    expect(old.prepare('pragma user_version').get()).toEqual({ user_version: 8 })
+    expect(old.prepare('pragma user_version').get()).toEqual({ user_version: 10 })
     // v3: conversations from before it send the current page (the default).
     expect(v1.pageContext(c)).toBe(true)
     v1.setPageContext(c, false)
@@ -189,7 +189,7 @@ describe('ai.sqlite', () => {
   it('backfills analysis conversation usage when upgrading v5, including repeated migration', () => {
     const db = new DatabaseSync(':memory:')
     migrate(db)
-    db.exec('pragma user_version = 5')
+    db.exec('drop table attachments; pragma user_version = 5')
     db.exec('alter table conversations drop column pinned; alter table messages drop column feedback')
     db.prepare("insert into usage (t, account_id, provider, model, input, output, analysis_of) values (?, ?, ?, ?, ?, ?, ?)").run(NOW, 'a1', 'deepseek', 'm', 7, 3, 'conversation-1')
     migrate(db)
@@ -206,7 +206,7 @@ describe('ai.sqlite', () => {
     db.prepare("insert into messages (conversation_id, role, content_json, created_at) values (?, 'assistant', ?, ?)").run(
       id, JSON.stringify({ role: 'assistant', model: 'm', usage: { input: 1.6, output: 2.6 } }), NOW
     )
-    db.exec('drop index usage_by_conversation; alter table usage drop column conversation_id; pragma user_version = 4')
+    db.exec('drop table attachments; drop index usage_by_conversation; alter table usage drop column conversation_id; pragma user_version = 4')
     db.exec('alter table conversations drop column pinned; alter table messages drop column feedback')
     db.prepare("insert into usage (t, account_id, provider, model, input, output) values (?, 'a1', '', 'm', 2, 3)").run(NOW)
     migrate(db)
@@ -326,5 +326,50 @@ describe('ai.sqlite', () => {
       expect(raw).not.toContain(KEY_ID)
       expect(raw).not.toContain('EXAMPLEKEY')
     }
+  })
+})
+
+describe('attachment persistence', () => {
+  it('stores content outside message JSON and cascades on message, conversation, account, and retention deletion', () => {
+    const db = new DatabaseSync(':memory:')
+    db.exec('pragma foreign_keys = on')
+    migrate(db)
+    const store = new AiStore(db)
+    const id = store.createConversation('a')
+    store.addMessage(id, { role: 'user', content: { role: 'user', content: [{ type: 'text', text: 'hi' }], attachments: [{ id: 'x', kind: 'image', name: 'x.png', size: 9 }] } })
+    const messageId = store.messages(id)[0].id
+    store.addAttachment(id, messageId, { id: 'x', kind: 'image', name: 'x.png', mime: 'image/jpeg', size: 9, width: 1, height: 1, sha256: 'abc', bytes: Uint8Array.of(1,2,3), thumb: Uint8Array.of(4) })
+    expect(store.attachment('a', id, 'x')?.bytes).toEqual(Uint8Array.of(1,2,3))
+    expect(JSON.stringify(store.messages(id))).not.toContain('base64')
+    store.truncateMessages(id, messageId)
+    expect(store.attachment('a', id, 'x')).toBeUndefined()
+    db.close()
+  })
+})
+
+describe('attachment deletion paths', () => {
+  const add = (store: InstanceType<typeof AiStore>, conversationId: string, suffix: string) => {
+    const messageId = store.addMessage(conversationId, { role: 'user', content: { role: 'user', content: [{ type: 'text', text: 'hi' }], attachments: [{ id: suffix, kind: 'file', name: 'note.txt', size: 5 }] } })
+    store.addAttachment(conversationId, messageId, { id: suffix, kind: 'file', name: 'note.txt', mime: 'text/plain', size: 5, sha256: 'abc', text: 'hello' })
+  }
+  it('deletes image and file rows through retention, clear account, and delete all', () => {
+    const db = new DatabaseSync(':memory:')
+    db.exec('pragma foreign_keys = on')
+    migrate(db)
+    const store = new AiStore(db)
+    const old = store.createConversation('a')
+    add(store, old, 'old')
+    db.prepare('update conversations set updated_at = 1 where id = ?').run(old)
+    store.prune({ now: Date.now(), auditDays: 180, conversationDays: 1 })
+    expect(store.attachment('a', old, 'old')).toBeUndefined()
+    const account = store.createConversation('a')
+    add(store, account, 'account')
+    store.clearAccount('a')
+    expect(store.attachment('a', account, 'account')).toBeUndefined()
+    const all = store.createConversation('b')
+    add(store, all, 'all')
+    store.deleteAll({ audit: false, now: Date.now() })
+    expect(store.attachment('b', all, 'all')).toBeUndefined()
+    db.close()
   })
 })

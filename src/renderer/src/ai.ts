@@ -33,7 +33,7 @@ export function applyEvent(items: ChatItem[], e: AiEvent): ChatItem[] {
   if (e.type === 'card-state') {
     return items.map((i) => (i.kind === 'card' && i.card?.id === e.cardId ? { ...i, card: { ...i.card, state: e.state } } : i))
   }
-  if (e.type === 'user') return [...items, { kind: 'user', text: e.text, ...(e.resources && { resources: e.resources }) }]
+  if (e.type === 'user') return [...items, { kind: 'user', text: e.text, ...(e.resources && { resources: e.resources }), ...(e.attachments && { attachments: e.attachments }) }]
   if (e.type === 'proposal') {
     // The proposal card takes the place of its propose_change call's tool row.
     const item: ChatItem = { kind: 'proposal', id: e.id, proposal: e.proposal }

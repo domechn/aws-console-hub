@@ -32,6 +32,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
   const [provider, setProvider] = useState('')
   const [model, setModel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
+  const [customImageInput, setCustomImageInput] = useState(false)
   const [keyMode, setKeyMode] = useState<AiKeyMode>('keychain')
   const [keyCommand, setKeyCommand] = useState('')
   const [bedrockAuth, setBedrockAuth] = useState<BedrockAuth>('account')
@@ -55,6 +56,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
       setProvider(c.provider)
       setModel(c.model)
       setBaseUrl(c.baseUrl ?? '')
+      setCustomImageInput(c.customImageInput)
       setKeyMode(c.keyMode)
       setKeyCommand(c.keyCommand ?? '')
       setBedrockAuth(c.bedrockAuth)
@@ -82,7 +84,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
   }, [onClose, config, view])
 
   // A result only describes what it was run with.
-  useEffect(() => setResult(null), [provider, model, baseUrl, keyMode, keyCommand, key, bedrockAuth, bedrockAccountId, bedrockRegion])
+  useEffect(() => setResult(null), [provider, model, baseUrl, customImageInput, keyMode, keyCommand, key, bedrockAuth, bedrockAccountId, bedrockRegion])
 
   const selected = models.find((m) => m.id === model)
 
@@ -95,6 +97,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
         provider,
         model: model.trim(),
         baseUrl: custom ? baseUrl.trim() || null : null,
+        customImageInput: custom && customImageInput,
         keyMode,
         keyCommand: keyMode === 'command' ? keyCommand : null,
         ...(bedrock && { bedrockAuth, bedrockAccountId: bedrockAccountId || null, bedrockRegion })
@@ -178,6 +181,11 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
               模型 id
               <input className="mono" value={model} placeholder="例如 qwen2.5:14b" spellCheck={false} onChange={(e) => setModel(e.target.value)} />
             </label>
+            <label className="check">
+              <input type="checkbox" checked={customImageInput} onChange={(e) => setCustomImageInput(e.target.checked)} />
+              该模型支持图片输入
+            </label>
+            <div className="modal-hint">开启后可在对话里粘贴图片；图片会发送给该端点</div>
             <div className="modal-hint">OpenAI Chat Completions 兼容接口。本地小模型可能无法正确使用工具。</div>
           </>
         ) : bedrock ? (

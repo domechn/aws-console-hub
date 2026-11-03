@@ -17,6 +17,7 @@ import {
   listModels,
   lockAmbientBedrockAuth,
   resolveModel,
+  supportsImageInput,
   testModel,
   type AwsCredentialsLike
 } from './providers'
@@ -98,6 +99,14 @@ describe('pi entrypoint', () => {
 })
 
 describe('model selection and connection test', () => {
+  it('opts a custom model into image input and reports its attachment capability', () => {
+    const models = createConfiguredModels()
+    const custom = { provider: 'custom-openai', model: 'vision', baseUrl: 'http://localhost:11434/v1' }
+    expect(supportsImageInput(models, { ...custom, customImageInput: false })).toBe(false)
+    expect(resolveModel(models, { ...custom, customImageInput: false })?.input).toEqual(['text'])
+    expect(supportsImageInput(models, { ...custom, customImageInput: true })).toBe(true)
+    expect(resolveModel(models, { ...custom, customImageInput: true })?.input).toEqual(['text', 'image'])
+  })
   it('resolves catalog models and (re)registers a custom endpoint from config', () => {
     const models = createConfiguredModels()
     expect(resolveModel(models, { provider: 'deepseek', model: 'deepseek-flash', baseUrl: null })?.id).toBe('deepseek-flash')

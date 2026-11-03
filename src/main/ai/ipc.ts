@@ -27,6 +27,7 @@ import {
   checkQueueId,
   trustedSender
 } from './validate'
+import type { AttachmentSource } from '../../shared/ai'
 
 /**
  * The fixed ai:* channel list (plan §11). Each argument is validated here; there is no generic invoke, and
@@ -64,15 +65,18 @@ export function registerAiIpc(win: BrowserWindow, ai: AiService, openLink: (acco
   handle('ai:test', () => ai.test())
   handle('ai:conversations', (accountId) => ai.conversations(checkId(accountId, '账号 id')))
   handle('ai:history', (accountId, id) => ai.view(checkId(accountId, '账号 id'), checkId(id, '对话 id')))
-  handle('ai:send', (accountId, id, text, page, context) => ai.send(checkId(accountId, '账号 id'), conversation(id), checkPrompt(text), checkFlag(page ?? true), checkResourceContext(context)))
+  handle('ai:attachment-prepare', (accountId, id, files) => ai.attachmentPrepare(checkId(accountId, '账号 id'), conversation(id), files as AttachmentSource[]))
+  handle('ai:attachment-discard', (accountId, id) => ai.attachmentDiscard(checkId(accountId, '账号 id'), checkId(id, '附件 id')))
+  handle('ai:attachment-get', (accountId, id, attachmentId) => ai.attachmentGet(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkId(attachmentId, '附件 id')))
+  handle('ai:send', (accountId, id, text, page, context, attachmentIds) => ai.send(checkId(accountId, '账号 id'), conversation(id), checkPrompt(text), checkFlag(page ?? true), checkResourceContext(context), ...(attachmentIds === undefined ? [] : [attachmentIds as string[]])))
   handle('ai:resource-candidates', (accountId, query) => ai.resourceCandidates(checkId(accountId, '账号 id'), checkSearchQuery(query, true)))
   handle('ai:pin', (accountId, id, pinned) => ai.pin(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkFlag(pinned)))
   handle('ai:search', (accountId, query) => ai.search(checkId(accountId, '账号 id'), checkSearchQuery(query)))
   handle('ai:feedback', (accountId, id, ordinal, value) => ai.feedback(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkUserIndex(ordinal), checkFeedback(value)))
   handle('ai:queue-cancel', (accountId, id, queueId) => ai.queueCancel(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkQueueId(queueId)))
   handle('ai:deny-all', (accountId, id) => ai.denyAll(checkId(accountId, '账号 id'), checkId(id, '对话 id')))
-  handle('ai:regenerate', (accountId, id, index, expectedText, text, context) =>
-    ai.regenerate(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkUserIndex(index), checkPrompt(expectedText), text === undefined ? undefined : checkPrompt(text), checkResourceContext(context)))
+  handle('ai:regenerate', (accountId, id, index, expectedText, text, context, attachmentIds) =>
+    ai.regenerate(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkUserIndex(index), checkPrompt(expectedText), text === undefined ? undefined : checkPrompt(text), checkResourceContext(context), ...(attachmentIds === undefined ? [] : [attachmentIds as string[]])))
   // The chip: what main would send as the current page (sanitized URL, title, parsed resource), or null.
   handle('ai:page-context', (accountId) => ai.pageContext(checkId(accountId, '账号 id')))
   handle('ai:page-toggle', (accountId, id, on) => ai.setPageContext(checkId(accountId, '账号 id'), checkId(id, '对话 id'), checkFlag(on)))

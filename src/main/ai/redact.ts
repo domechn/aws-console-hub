@@ -25,3 +25,12 @@ const RULES: [RegExp, string][] = [
 export function redactSecrets(text: string): string {
   return RULES.reduce((s, [re, to]) => s.replace(re, to), text)
 }
+
+/** Attachment-only broad scrub. It intentionally trades false positives for fewer leaked secrets. */
+export function redactAttachmentSecrets(text: string): string {
+  const assigned = text.replace(/(^[ \t]*["']?(?:pass(?:word)?|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)s?["']?[ \t]*[:=][ \t]*["']?)([^\r\n"']+)/gim,
+    (_whole, key: string, value: string) => value.trim() ? `${key}[redacted]` : `${key}${value}`)
+  return redactSecrets(assigned)
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted:jwt]')
+    .replace(/\b(?:xox[abprs]-[A-Za-z0-9-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, '[redacted:api-key]')
+}

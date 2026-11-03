@@ -41,6 +41,7 @@ describe('compactContext', () => {
 
   it('estimates tokens from size', () => {
     expect(estimateTokens([user('x'.repeat(3000))])).toBeGreaterThan(1000)
+    expect(estimateTokens([{ role: 'user', content: [{ type: 'image', data: 'a'.repeat(100_000), mimeType: 'image/jpeg' }] }])).toBeGreaterThanOrEqual(1600)
   })
 })
 

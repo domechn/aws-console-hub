@@ -227,3 +227,21 @@ describe('Composer', () => {
     expect(html).toMatch(/class="ai-cost-chip always-visible"/)
   })
 })
+
+it('shows each rejected filename and collapses excess with dismiss controls and a privacy note above the editor', () => {
+  const attachments = [{ localId: 'ok', id: 'ok', kind: 'file' as const, name: 'ok.txt', size: 1, state: 'ready' as const, createdAt: 1 }, ...['a.pdf', 'b.zip', 'c.exe', 'd.doc'].map((name, i) => ({ localId: String(i), id: '', kind: 'file' as const, name, size: 1, state: 'error' as const, reason: '不支持此文件类型', createdAt: 1 }))]
+  const html = render({ attachments })
+  expect(html).toContain('a.pdf：不支持此文件类型')
+  expect(html).toContain('b.zip：不支持此文件类型')
+  expect(html).toContain('c.exe：不支持此文件类型')
+  expect(html).toContain('另有 1 个被拒绝')
+  expect(html).not.toContain('d.doc：不支持此文件类型')
+  expect(html.indexOf('图片里的敏感信息不会被自动隐藏')).toBeLessThan(html.indexOf('<textarea'))
+  expect(html.indexOf('ai-attachment-errors')).toBeLessThan(html.indexOf('ai-attachment-chips'))
+  expect(html).not.toContain('ai-attachment-chip error')
+})
+
+it('keeps file metadata and privacy badges inline in a compact chip', () => {
+  const html = render({ attachments: [{ localId: '1', id: '1', kind: 'file', name: 'report.txt', size: 2048, state: 'ready', createdAt: 1, redactions: 2, truncated: true }] })
+  expect(html).toMatch(/ai-attachment-chip file[^]*ai-attachment-name[^]*report\.txt[^]*ai-attachment-size[^]*2 KB[^]*已截断[^]*title="已隐藏 2 处密钥"[^]*aria-label="已隐藏 2 处密钥"[^]*已隐藏 2 处/)
+})

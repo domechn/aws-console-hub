@@ -4,8 +4,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { redactSecrets } from './redact'
+import type { AttachmentData } from './attachments'
 
-type SqlValue = string | number | null
+type SqlValue = string | number | null | Uint8Array
 
 /** What this module needs from a driver. node:sqlite's DatabaseSync and better-sqlite3's Database both fit as-is. */
 export interface SqlDatabase {
@@ -85,7 +86,25 @@ const MIGRATIONS = [
    create index usage_by_conversation on usage (conversation_id);`,
   `update usage set conversation_id = analysis_of where analysis_of is not null and conversation_id is null;`,
   `alter table conversations add column pinned integer not null default 0;`,
-  `alter table messages add column feedback text check (feedback in ('up', 'down') or feedback is null);`
+  `alter table messages add column feedback text check (feedback in ('up', 'down') or feedback is null);`,
+  `create table attachments (
+     id text primary key,
+     conversation_id text not null references conversations (id) on delete cascade,
+     message_id integer not null references messages (id) on delete cascade,
+     kind text not null,
+     name text not null,
+     mime text not null,
+     size integer not null,
+     width integer,
+     height integer,
+     sha256 text not null,
+     text text,
+     bytes blob,
+     thumb blob,
+     created_at integer not null
+   );
+   create index attachments_by_message on attachments (message_id);`,
+  `create index attachments_by_conversation on attachments (conversation_id);`
 ]
 
 const DAY = 86400_000
@@ -261,12 +280,12 @@ export class AiStore {
     this.db.prepare('delete from conversations where id = ?').run(id)
   }
 
-  addMessage(conversationId: string, m: { role: string; content: unknown; tokensIn?: number; tokensOut?: number }): void {
+  addMessage(conversationId: string, m: { role: string; content: unknown; tokensIn?: number; tokensOut?: number }): number {
     const now = Date.now()
     const stored = redactSecrets(JSON.stringify(m.content))
-    this.db
+    const inserted = this.db
       .prepare('insert into messages (conversation_id, role, content_json, tokens_in, tokens_out, created_at) values (?, ?, ?, ?, ?, ?)')
-      .run(conversationId, m.role, stored, m.tokensIn ?? null, m.tokensOut ?? null, now)
+      .run(conversationId, m.role, stored, m.tokensIn ?? null, m.tokensOut ?? null, now) as { lastInsertRowid: number | bigint }
     this.db.prepare('update conversations set updated_at = ? where id = ?').run(now, conversationId)
     const c = m.content as { usage?: Partial<Record<keyof Omit<UsageRow, 'provider' | 'model'>, unknown>>; provider?: unknown; model?: unknown } | null
     if (m.role === 'assistant' && c?.usage) {
@@ -275,6 +294,30 @@ export class AiStore {
         .prepare('insert into usage (t, account_id, provider, model, input, output, cache_read, cache_write, conversation_id) select ?, account_id, ?, ?, ?, ?, ?, ?, ? from conversations where id = ?')
         .run(now, String(c.provider ?? ''), String(c.model ?? ''), n(c.usage.input), n(c.usage.output), n(c.usage.cacheRead), n(c.usage.cacheWrite), conversationId, conversationId)
     }
+    return Number(inserted.lastInsertRowid)
+  }
+
+  addAttachment(conversationId: string, messageId: number, a: AttachmentData): void {
+    this.db.prepare(`insert into attachments
+      (id, conversation_id, message_id, kind, name, mime, size, width, height, sha256, text, bytes, thumb, created_at)
+      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(a.id, conversationId, messageId, a.kind, a.name, a.mime, a.size, a.width ?? null, a.height ?? null,
+        a.sha256, a.text ?? null, a.bytes ?? null, a.thumb ?? null, Date.now())
+  }
+
+  attachmentPreviews(accountId: string, conversationId: string): Map<string, AttachmentData> {
+    const rows = this.db.prepare(`select a.id, a.kind, a.name, a.mime, a.size, a.width, a.height, a.sha256, a.thumb
+      from attachments a join conversations c on c.id = a.conversation_id
+      where a.conversation_id = ? and c.account_id = ?`).all(conversationId, accountId) as AttachmentData[]
+    return new Map(rows.map((r) => [r.id, r]))
+  }
+
+  attachment(accountId: string, conversationId: string, attachmentId: string): AttachmentData | undefined {
+    const row = this.db.prepare(`select a.id, a.kind, a.name, a.mime, a.size, a.width, a.height, a.sha256,
+      a.text, a.bytes, a.thumb from attachments a join conversations c on c.id = a.conversation_id
+      where a.id = ? and a.conversation_id = ? and c.account_id = ?`).get(attachmentId, conversationId, accountId) as AttachmentData | undefined
+    if (!row) return undefined
+    return { ...row, ...(row.bytes && { bytes: new Uint8Array(row.bytes) }), ...(row.thumb && { thumb: new Uint8Array(row.thumb) }) }
   }
 
   /** One reply of an impact analysis (analysis.ts): counted in the month and the budget, and in its conversation's total. */

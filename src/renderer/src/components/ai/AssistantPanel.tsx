@@ -1,8 +1,10 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ATTACH_LIMITS,
   BEDROCK_PROVIDER_ID,
   CUSTOM_PROVIDER_ID,
   type AiConfigView,
+  type AttachmentMeta,
   type AiModelInfo,
   type ApprovalDecision,
   type CardActionResult,
@@ -24,6 +26,8 @@ import { ActivityGroup, groupTools, type NonToolItem } from './ActivityGroup'
 import { ApprovalCard } from './ApprovalCard'
 import { CardSkeleton, CardView } from './CardView'
 import { Composer, draftKey, draftStore, restoreFailedSend, scopedContent } from './Composer'
+import { chipReducer, classifyAttachment, discardLatePrepared, dragFilesVisible, expiredChips, readyChips, sendText, sourceFromFile, type AttachmentChip } from './attachments'
+import { MessageAttachments } from './MessageAttachments'
 import { ConversationPopover } from './ConversationPopover'
 import { canSendText, submitText, type LocalCommand } from './commands'
 import { EmptyState } from './EmptyState'
@@ -72,6 +76,15 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const [clock, setClock] = useState(() => ({ now: Date.now(), previous: Date.now() - 1000 }))
   const [notice, setNotice] = useState<string | null>(null)
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<AttachmentChip[]>([])
+  const attachmentDrafts = useRef(new Map<string, AttachmentChip[]>())
+  const knownAttachments = useRef(new Map<string, { chip: AttachmentChip; accountId: string }>())
+  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null)
+  const [attachmentAnnouncement, setAttachmentAnnouncement] = useState('')
+  const imageConversion = useRef(Promise.resolve())
+  const announcementCount = useRef(0)
+  const announceAttachment = (text: string): void => { announcementCount.current++; setAttachmentAnnouncement(text + "\u200b".repeat(announcementCount.current % 2 + 1)) }
+  const [draggingFiles, setDraggingFiles] = useState(false)
   const [resources, setResources] = useState<ResourceCandidate[]>([])
   const [resourceQuery, setResourceQuery] = useState<string | null>(null)
   const [candidates, setCandidates] = useState<ResourceCandidate[]>([])
@@ -95,6 +108,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const [editIndex, setEditIndex] = useState<number | null>(null)
   const [editText, setEditText] = useState('')
   const [editResources, setEditResources] = useState<ResourceCandidate[]>([])
+  const [editAttachments, setEditAttachments] = useState<AttachmentMeta[]>([])
   const [regenerating, setRegenerating] = useState(false)
   const regeneratingRef = useRef(false)
   const [justExecuted, setJustExecuted] = useState(false)
@@ -133,6 +147,108 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const visibleConversations = conversationsAccount === accountId ? conversations : []
   const ready = aiReady(config)
   const busy = conversationId !== null && running.has(conversationId)
+  const setAttachmentDraft = (target: string, chips: AttachmentChip[]): void => {
+    attachmentDrafts.current.set(target, chips)
+    if (currentRef.current === target) setAttachments(chips)
+  }
+  const restoreAttachments = (target: string): void => {
+    const before = attachmentDrafts.current.get(target) ?? []
+    const next = expiredChips(before, Date.now())
+    if (next.length !== before.length) setAttachmentNotice('附件已过期，请重新添加')
+    for (const chip of before) if (!next.includes(chip) && chip.id) { knownAttachments.current.delete(chip.id); void ai.attachmentDiscard(target.split('/')[0], chip.id).catch(() => {}) }
+    setAttachmentDraft(target, next)
+  }
+  const discardScope = (target: string): void => {
+    for (const chip of attachmentDrafts.current.get(target) ?? []) if (chip.id) { knownAttachments.current.delete(chip.id); void ai.attachmentDiscard(target.split('/')[0], chip.id).catch(() => {}) }
+    attachmentDrafts.current.delete(target)
+    if (currentRef.current === target) setAttachments([])
+  }
+  useEffect(() => {
+    const timer = setInterval(() => {
+      for (const key of attachmentDrafts.current.keys()) {
+        const before = attachmentDrafts.current.get(key) ?? []
+        const next = chipReducer(before, { type: 'expire', now: Date.now() })
+        if (next.length !== before.length) {
+          setAttachmentDraft(key, next)
+          for (const chip of before) if (!next.includes(chip) && chip.id) { knownAttachments.current.delete(chip.id); void ai.attachmentDiscard(key.split('/')[0], chip.id).catch(() => {}) }
+          if (currentRef.current === key) setAttachmentNotice('附件已过期，请重新添加')
+        }
+      }
+      for (const [id, known] of knownAttachments.current) if (Date.now() - known.chip.createdAt >= ATTACH_LIMITS.pendingTtlMs) { knownAttachments.current.delete(id); void ai.attachmentDiscard(known.accountId, id).catch(() => {}) }
+    }, 15_000)
+    return () => clearInterval(timer)
+  }, [])
+  useEffect(() => {
+    const reset = (): void => setDraggingFiles(false)
+    const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape') reset() }
+    for (const type of ['drop', 'dragend', 'blur']) window.addEventListener(type, reset)
+    window.addEventListener('keydown', escape)
+    return () => { for (const type of ['drop', 'dragend', 'blur']) window.removeEventListener(type, reset); window.removeEventListener('keydown', escape) }
+  }, [])
+  const addAttachments = (files: File[]): void => {
+    if (!accountId || !config || !ready) return
+    const target = currentRef.current ?? scope
+    let chips = attachmentDrafts.current.get(target) ?? []
+    const addError = (file: File, reason: string): void => {
+      const rejected: AttachmentChip = { localId: crypto.randomUUID(), id: '', kind: /\.(?:png|jpe?g|webp|gif|bmp)$/i.test(file.name) ? 'image' : 'file', name: file.name, size: file.size, state: 'error', reason, createdAt: Date.now() }
+      chips = chipReducer(chips, { type: 'add', chip: rejected })
+      setAttachmentDraft(target, chips)
+      announceAttachment(`${file.name}：${reason}`)
+    }
+    for (const file of files) {
+      const pending = [...attachmentDrafts.current.entries()].flatMap(([key, draft]) => key.startsWith(`${accountId}/`) ? draft : []).filter((c) => c.state !== 'error').length
+      if (pending >= ATTACH_LIMITS.pendingPerAccount) { addError(file, `待发送附件最多 ${ATTACH_LIMITS.pendingPerAccount} 个`); continue }
+      const globalPending = [...attachmentDrafts.current.values()].flat().filter((c) => c.state !== 'error').length
+      if (globalPending >= ATTACH_LIMITS.pendingGlobal) { addError(file, `待发送附件总计最多 ${ATTACH_LIMITS.pendingGlobal} 个`); continue }
+      const images = chips.filter((c) => c.kind === 'image' && c.state !== 'error').length
+      const textFiles = chips.filter((c) => c.kind === 'file' && c.state !== 'error').length
+      const textBytes = chips.filter((c) => c.kind === 'file' && c.state !== 'error').reduce((total, c) => total + (c.state === 'ready' ? c.size : Math.min(c.size, ATTACH_LIMITS.textOutputBytes)), 0)
+      const result = classifyAttachment(file, config.canAttachImages, images, textFiles, textBytes)
+      if (!result.kind) { addError(file, result.reason ?? '不支持此文件类型'); continue }
+      const chip: AttachmentChip = { localId: crypto.randomUUID(), id: '', kind: result.kind, name: file.name, size: file.size, state: 'preparing', createdAt: Date.now() }
+      chips = chipReducer(chips, { type: 'add', chip })
+      setAttachmentDraft(target, chips)
+      setAttachmentNotice(null)
+      void (async () => {
+        const reject = (reason: string): void => {
+          const current = attachmentDrafts.current.get(target) ?? []
+          setAttachmentDraft(target, chipReducer(current, { type: 'prepared', localId: chip.localId, chip: { ...chip, state: 'error', reason } }))
+          announceAttachment(`${chip.name}：${reason}`)
+        }
+        let source
+        try {
+          if (result.kind === 'image') {
+            const conversion = imageConversion.current.then(() => sourceFromFile(file, 'image'))
+            imageConversion.current = conversion.then(() => {}, () => {})
+            source = await conversion
+          } else source = await sourceFromFile(file, 'file')
+        } catch (err) {
+          reject(ipcError(err).includes('图片太大') ? '图片太大' : ipcError(err).includes('图片尺寸超出限制') ? '图片尺寸超出限制' : result.kind === 'image' ? '无法读取这张图片' : '无法读取文件')
+          return
+        }
+        if (!(attachmentDrafts.current.get(target) ?? []).some((c) => c.localId === chip.localId)) return
+        try {
+          const prepared = (await ai.attachmentPrepare(accountId, target.split('/').slice(1).join('/') || null, [source]))[0]
+          const current = attachmentDrafts.current.get(target) ?? []
+          if (discardLatePrepared(current, chip.localId, Boolean(prepared?.ok))) { if (prepared?.ok) void ai.attachmentDiscard(accountId, prepared.id).catch(() => {}); return }
+          if (!current.some((c) => c.localId === chip.localId)) return
+          const next: AttachmentChip = prepared?.ok ? { ...chip, ...prepared, state: 'ready', createdAt: Date.now() } : { ...chip, state: 'error', reason: prepared?.reason ?? '附件准备失败' }
+          if (prepared?.ok) { knownAttachments.current.set(prepared.id, { chip: next, accountId }); announceAttachment(`已添加 ${next.name}`) }
+          else announceAttachment(`${next.name}：${next.reason}`)
+          setAttachmentDraft(target, chipReducer(current, { type: 'prepared', localId: chip.localId, chip: next }))
+        } catch (err) {
+          reject(ipcError(err))
+        }
+      })()
+    }
+  }
+  const removeAttachment = (chip: AttachmentChip): void => {
+    const target = currentRef.current ?? scope
+    setAttachmentDraft(target, chipReducer(attachmentDrafts.current.get(target) ?? [], { type: 'remove', localId: chip.localId }))
+    if (chip.id && accountId) void ai.attachmentDiscard(accountId, chip.id).catch(() => {})
+    if (chip.id) knownAttachments.current.delete(chip.id)
+    announceAttachment('已移除')
+  }
   const waitText = modelWaitingText(conversationId ? modelStatus.get(conversationId) : undefined, clock.now, clock.previous)
   const hasPendingDecision = visibleItems.some((item) =>
     item.kind === 'approval' && item.approval.state === 'pending' || item.kind === 'proposal' && item.proposal.state === 'pending'
@@ -162,12 +278,15 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
 
   const loadConversation = useCallback(async (accId: string, id: string | null) => {
     const target = draftKey(accId, id)
+    if (currentRef.current === draftKey(accId, null) && target !== currentRef.current) discardScope(currentRef.current)
     currentRef.current = target
     setConversationId(id)
     setViewScope(target)
     setItems([])
     setQueue([])
     setResources(resourceDrafts.current.get(target) ?? [])
+    setAttachmentNotice(null)
+    restoreAttachments(target)
     setResourceQuery(null)
     setUsage(null)
     lastByAccount.current.set(accId, id)
@@ -175,6 +294,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     failedNotices.current.delete(target)
     setJustExecuted(false)
     setEditIndex(null)
+    setEditAttachments([])
     setInput(drafts.get(draftKey(accId, id)))
     if (!id) {
       setPageOn(true)
@@ -219,6 +339,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     setItems([])
     setQueue([])
     setResources(resourceDrafts.current.get(target) ?? [])
+    setAttachmentNotice(null)
+    restoreAttachments(target)
     setResourceQuery(null)
     setUsage(null)
     if (!accountId) {
@@ -304,12 +426,23 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
           if (draftKey(acc, id) === currentRef.current) setQueue(event.items)
           return
         }
+        if (event.type === 'user') for (const attachment of event.attachments ?? []) knownAttachments.current.delete(attachment.id)
         if (event.type === 'queue-failed') {
           const target = event.message === '对话已删除' ? draftKey(acc, null) : draftKey(acc, id)
           const deleted = event.message === '对话已删除'
-          const restored = deleted ? null : restoreQueuedDraft(drafts, currentRef.current, target, event.text)
+          const restored = deleted ? null : restoreQueuedDraft(drafts, currentRef.current, target, event.attachmentIds?.length && event.text === '请看附件。' ? '' : event.text)
           const merged = deleted ? [] : mergeQueuedResources(resourceDrafts.current.get(target) ?? [], event.context?.resources ?? [], event.resources)
           if (!deleted) resourceDrafts.current.set(target, merged)
+          if (!deleted && event.attachmentIds?.length) {
+            const returned = event.attachmentIds.flatMap((attachmentId) => {
+              const chip = knownAttachments.current.get(attachmentId)?.chip
+              return chip ? [chip] : []
+            })
+            const valid = expiredChips(returned, Date.now())
+            for (const chip of returned) if (!valid.includes(chip)) { knownAttachments.current.delete(chip.id); void ai.attachmentDiscard(acc, chip.id).catch(() => {}) }
+            if (valid.length !== returned.length) setAttachmentNotice('附件已过期，请重新添加')
+            setAttachmentDraft(target, chipReducer(attachmentDrafts.current.get(target) ?? [], { type: 'restore', chips: valid, now: Date.now() }))
+          }
           const message = deleted ? '对话已删除，排队消息已丢弃' : `排队消息未发送：${event.message}`
           if (target !== currentRef.current) failedNotices.current.set(target, message)
           if (deleted && currentRef.current === target) setNotice(message)
@@ -397,6 +530,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     if (stickRef.current) scrollToEnd()
   }, [items, notice, scrollToEnd])
   useEffect(() => {
+    if (stickRef.current) scrollToEnd()
+  }, [attachments, scrollToEnd])
+  useEffect(() => {
     const el = listRef.current
     if (!el) return
     let frame = 0
@@ -423,20 +559,24 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   }
 
   const send = async (text: string): Promise<void> => {
-    if (!accountId || !canSendText(text)) return
+    const sentChips = readyChips(attachmentDrafts.current.get(scope) ?? [])
+    if (!accountId || (!canSendText(text) && !sentChips.length) || (attachmentDrafts.current.get(scope) ?? []).some((c) => c.state === 'preparing')) return
+    const originalText = text
+    text = sendText(text, sentChips)
     const sentScope = scope
     setJustExecuted(false)
     setNotice(null)
     setDraft('')
     stickRef.current = true
     const sentResources = resources
-    const preview: ChatItem = { kind: 'user', text: text.trim(), resources: sentResources }
+    const preview: ChatItem = { kind: 'user', text: text.trim(), resources: sentResources, attachments: sentChips }
+    setAttachmentDraft(sentScope, [])
     setResources([])
     resourceDrafts.current.delete(sentScope)
     setResourceQuery(null)
     if (!busy) setItems((prev) => [...prev, preview])
     try {
-      const { conversationId: id, warning, queued } = await ai.send(accountId, conversationId, text, pageOn, sentResources.length ? { resources: sentResources.map(({ type, id, region }) => ({ type, id, region })) } : undefined)
+      const { conversationId: id, warning, queued } = await ai.send(accountId, conversationId, text, pageOn, sentResources.length ? { resources: sentResources.map(({ type, id, region }) => ({ type, id, region })) } : undefined, sentChips.map((c) => c.id))
       if (queued && !busy && currentRef.current === sentScope) setItems((prev) => removeQueuedPreview(prev, preview))
       if (warning && currentRef.current === sentScope) setNotice(warning)
       if (!queued) setRunning((prev) => new Set(prev).add(id))
@@ -451,10 +591,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       }
     } catch (err) {
       // Nothing was sent: give the text back.
-      const restored = restoreFailedSend(drafts.get(sentScope), text)
+      const restored = restoreFailedSend(drafts.get(sentScope), originalText)
       drafts.set(sentScope, restored)
       const merged = mergeQueuedResources(resourceDrafts.current.get(sentScope) ?? [], sentResources)
       resourceDrafts.current.set(sentScope, merged)
+      const valid = ipcError(err).includes('附件已过期') ? [] : expiredChips(sentChips, Date.now())
+      setAttachmentDraft(sentScope, chipReducer(attachmentDrafts.current.get(sentScope) ?? [], { type: 'restore', chips: valid, now: Date.now() }))
+      if (valid.length !== sentChips.length || ipcError(err).includes('附件已过期')) setAttachmentNotice('附件已过期，请重新添加')
       if (currentRef.current === sentScope) {
         setItems((prev) => removeQueuedPreview(prev, preview))
         setInput(restored)
@@ -481,12 +624,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     setJustExecuted(false)
     setNotice(null)
     setItems(regenerationPreview(visibleItems, index, text ?? selected.text).map((item) =>
-      item.kind === 'user' && item.ordinal === ordinal && text !== undefined && editIndex === index ? { ...item, resources: editResources } : item))
+      item.kind === 'user' && item.ordinal === ordinal && text !== undefined && editIndex === index ? { ...item, resources: editResources, attachments: editAttachments } : item))
     try {
       let timer: ReturnType<typeof setTimeout> | undefined
       const result = await Promise.race([
         ai.regenerate(accountId, conversationId, ordinal, selected.text, text, text !== undefined && editIndex === index
-          ? { resources: editResources.map(({ type, id, region }) => ({ type, id, region })) } : undefined),
+          ? { resources: editResources.map(({ type, id, region }) => ({ type, id, region })) } : undefined,
+        text !== undefined && editIndex === index ? editAttachments.map((a) => a.id) : undefined),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('重新生成超时，请刷新对话后重试')), 35_000) })
       ]).finally(() => clearTimeout(timer))
       setRunning((prev) => new Set(prev).add(result.conversationId))
@@ -522,6 +666,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
     if (!confirm(`删除「${title}」？`)) return
     try {
       await ai.delete(accountId, id)
+      discardScope(draftKey(accountId, id))
       await refreshList(accountId)
       if (id === conversationId) void loadConversation(accountId, null)
     } catch (err) {
@@ -532,6 +677,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const clearAll = async (): Promise<void> => {
     if (!accountId || !account || !confirm(`删除「${account.name}」的全部 AI 对话？`)) return
     await ai.clear(accountId)
+    for (const key of attachmentDrafts.current.keys()) if (key.startsWith(`${accountId}/`)) discardScope(key)
     await refreshList(accountId)
     void loadConversation(accountId, null)
   }
@@ -667,7 +813,21 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const allowed = allows.filter((a) => a.conversationId === conversationId)
 
   return (
-    <aside ref={panelRef} className="ai-panel" style={{ width }} aria-label="AI 助手" onKeyDown={(e) => {
+    <aside ref={panelRef} className="ai-panel" style={{ width }} aria-label="AI 助手" onDragEnter={(e) => {
+      if (!accountId || !ready || !e.dataTransfer.types.includes('Files')) return
+      e.preventDefault()
+      setDraggingFiles((current) => dragFilesVisible(current, 'enter', true))
+    }} onDragLeave={(e) => {
+      if (!e.dataTransfer.types.includes('Files')) return
+      setDraggingFiles((current) => dragFilesVisible(current, 'leave', Boolean(e.relatedTarget && e.currentTarget.contains(e.relatedTarget as Node))))
+    }} onDragOver={(e) => { if (accountId && ready && e.dataTransfer.types.includes('Files')) e.preventDefault() }} onDrop={(e) => {
+      setDraggingFiles(false)
+      if (accountId && ready && e.dataTransfer.types.includes('Files')) {
+        e.preventDefault()
+        const files = [...e.dataTransfer.items].filter((item) => item.kind === 'file' && !item.webkitGetAsEntry?.()?.isDirectory).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file))
+        addAttachments(e.dataTransfer.items.length ? files : [...e.dataTransfer.files])
+      }
+    }} onKeyDown={(e) => {
       if (!panelEscapeStops(e.key, busy, e.defaultPrevented, Boolean((e.target as Element).closest('.ai-approval, .ai-proposal, [popover], form, .ai-conversation-pop, .ai-header-menu')), e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)) return
       e.preventDefault()
       e.stopPropagation()
@@ -792,9 +952,13 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
                 editing={editIndex === index}
                 editText={editText}
                 editResources={editResources}
+                editAttachments={editAttachments}
+                accountId={accountId ?? ''}
+                conversationId={conversationId}
                 onEditText={setEditText}
                 onRemoveEditResource={(candidate) => setEditResources((prev) => prev.filter((r) => r.type !== candidate.type || r.id !== candidate.id || r.region !== candidate.region))}
-                onEdit={() => { setEditIndex(index); setEditText(item.kind === 'user' ? item.text : ''); setEditResources(item.kind === 'user' ? item.resources ?? [] : []) }}
+                onRemoveEditAttachment={(attachmentId) => setEditAttachments((prev) => prev.filter((a) => a.id !== attachmentId))}
+                onEdit={() => { setEditIndex(index); setEditText(item.kind === 'user' ? item.text : ''); setEditResources(item.kind === 'user' ? item.resources ?? [] : []); setEditAttachments(item.kind === 'user' ? item.attachments ?? [] : []) }}
                 onCancelEdit={() => setEditIndex(null)}
                 onRegenerate={regenerate}
                 onCopy={copy}
@@ -809,7 +973,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
             </Fragment>
           })
         )}
-        {replies && <QuickReplies options={replies.options} onSend={(text) => void send(text)} />}
+        {replies && <QuickReplies options={replies.options} disabled={attachments.some((a) => a.state === 'preparing')} onSend={(text) => void send(text)} />}
         {/* Not while paused on an approval: the Activity line and the status line already say the run waits for the user. */}
         {busy && pendingCalls.length === 0 && visibleItems[visibleItems.length - 1]?.kind !== 'assistant' && visibleItems[visibleItems.length - 1]?.kind !== 'replies' && (
           <div className="ai-thinking">
@@ -822,11 +986,12 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       </div>
         <div className="ai-live-status" role="status" aria-live="polite" aria-atomic="true">{liveStatus(status, busy, justExecuted)}</div>
 
+      {draggingFiles && <div className="ai-drop-overlay" aria-live="polite">松开以添加附件</div>}
       {account && ready && config && (
         <footer className="ai-footer">
           {notice && <div className="ai-send-notice" role="alert">{notice}</div>}
           {pendingDecisionCount(visibleItems) >= 2 && <button type="button" className="ai-deny-all" disabled={regenerating} onClick={() => void denyAll()}>全部拒绝（{pendingDecisionCount(visibleItems)}）</button>}
-          {queue.length > 0 && <QueueView queue={queue} onCancel={(q) => { if (accountId && conversationId) void ai.queueCancel(accountId, conversationId, q.id).catch((err) => setNotice(ipcError(err))) }} />}
+          {queue.length > 0 && <QueueView queue={queue} accountId={accountId ?? ''} conversationId={conversationId} onCancel={(q) => { if (accountId && conversationId) void ai.queueCancel(accountId, conversationId, q.id).catch((err) => setNotice(ipcError(err))) }} />}
           {status && (
             // Says why the answer stopped and can bring the card into view; never a way to allow (only the card, next to its parameters, does that).
             <div className="ai-status-line" role="status">
@@ -858,7 +1023,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
               // Typing means the user is writing their own answer: the chips go.
               if (text && shownReplies) setDismissedReplies(shownReplies.id)
             }}
-            onSend={() => submitText(visibleInput, runCommand, (text) => void send(text))}
+            onSend={() => readyChips(attachments).length && !visibleInput.trim() ? void send('') : submitText(visibleInput, runCommand, (text) => void send(text))}
             onCommand={runCommand}
             onStop={stop}
             onClose={onClose}
@@ -886,6 +1051,11 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
               resourceDrafts.current.set(scope, next)
               return next
             })}
+            attachments={attachments}
+            onAddAttachments={addAttachments}
+            onRemoveAttachment={removeAttachment}
+            attachmentNotice={attachmentNotice}
+            attachmentAnnouncement={attachmentAnnouncement}
           />
         </footer>
       )}
@@ -893,8 +1063,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   )
 }
 
-export function QueueView({ queue, onCancel }: { queue: QueuedMessage[]; onCancel: (item: QueuedMessage) => void }): React.JSX.Element {
-  return <div className="ai-queue" role="list" aria-label="排队消息">{queue.map((q) => <div key={q.id} role="listitem" className="ai-msg user ai-queued-user"><span><span className="ai-dim small">排队中 · </span>{q.text}</span><button type="button" aria-label={`取消排队：${q.text}`} onClick={() => onCancel(q)}>取消</button></div>)}</div>
+export function QueueView({ queue, accountId = '', conversationId = null, onCancel }: { queue: QueuedMessage[]; accountId?: string; conversationId?: string | null; onCancel: (item: QueuedMessage) => void }): React.JSX.Element {
+  return <div className="ai-queue" role="list" aria-label="排队消息">{queue.map((q) => <div key={q.id} role="listitem" className="ai-msg user ai-queued-user"><span><span className="ai-dim small">排队中 · </span>{q.text}{q.attachments?.length ? <MessageAttachments accountId={accountId} conversationId={conversationId} attachments={q.attachments} previewOnly onCopy={() => {}} /> : null}</span><button type="button" aria-label={`取消排队：${q.text}`} onClick={() => onCancel(q)}>取消</button></div>)}</div>
 }
 
 interface ItemProps {
@@ -908,6 +1078,10 @@ interface ItemProps {
   editing: boolean
   editText: string
   editResources?: ResourceCandidate[]
+  editAttachments?: AttachmentMeta[]
+  accountId?: string
+  conversationId?: string | null
+  onRemoveEditAttachment?: (id: string) => void
   onEditText: (text: string) => void
   onRemoveEditResource?: (resource: ResourceCandidate) => void
   onEdit: () => void
@@ -923,7 +1097,7 @@ interface ItemProps {
   accountColor: string
 }
 
-export function Item({ item, resultChange: change, index, userIndex, retryable, actionsDisabled, cardDisabled, editing, editText, editResources, onEditText, onRemoveEditResource, onEdit, onCancelEdit, onRegenerate, onCopy, onOpenModel, older, onLink, onCardAction, onProposal, onApproval, accountColor }: ItemProps): React.JSX.Element | null {
+export function Item({ item, resultChange: change, index, userIndex, retryable, actionsDisabled, cardDisabled, editing, editText, editResources, editAttachments, accountId = '', conversationId = null, onEditText, onRemoveEditResource, onRemoveEditAttachment, onEdit, onCancelEdit, onRegenerate, onCopy, onOpenModel, older, onLink, onCardAction, onProposal, onApproval, accountColor }: ItemProps): React.JSX.Element | null {
   if (item.kind === 'user') {
     return (
       <div className="ai-user-turn">
@@ -935,6 +1109,7 @@ export function Item({ item, resultChange: change, index, userIndex, retryable, 
           <div><button type="button" disabled={actionsDisabled || !editText.trim()} onClick={() => onRegenerate(index, editText)}>发送修改</button><button type="button" onClick={onCancelEdit}>取消</button><span>⌘↵ 发送 · Esc 取消</span></div>
         </div> : <div className="ai-msg user">{item.text}</div>}
         {(editing ? editResources : item.resources)?.length ? <div className="ai-msg-resources" aria-label="引用的资源">{(editing ? editResources : item.resources)!.map((r) => <span key={`${r.type}/${r.region}/${r.id}`} className="ai-chip">{r.label} · {r.id} · {r.region}{editing && <button type="button" aria-label={`移除资源引用：${r.label}`} onClick={() => onRemoveEditResource?.(r)}>×</button>}</span>)}</div> : null}
+        {(editing ? editAttachments : item.attachments)?.length ? <MessageAttachments accountId={accountId} conversationId={conversationId} attachments={(editing ? editAttachments : item.attachments)!} editing={editing} onRemove={onRemoveEditAttachment} onCopy={onCopy} /> : null}
         {item.page && (
           <div className="ai-msg-page" title="提问时打开的页面">
             {item.page}

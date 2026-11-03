@@ -103,7 +103,8 @@ describe('applyEvent', () => {
 
 describe('aiReady', () => {
   const base: AiConfigView = {
-    version: 7,
+    version: 8,
+    customImageInput: false,
     scriptMaxMinutes: 5,
     provider: 'deepseek',
     model: 'deepseek-flash',
@@ -120,7 +121,8 @@ describe('aiReady', () => {
     quickReplies: true,
     impactAnalysis: true,
     hasKey: true,
-    canPersistKey: true
+    canPersistKey: true,
+    canAttachImages: false
   }
   it('needs provider, model and key; a custom endpoint needs a baseURL but no key', () => {
     expect(aiReady(base)).toBe(true)
@@ -204,4 +206,9 @@ describe('proposal events', () => {
     expect(allowWriteWarning('prod')).toContain('「prod」')
     expect(allowWriteWarning('prod')).toContain('两次确认')
   })
+})
+
+it('copies queued user attachment metadata into the live item', () => {
+  const attachments = [{ id: 'image', kind: 'image' as const, name: 'shot.png', size: 10, thumbDataUrl: 'data:image/png;base64,AAAA' }]
+  expect(applyEvent([], { type: 'user', text: 'queued', attachments })).toEqual([{ kind: 'user', text: 'queued', attachments }])
 })

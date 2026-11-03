@@ -1,4 +1,4 @@
-import { scriptCalls, scriptCode, toolLabel, type ApprovalView, type ChatItem, type ProposalState, type ProposalView, type ResourceCandidate, type TokenRates, type UsageTotals } from '../../shared/ai'
+import { scriptCalls, scriptCode, toolLabel, type ApprovalView, type AttachmentMeta, type ChatItem, type ProposalState, type ProposalView, type ResourceCandidate, type TokenRates, type UsageTotals } from '../../shared/ai'
 import type { Card } from '../../shared/cards'
 import { cardActionLabel, cardState, parseCardAction } from './cards'
 import { parseProposalResult, resultCard, type ProposalResult, type ResultStatus } from './changes/card'
@@ -41,6 +41,7 @@ export interface StoredAgentMessage {
   page?: { label: string; url: string }
   rowId?: number
   resources?: ResourceCandidate[]
+  attachments?: AttachmentMeta[]
   feedback?: 'up' | 'down' | null
 }
 
@@ -183,7 +184,7 @@ export function toChatItems(
       }
       const action = parseCardAction(text)
       const page = typeof m.page?.label === 'string' ? m.page.label : undefined
-      items.push({ kind: 'user', text: action ? cardActionLabel(action) : text, ...(action && { cardAction: true }), ...(page && { page }), ...(m.rowId !== undefined && { ordinal: userOrdinal }), ...(m.resources?.length && { resources: m.resources }) })
+      items.push({ kind: 'user', text: action ? cardActionLabel(action) : text, ...(action && { cardAction: true }), ...(page && { page }), ...(m.rowId !== undefined && { ordinal: userOrdinal }), ...(m.resources?.length && { resources: m.resources }), ...(m.attachments?.length && { attachments: m.attachments }) })
       userOrdinal++
     } else if (m.role === 'assistant') {
       if (m.usage) {

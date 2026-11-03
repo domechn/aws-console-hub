@@ -1,0 +1,1 @@
+export const TEXT_ATTACHMENT_EXTENSIONS = 'txt md markdown json jsonl yaml yml csv tsv log xml html css js mjs cjs ts tsx jsx py go rs java kt rb sh bash zsh sql tf tfvars hcl toml ini conf cfg properties dockerfile makefile'.split(' ')

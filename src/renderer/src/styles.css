@@ -2496,6 +2496,7 @@ button.ai-card-btn:focus-visible,
 /* The input box (mock 07): page chip, text, then its toolbar, inside one bordered box. */
 .ai-composer {
   position: relative;
+  container: ai-composer / inline-size;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-strong);
@@ -2508,14 +2509,72 @@ button.ai-card-btn:focus-visible,
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-.ai-composer-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 6px 6px 0;
-}
-
+.ai-composer-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 8px 0; }
 .ai-composer-chips .ai-chip { max-width: 100%; overflow-wrap: anywhere; }
+.ai-composer-chips .ai-chip-x { min-width: 24px; min-height: 24px; margin-left: 4px; }
+.ai-attachment-errors { display: grid; gap: 2px; padding: 6px 8px 0; color: var(--danger); font-size: 12px; }
+.ai-attachment-error { display: flex; align-items: center; gap: 5px; min-width: 0; min-height: 24px; }
+.ai-attachment-error-text { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-attachment-error button { flex: none; min-width: 24px; min-height: 24px; border: 0; background: none; color: var(--danger); cursor: pointer; }
+.ai-attachment-error-more { padding-left: 17px; }
+.ai-attachment-scroll { position: relative; min-width: 0; }
+.ai-attachment-scroll.has-more::after { content: ''; position: absolute; pointer-events: none; left: 8px; right: 14px; bottom: 0; height: 22px; background: linear-gradient(transparent, var(--bg)); }
+.ai-attachment-chips { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 6px; max-height: 190px; overflow-y: auto; padding: 6px 8px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+.ai-attachment-chip { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 4px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-sunken); }
+.ai-attachment-chip img { width: 48px; height: 48px; flex: none; border: 1px solid var(--border-strong); border-radius: 4px; object-fit: cover; }
+.ai-file-icon { display: grid; place-items: center; width: 20px; height: 20px; flex: none; font-size: 18px; color: var(--text-dim); }
+.ai-attachment-chip.image .ai-file-icon { width: 48px; height: 48px; font-size: 24px; }
+.ai-attachment-chip.file { grid-column: 1 / -1; height: 32px; padding-block: 2px; }
+.ai-attachment-chip.file .ai-file-icon { width: 48px; }
+.ai-attachment-info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.ai-attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-attachment-meta { display: flex; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.ai-attachment-info small { color: var(--text-dim); white-space: nowrap; font-size: 11px; }
+.ai-attachment-info .ai-redactions { color: var(--text); white-space: nowrap; }
+.ai-attachment-chip.file .ai-attachment-info { flex-direction: row; align-items: baseline; gap: 4px; }
+.ai-attachment-chip.file .ai-attachment-name { flex: 1; min-width: 8ch; }
+.ai-attachment-chip.file .ai-attachment-meta { flex: none; max-width: 68%; text-overflow: ellipsis; }
+.ai-attachment-chip button, .ai-attach-button { border: 0; background: none; color: var(--text-dim); cursor: pointer; }
+.ai-attachment-chip button { flex: none; min-width: 24px; min-height: 24px; padding: 0; margin-left: 4px; }
+.ai-attachment-notice { padding: 0 8px; color: var(--danger); font-size: 12px; }
+.ai-attachment-notice:empty { display: none; }
+.ai-attachment-privacy { margin: 6px 8px; color: var(--muted-strong); font-size: 12px; line-height: 1.4; text-wrap: balance; }
+.ai-attachment-privacy strong { font-weight: 600; }
+.ai-attach-button { flex: none; width: 28px; height: 28px; }
+.ai-msg-attachments { width: 100%; min-width: 0; }
+.ai-msg-images { display: grid; grid-template-columns: repeat(2, minmax(0, 96px)); align-items: start; gap: 8px; }
+.ai-msg-image-wrap { position: relative; min-width: 0; }
+.ai-msg-image-wrap > button:first-child { display: flex; flex-direction: column; align-items: stretch; gap: 3px; width: 96px; padding: 0; border: 0; background: none; color: var(--text); cursor: pointer; text-align: left; }
+.ai-msg-image-frame { display: grid; place-items: center; width: 96px; height: 96px; overflow: hidden; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg-sunken); }
+.ai-msg-image-frame img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.ai-msg-image-fallback { display: grid; justify-items: center; gap: 3px; color: var(--text-dim); font-size: 11px; }
+.ai-msg-image-fallback span { font-size: 22px; }
+.ai-msg-image-caption { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 1.3; }
+.ai-msg-file { min-width: 0; max-width: 100%; padding: 3px 5px; border: 1px solid var(--rule); border-radius: 5px; }
+.ai-msg-file > button { max-width: 100%; border: 0; background: none; color: var(--text); overflow-wrap: anywhere; cursor: pointer; text-align: left; }
+.ai-msg-file small { display: block; color: var(--text-dim); }
+.ai-file-preview pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-lightbox { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; padding: 12px; background: var(--backdrop); }
+.ai-lightbox-content { display: flex; flex-direction: column; gap: 8px; width: fit-content; max-width: 92vw; max-height: 88vh; padding: 8px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg); color: var(--text); box-shadow: var(--shadow); }
+.ai-lightbox-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.ai-lightbox-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 4px; font-size: 12px; }
+.ai-lightbox-header button { flex: none; width: 36px; height: 36px; border: 0; border-radius: 6px; background: none; color: var(--text); cursor: pointer; font-size: 24px; }
+.ai-lightbox-view { position: relative; display: flex; align-items: center; min-width: 0; }
+.ai-lightbox-stage { display: grid; place-items: center; max-width: calc(92vw - 18px); max-height: calc(88vh - 62px); overflow: hidden; border: 1px solid var(--border-strong); border-radius: 5px; background: repeating-conic-gradient(var(--bg-sunken) 0% 25%, var(--bg-hover) 0% 50%) 50% / 16px 16px; }
+.ai-lightbox-stage img { display: block; max-width: 100%; max-height: calc(88vh - 62px); object-fit: contain; }
+.ai-lightbox-view > button { position: absolute; z-index: 1; top: 50%; transform: translateY(-50%); width: 36px; height: 36px; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--bg-raised); color: var(--text); box-shadow: var(--popover-shadow); cursor: pointer; }
+.ai-lightbox-prev { left: 8px; }
+.ai-lightbox-next { right: 8px; }
+.ai-lightbox-view > button:disabled { opacity: .45; cursor: default; }
+.ai-lightbox-skeleton { width: min(240px, 65vw); height: min(180px, 35vh); border-radius: 4px; background: linear-gradient(90deg, var(--bg-sunken), var(--bg-hover), var(--bg-sunken)); background-size: 200% 100%; animation: ai-skeleton 1.4s ease-in-out infinite; }
+@keyframes ai-skeleton { to { background-position: -200% 0; } }
+.ai-lightbox-error { display: grid; justify-items: center; gap: 10px; padding: 20px; color: var(--danger); }
+.ai-lightbox-error button { min-height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--bg); color: var(--text); cursor: pointer; }
+.ai-drop-overlay { position: absolute; z-index: 20; inset: 0; display: grid; place-items: center; border: 2px dashed var(--accent); background: color-mix(in srgb, var(--bg) 90%, transparent); color: var(--text); font-size: 16px; pointer-events: none; }
+@container ai-composer (max-width: 359px) {
+  .ai-attachment-chips { grid-template-columns: minmax(0, 1fr); }
+}
+.ai-attachment-error button:focus-visible, .ai-attachment-chip button:focus-visible, .ai-attach-button:focus-visible, .ai-msg-attachments button:focus-visible, .ai-lightbox button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ai-resource-menu { bottom: calc(100% + 6px); max-height: 260px; overflow-y: auto; }
 .ai-mention { border: 0; background: none; color: var(--text-dim); font: inherit; font-weight: 600; cursor: pointer; }
 .ai-queued-user { display: flex; gap: 8px; justify-content: space-between; align-items: start; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 6px; overflow-wrap: anywhere; font-size: 12px; }
@@ -2530,7 +2589,7 @@ button.ai-card-btn:focus-visible,
   field-sizing: content;
   min-height: calc(1lh + 12px);
   max-height: calc(8lh + 12px);
-  padding: 8px 10px 4px;
+  padding: 8px 8px 4px;
   border: 0;
   outline: none;
   resize: none;
@@ -2548,7 +2607,7 @@ button.ai-card-btn:focus-visible,
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px 6px;
+  padding: 2px 6px 6px 8px;
 }
 
 .ai-model-chip,
@@ -2663,7 +2722,7 @@ button.ai-send.stop:hover:not(:disabled) {
 }
 
 .ai-pop-h {
-  padding: 8px 10px 4px;
+  padding: 8px 8px 4px;
   font-size: 11px;
   color: var(--text-dim);
 }
@@ -2786,7 +2845,7 @@ button.ai-send.stop:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: 4px;
-  height: 22px;
+  min-height: 26px;
   padding: 0 2px 0 6px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -2805,6 +2864,9 @@ button.ai-send.stop:hover:not(:disabled) {
 .ai-page-chip.dim,
 .ai-page-chip.off {
   color: var(--text-dim);
+  border: 0;
+  background: none;
+  padding-left: 0;
 }
 
 .ai-page-chip.off {
@@ -2823,8 +2885,8 @@ button.ai-page-off {
   flex: none;
   display: inline-grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
   border-radius: 4px;

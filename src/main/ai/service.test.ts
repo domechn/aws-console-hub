@@ -6,6 +6,7 @@ import { createAssistantMessageEventStream, fauxAssistantMessage, fauxProvider, 
 import { describe, expect, it, vi } from 'vitest'
 import type { AiEventEnvelope } from '../../shared/ai'
 import type { AwsAccount } from '../../shared/types'
+import type { ImageCodec } from './attachments'
 
 vi.mock('electron', () => ({ app: { getPath: () => os.tmpdir() } }))
 
@@ -49,7 +50,7 @@ type Deps = ConstructorParameters<typeof AiService>[0]
 
 function setup(
   responses: FauxResponseStep[],
-  opts: { key?: string; tokensPerSecond?: number; keys?: Deps['keys']; credentials?: Deps['credentials']; now?: () => Date; page?: { url: string; title: string } | null; recents?: Deps['recents']; readPage?: Deps['readPage']; runKeyCommand?: Deps['runKeyCommand']; watchLimits?: Deps['watchLimits'] } = {}
+  opts: { key?: string; tokensPerSecond?: number; keys?: Deps['keys']; credentials?: Deps['credentials']; now?: () => Date; page?: { url: string; title: string } | null; recents?: Deps['recents']; readPage?: Deps['readPage']; runKeyCommand?: Deps['runKeyCommand']; watchLimits?: Deps['watchLimits']; imageCodec?: ImageCodec } = {}
 ) {
   const db = new DatabaseSync(':memory:')
   db.exec('pragma foreign_keys = on')
@@ -92,7 +93,8 @@ function setup(
     toast,
     runKeyCommand: opts.runKeyCommand ?? (async () => KEY),
     now: opts.now ?? (() => new Date('2026-10-29T00:00:00Z')),
-    watchLimits: opts.watchLimits
+    watchLimits: opts.watchLimits,
+    imageCodec: opts.imageCodec
   })
   const done = (): Promise<void> =>
     new Promise((resolve) => {
@@ -2063,4 +2065,176 @@ describe('AiService quick replies', () => {
     expect(seen[1].tools).not.toContain('suggest_replies')
     expect(seen[1].system).not.toContain('快捷回复（suggest_replies）')
   })
+})
+
+describe('attachment service flow', () => {
+  const png = Uint8Array.of(137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,10,0,0,0,10)
+  const imageCodec = {
+    decode: () => ({ width: 10, height: 10 }),
+    encode: () => png,
+    thumbnail: () => png
+  }
+  it('sends image and fenced file to the provider while history exposes metadata only', async () => {
+    let received: unknown
+    const s = setup([(context) => { received = context.messages.at(-1); return fauxAssistantMessage('done') }], { imageCodec })
+    const prepared = s.service.attachmentPrepare('acc-1', null, [
+      { name: 'chart.png', bytes: png },
+      { name: 'note.md', bytes: new TextEncoder().encode('some file text') }
+    ])
+    expect(prepared.every((p) => p.ok)).toBe(true)
+    const { conversationId } = await s.service.send('acc-1', null, 'explain', true, undefined, prepared.map((p) => p.ok ? p.id : ''))
+    await s.done()
+    expect(received).toMatchObject({ role: 'user', content: [
+      { type: 'text', text: expect.stringContaining('<attachment kind="file" name="note.md" untrusted="true">') },
+      { type: 'image', mimeType: 'image/png' }
+    ] })
+    const fullRead = vi.spyOn(s.store, 'attachment')
+    const previewRead = vi.spyOn(s.store, 'attachmentPreviews')
+    const history = s.service.view('acc-1', conversationId)
+    expect(fullRead).not.toHaveBeenCalled()
+    expect(previewRead).toHaveBeenCalledTimes(1)
+    expect(history.items[0]).toMatchObject({ kind: 'user', attachments: [{ name: 'chart.png', thumbDataUrl: expect.stringContaining('data:image/png;base64,') }, { name: 'note.md' }] })
+    expect(JSON.stringify(s.store.messages(conversationId))).not.toContain('some file text')
+    expect(s.service.attachmentGet('acc-1', conversationId, prepared[1].ok ? prepared[1].id : '')).toEqual({ kind: 'file', text: 'some file text' })
+    expect(() => s.service.attachmentGet('wrong', conversationId, prepared[0].ok ? prepared[0].id : '')).toThrow()
+    const audit = s.store.auditEntries().filter((x) => x.type === 'attachment_added')
+    expect(audit).toHaveLength(2)
+    expect(JSON.stringify(audit)).not.toContain('some file text')
+  })
+})
+
+describe('attachment replay', () => {
+  const png = Uint8Array.of(137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,10,0,0,0,10)
+  const imageCodec = { decode: () => ({ width: 10, height: 10 }), encode: () => png, thumbnail: () => png }
+  it('only replays four images across turns and reports expired prepared ids', async () => {
+    let messages: any[] = []
+    const s = setup([fauxAssistantMessage('first'), (context) => { messages = context.messages; return fauxAssistantMessage('second') }], { imageCodec })
+    const first = s.service.attachmentPrepare('acc-1', null, Array.from({ length: 4 }, (_, i) => ({ name: `${i}.png`, bytes: png })))
+    const id1 = first.flatMap((x) => x.ok ? [x.id] : [])
+    const { conversationId } = await s.service.send('acc-1', null, 'first', true, undefined, id1)
+    await s.done()
+    s.events.length = 0
+    const second = s.service.attachmentPrepare('acc-1', conversationId, [{ name: '4.png', bytes: png }])[0]
+    if (!second.ok) throw new Error('prepare failed')
+    const fullRead = vi.spyOn(s.store, 'attachment')
+    await s.service.send('acc-1', conversationId, 'second', true, undefined, [second.id])
+    expect(fullRead).toHaveBeenCalledTimes(3)
+    await s.done()
+    expect(messages.flatMap((m) => Array.isArray(m.content) ? m.content : []).filter((p) => p.type === 'image')).toHaveLength(4)
+    expect(JSON.stringify(messages)).toContain('[图片已省略: 0.png]')
+    await expect(s.service.send('acc-1', conversationId, 'again', true, undefined, [second.id])).rejects.toThrow('附件已过期，请重新添加')
+  })
+  it('keeps stored attachments on regenerate', async () => {
+    const s = setup([fauxAssistantMessage('first'), fauxAssistantMessage('again')], { imageCodec })
+    const prepared = s.service.attachmentPrepare('acc-1', null, [{ name: 'note.txt', bytes: new TextEncoder().encode('hello attachment sk-abcdefghijklmnopqrstuvwxyz') }])[0]
+    if (!prepared.ok) throw new Error('prepare failed')
+    const { conversationId } = await s.service.send('acc-1', null, 'question', true, undefined, [prepared.id])
+    await s.done()
+    s.events.length = 0
+    await s.service.regenerate('acc-1', conversationId, 0, 'question')
+    await s.done()
+    expect(s.service.view('acc-1', conversationId).items.find((x) => x.kind === 'user')).toMatchObject({ attachments: [{ id: prepared.id, redactions: 1 }] })
+    expect(s.service.attachmentGet('acc-1', conversationId, prepared.id)).toEqual({ kind: 'file', text: 'hello attachment [redacted:api-key]' })
+  })
+})
+
+describe('queued attachments', () => {
+  it('emits image thumbnails when a queued message starts', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const png = Uint8Array.of(137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,10,0,0,0,10)
+    const imageCodec = { decode: () => ({ width: 10, height: 10 }), encode: () => png, thumbnail: () => png }
+    const s = setup([async () => { await gate; return fauxAssistantMessage('first') }, fauxAssistantMessage('second')], { imageCodec })
+    const { conversationId } = await s.service.send('acc-1', null, 'first')
+    const prepared = s.service.attachmentPrepare('acc-1', conversationId, [{ name: 'shot.png', bytes: png }])[0]
+    if (!prepared.ok) throw new Error('prepare failed')
+    await s.service.send('acc-1', conversationId, 'queued', true, undefined, [prepared.id])
+    release()
+    await until(() => s.events.some((x) => x.event.type === 'user' && x.event.text === 'queued'))
+    expect(s.events.map((x) => x.event)).toContainEqual(expect.objectContaining({ type: 'user', attachments: [expect.objectContaining({ name: 'shot.png', thumbDataUrl: expect.stringContaining('data:image/png;base64,') })] }))
+  })
+
+  it('returns still-valid prepared ids when Stop drops a queued turn', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const s = setup([async () => { await gate; return fauxAssistantMessage('first') }])
+    const { conversationId } = await s.service.send('acc-1', null, 'first')
+    const prepared = s.service.attachmentPrepare('acc-1', conversationId, [{ name: 'x.txt', bytes: new TextEncoder().encode('hello') }])[0]
+    if (!prepared.ok) throw new Error('prepare failed')
+    await s.service.send('acc-1', conversationId, 'queued', true, undefined, [prepared.id])
+    s.service.abort(conversationId)
+    expect(s.events.map((x) => x.event)).toContainEqual(expect.objectContaining({ type: 'queue-failed', text: 'queued', attachmentIds: [prepared.id] }))
+    release()
+  })
+})
+
+describe('attachment model capability', () => {
+  it('allows custom endpoint image preparation only after image input is enabled', () => {
+    const png = Uint8Array.of(137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,10,0,0,0,10)
+    const codec = { decode: () => ({ width: 10, height: 10 }), encode: () => png, thumbnail: () => png }
+    const s = setup([], { imageCodec: codec })
+    s.config.save({ provider: 'custom-openai', model: 'vision', baseUrl: 'http://localhost:11434/v1' })
+    expect(s.service.attachmentPrepare('acc-1', null, [{ name: 'x.png', bytes: png }])[0]).toMatchObject({ ok: false })
+    s.config.save({ customImageInput: true })
+    expect(s.service.configView().canAttachImages).toBe(true)
+    expect(s.service.attachmentPrepare('acc-1', null, [{ name: 'x.png', bytes: png }])[0]).toMatchObject({ ok: true, kind: 'image' })
+  })
+  it('rejects image preparation for a text-only selected model', () => {
+    const s = setup([])
+    s.faux.getModel().input = ['text']
+    const register = vi.spyOn(s.models, 'setProvider')
+    expect(s.service.configView().canAttachImages).toBe(false)
+    s.service.configView()
+    expect(register).not.toHaveBeenCalled()
+    expect(s.service.attachmentPrepare('acc-1', null, [{ name: 'image.png', bytes: Uint8Array.of(137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,10,0,0,0,10) }])).toMatchObject([
+      { ok: false, reason: '当前模型不支持图片，请换一个支持图片的模型' }
+    ])
+  })
+})
+
+it('keeps a prepared image if the selected model loses image support before send', async () => {
+  const png = Uint8Array.of(137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,10,0,0,0,10)
+  const codec = { decode: () => ({ width: 10, height: 10 }), encode: () => png, thumbnail: () => png }
+  const s = setup([fauxAssistantMessage('done')], { imageCodec: codec })
+  const prepared = s.service.attachmentPrepare('acc-1', null, [{ name: 'x.png', bytes: png }])[0]
+  if (!prepared.ok) throw new Error('prepare failed')
+  s.faux.getModel().input = ['text']
+  await expect(s.service.send('acc-1', null, 'hello', true, undefined, [prepared.id])).rejects.toThrow('当前模型不支持图片')
+  s.faux.getModel().input = ['text', 'image']
+  await expect(s.service.send('acc-1', null, 'hello', true, undefined, [prepared.id])).resolves.toMatchObject({ conversationId: expect.any(String) })
+})
+
+it('hides provider errors when an earlier attachment is replayed', async () => {
+  const s = setup([fauxAssistantMessage('first'), fauxAssistantMessage('', { stopReason: 'error', errorMessage: 'provider echoed sensitive attachment text' })])
+  const prepared = s.service.attachmentPrepare('acc-1', null, [{ name: 'x.txt', bytes: Buffer.from('sensitive attachment text') }])[0]
+  if (!prepared.ok) throw new Error('prepare failed')
+  const { conversationId } = await s.service.send('acc-1', null, 'first', true, undefined, [prepared.id])
+  await s.done()
+  s.events.length = 0
+  await s.service.send('acc-1', conversationId, 'second')
+  await s.done()
+  expect(JSON.stringify(s.service.view('acc-1', conversationId))).not.toContain('provider echoed')
+})
+
+it('regenerates with a notice when an old attachment row is missing', async () => {
+  const s = setup([fauxAssistantMessage('first'), fauxAssistantMessage('second')])
+  const prepared = s.service.attachmentPrepare('acc-1', null, [{ name: 'x.txt', bytes: Buffer.from('hello') }])[0]
+  if (!prepared.ok) throw new Error('prepare failed')
+  const { conversationId } = await s.service.send('acc-1', null, 'first', true, undefined, [prepared.id])
+  await s.done()
+  s.db.prepare('delete from attachments where id = ?').run(prepared.id)
+  s.events.length = 0
+  await s.service.regenerate('acc-1', conversationId, 0, 'first')
+  await s.done()
+  expect(s.events.some((e) => e.event.type === 'note' && e.event.text.includes('附件已不存在'))).toBe(true)
+})
+
+it('reads attachment capability without registering custom or Bedrock providers', () => {
+  const s = setup([])
+  const register = vi.spyOn(s.models, 'setProvider')
+  s.config.save({ provider: 'custom-openai', model: 'local', baseUrl: 'http://localhost:1234' })
+  expect(s.service.configView().canAttachImages).toBe(false)
+  s.config.save({ provider: 'amazon-bedrock', model: 'anthropic.claude-3-5-sonnet-20240620-v1:0' })
+  s.service.configView()
+  expect(register).not.toHaveBeenCalled()
 })

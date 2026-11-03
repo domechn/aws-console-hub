@@ -45,12 +45,14 @@ export interface AiBudget {
 
 /** userData/ai-config.json. Never holds a key. */
 export interface AiConfig {
-  version: 7
+  version: 8
   /** '' until the user picks one. */
   provider: string
   model: string
   /** custom-openai only. */
   baseUrl: string | null
+  /** Custom endpoints accept images only when the user opts in. */
+  customImageInput: boolean
   keyMode: AiKeyMode
   keyCommand: string | null
   bedrockAuth: BedrockAuth
@@ -114,7 +116,28 @@ export interface AiConfigView extends AiConfig {
   hasKey: boolean
   /** safeStorage is usable; when false, "keychain" keys only live in memory. */
   canPersistKey: boolean
+  /** Whether the configured model accepts image input. */
+  canAttachImages: boolean
 }
+
+export const ATTACH_LIMITS = { fileCount: 7, imageCount: 4, fileCountPerMessage: 3, imageInputBytes: 12 * 1024 * 1024, imageOutputBytes: 3_740_000, textInputBytes: 1024 * 1024, textOutputBytes: 200 * 1024, textTotalBytes: 400 * 1024, payloadBytes: 12 * 1024 * 1024, pendingPerAccount: 8, pendingGlobal: 32, pendingTtlMs: 600_000, imageSidePx: 8000, imagePixels: 40_000_000, imageOutputSidePx: 1568, thumbnailSidePx: 256, thumbnailBytes: 60 * 1024 } as const
+
+export interface AttachmentSource { name: string; bytes: Uint8Array; hintMime?: string }
+export interface AttachmentMeta {
+  id: string
+  kind: 'image' | 'file'
+  name: string
+  size: number
+  width?: number
+  height?: number
+  redactions?: number
+  truncated?: boolean
+  thumbDataUrl?: string
+}
+export type AttachmentPrepareResult =
+  | ({ ok: true; warnings: string[] } & AttachmentMeta)
+  | { ok: false; name: string; reason: string }
+export type AttachmentContent = { kind: 'image'; dataUrl: string } | { kind: 'file'; text: string }
 
 /** Catalog prices are USD per 1M tokens. */
 export interface TokenRates {
@@ -152,7 +175,7 @@ export interface ResourceRef { type: string; id: string; region: string }
 export interface ResourceContext { resources: ResourceRef[] }
 export interface ResourceCandidate extends ResourceRef { label: string }
 export interface ConversationSearchResult { id: string; title: string; snippet: string }
-export interface QueuedMessage { id: string; text: string; context?: ResourceContext }
+export interface QueuedMessage { id: string; text: string; context?: ResourceContext; attachmentIds?: string[]; attachments?: AttachmentMeta[] }
 export const MAX_PROMPT_CHARS = 8000
 
 export interface UsageTotals {
@@ -169,7 +192,7 @@ export interface UsageTotals {
 /** What the panel shows; built in main from the stored transcript (never raw tool results). */
 export type ChatItem =
   /** `page`: the page label it was asked on, when page context was on. */
-  | { kind: 'user'; text: string; page?: string; cardAction?: boolean; ordinal?: number; resources?: ResourceCandidate[] }
+  | { kind: 'user'; text: string; page?: string; cardAction?: boolean; ordinal?: number; resources?: ResourceCandidate[]; attachments?: AttachmentMeta[] }
   | { kind: 'assistant'; text: string; error?: string; diagnosticText?: string; aborted?: boolean; retryable?: boolean; usage?: { input: number; output: number; costUsd?: number }; model?: string; ordinal?: number; feedback?: 'up' | 'down' | null }
   /** waiting: paused on an approval card (the approval item follows it). run_script: `code` and the `calls` it made (`ec2:DescribeInstances ×3`), shown on expand. */
   | { kind: 'tool'; id: string; label: string; status: 'running' | 'waiting' | 'ok' | 'error'; summary?: string; code?: string; calls?: string[]; ms?: number; seconds?: number; callCount?: number }
@@ -215,9 +238,9 @@ export type AiEvent =
   | { type: 'card'; id: string; card: Card }
   | { type: 'card-state'; cardId: string; state: CardState }
   /** A user turn main started itself (a card button's reply), as the panel shows it. */
-  | { type: 'user'; text: string; resources?: ResourceCandidate[] }
+  | { type: 'user'; text: string; resources?: ResourceCandidate[]; attachments?: AttachmentMeta[] }
   | { type: 'queue'; items: QueuedMessage[] }
-  | { type: 'queue-failed'; id: string; text: string; context?: ResourceContext; resources?: ResourceCandidate[]; message: string }
+  | { type: 'queue-failed'; id: string; text: string; context?: ResourceContext; resources?: ResourceCandidate[]; attachmentIds?: string[]; message: string }
   /** propose_change made a proposal (`id` is the tool call's). */
   | { type: 'proposal'; id: string; proposal: ProposalView }
   /** A proposal changed state (confirmed, executed, cancelled, expired, drifted). Not part of a run. */

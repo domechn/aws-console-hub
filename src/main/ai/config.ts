@@ -4,10 +4,11 @@ import { REGIONS } from '../../shared/catalog'
 import { AI_PROVIDERS, AUDIT_RETENTION_LIMITS, CUSTOM_PROVIDER_ID, type AiBudget, type AiConfig, type AiKeyMode, type BedrockAuth, type ConversationRetention } from '../../shared/ai'
 
 export const DEFAULT_AI_CONFIG: AiConfig = {
-  version: 7,
+  version: 8,
   provider: '',
   model: '',
   baseUrl: null,
+  customImageInput: false,
   keyMode: 'keychain',
   keyCommand: null,
   bedrockAuth: 'account',
@@ -75,6 +76,10 @@ export function mergeAiConfig(prev: AiConfig, input: unknown, accountExists: (id
     }
     next.baseUrl = typeof i.baseUrl === 'string' ? i.baseUrl.trim() : null
   }
+  if (i.customImageInput !== undefined) {
+    if (typeof i.customImageInput !== 'boolean') throw new Error('无效的图片输入设置')
+    next.customImageInput = i.customImageInput
+  }
   if (i.keyMode !== undefined) {
     if (!KEY_MODES.includes(i.keyMode as AiKeyMode)) throw new Error('无效的 key 存储方式')
     next.keyMode = i.keyMode as AiKeyMode
@@ -122,7 +127,10 @@ export function mergeAiConfig(prev: AiConfig, input: unknown, accountExists: (id
     if (typeof i.scriptMaxMinutes !== 'number' || !Number.isFinite(i.scriptMaxMinutes)) throw new Error('无效的脚本运行时间')
     next.scriptMaxMinutes = scriptMinutes(i.scriptMaxMinutes)
   }
-  if (next.provider !== CUSTOM_PROVIDER_ID) next.baseUrl = null
+  if (next.provider !== CUSTOM_PROVIDER_ID) {
+    next.baseUrl = null
+    next.customImageInput = false
+  }
   if (next.keyMode === 'command' && !next.keyCommand) throw new Error('请填写密钥命令')
   return next
 }
@@ -132,11 +140,11 @@ const scriptMinutes = (v: unknown): number =>
 
 /**
  * A file from an older version: v1 had no Bedrock fields, v2 no retention or budget, v3 no readPage, v4 no
- * quickReplies, v5 no impactAnalysis, v6 no script duration; the defaults fill them in.
+ * quickReplies, v5 no impactAnalysis, v6 no script duration, v7 no custom image input; the defaults fill them in.
  */
 export function migrateAiConfig(stored: Partial<AiConfig> | Record<string, unknown>): AiConfig {
-  const flag = (k: 'readPage' | 'quickReplies' | 'impactAnalysis'): boolean => (typeof stored[k] === 'boolean' ? (stored[k] as boolean) : DEFAULT_AI_CONFIG[k])
-  return { ...DEFAULT_AI_CONFIG, ...stored, readPage: flag('readPage'), quickReplies: flag('quickReplies'), impactAnalysis: flag('impactAnalysis'), scriptMaxMinutes: scriptMinutes(stored.scriptMaxMinutes), version: 7 }
+  const flag = (k: 'readPage' | 'quickReplies' | 'impactAnalysis' | 'customImageInput'): boolean => (typeof stored[k] === 'boolean' ? (stored[k] as boolean) : DEFAULT_AI_CONFIG[k])
+  return { ...DEFAULT_AI_CONFIG, ...stored, readPage: flag('readPage'), quickReplies: flag('quickReplies'), impactAnalysis: flag('impactAnalysis'), customImageInput: flag('customImageInput'), scriptMaxMinutes: scriptMinutes(stored.scriptMaxMinutes), version: 8 }
 }
 
 /** userData/ai-config.json: provider, model, endpoint, key mode, Bedrock account and region. Never a key or credential. */

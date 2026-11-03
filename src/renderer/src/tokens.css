@@ -10,6 +10,7 @@
   --text: #1b2027;
   /* 5.4:1 on --bg, 5.1:1 on --bg-sunken (was #6b7684, 4.3:1 on --bg-sunken). */
   --text-dim: #5f6b7a;
+  --muted-strong: #586575;
   --accent: #0972d3;
   --danger: #d13212;
   --ok: #037f0c;
@@ -28,7 +29,7 @@
   --focus: var(--accent);
   --popover-shadow: 0 8px 24px rgba(20, 30, 45, 0.14);
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  --backdrop: rgba(22, 30, 42, 0.28);
+  --backdrop: rgba(0, 0, 0, 0.72);
 }
 
 [data-theme=dark] {
@@ -42,6 +43,7 @@
   --border-strong: #586674;
   --text: #f0f3f6;
   --text-dim: #b1bfcd;
+  --muted-strong: #b1bfcd;
   --accent: #70b7ff;
   --danger: #ff8b78;
   --ok: #6cda92;
@@ -59,6 +61,6 @@
   --focus: #9accff;
   --popover-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  --backdrop: rgba(0, 0, 0, 0.6);
+  --backdrop: rgba(0, 0, 0, 0.72);
 }
 

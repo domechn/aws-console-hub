@@ -47,3 +47,24 @@ describe('P3 IPC', () => {
     expect(denyAll).toHaveBeenCalledWith('acc-1', 'chat-1')
   })
 })
+
+describe('attachment IPC contract', () => {
+  it('forwards bytes, ids, and owned fetch only from the trusted frame', async () => {
+    const frame = {}
+    const contents = { mainFrame: frame }
+    const ai = { attachmentPrepare: vi.fn(() => [{ ok: true, id: 'x' }]), attachmentDiscard: vi.fn(), attachmentGet: vi.fn(() => ({ kind: 'file', text: 'hello' })), send: vi.fn(() => ({ conversationId: 'c', runId: 1 })) }
+    registerAiIpc({ webContents: contents } as never, ai as never, () => {})
+    const trusted = { sender: contents, senderFrame: frame }
+    const bytes = Uint8Array.of(65)
+    const prep = handlers.get('ai:attachment-prepare')!
+    expect(() => prep({ sender: {}, senderFrame: frame }, 'a', null, [{ name: 'x.txt', bytes }])).toThrow('forbidden')
+    expect(prep(trusted, 'a', null, [{ name: 'x.txt', bytes }])).toEqual([{ ok: true, id: 'x' }])
+    expect(ai.attachmentPrepare).toHaveBeenCalledWith('a', null, [{ name: 'x.txt', bytes }])
+    handlers.get('ai:attachment-discard')!(trusted, 'a', 'x')
+    expect(ai.attachmentDiscard).toHaveBeenCalledWith('a', 'x')
+    expect(handlers.get('ai:attachment-get')!(trusted, 'a', 'c', 'x')).toEqual({ kind: 'file', text: 'hello' })
+    expect(ai.attachmentGet).toHaveBeenCalledWith('a', 'c', 'x')
+    handlers.get('ai:send')!(trusted, 'a', 'c', 'hello', true, undefined, ['x'])
+    expect(ai.send).toHaveBeenCalledWith('a', 'c', 'hello', true, undefined, ['x'])
+  })
+})

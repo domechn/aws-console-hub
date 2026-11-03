@@ -3,6 +3,7 @@ import { AI_PROVIDERS, BEDROCK_PROVIDER_ID, CUSTOM_PROVIDER_ID, MAX_PROMPT_CHARS
 import { formatCost, formatMonth, formatUsage } from '../../ai'
 import { IconArrowUp, IconCheck, IconChevronDown, IconStop } from '../icons'
 import { localCommand, menuSelection, type LocalCommand } from './commands'
+import { FILE_ACCEPT, IMAGE_ACCEPT, formatSize, safeImageSrc, shouldAttachPaste, type AttachmentChip } from './attachments'
 
 export type ComposerAction = 'send' | 'stop' | 'close' | 'history-up' | 'history-down' | null
 
@@ -127,11 +128,19 @@ interface Props {
   onResourceQuery?: (query: string | null) => void
   onSelectResource?: (candidate: ResourceCandidate) => void
   onRemoveResource?: (candidate: ResourceCandidate) => void
+  attachments?: AttachmentChip[]
+  onAddAttachments?: (files: File[]) => void
+  onRemoveAttachment?: (chip: AttachmentChip) => void
+  attachmentNotice?: string | null
+  attachmentAnnouncement?: string
 }
 
 /** The input box (plan ai-ux-redesign §3.7): grows 1–8 lines, one send / stop button, model and cost in its toolbar. */
-export function Composer({ scope, value, onChange, onSend, onCommand, onStop, onClose, busy, pausedOnApproval = false, history, inputRef, chip, config, models, onModel, onOpenSettings, usage, month, resources = [], candidates = [], onResourceQuery, onSelectResource, onRemoveResource }: Props): React.JSX.Element {
+export function Composer({ scope, value, onChange, onSend, onCommand, onStop, onClose, busy, pausedOnApproval = false, history, inputRef, chip, config, models, onModel, onOpenSettings, usage, month, resources = [], candidates = [], onResourceQuery, onSelectResource, onRemoveResource, attachments = [], onAddAttachments, onRemoveAttachment, attachmentNotice, attachmentAnnouncement }: Props): React.JSX.Element {
   const at = useRef<Recall | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const attachmentScrollRef = useRef<HTMLDivElement>(null)
+  const [attachmentOverflow, setAttachmentOverflow] = useState(false)
   const [commandIndex, setCommandIndex] = useState(-1)
   const [closedCommand, setClosedCommand] = useState<string | null>(null)
   const [resourceIndex, setResourceIndex] = useState(0)
@@ -182,6 +191,17 @@ export function Composer({ scope, value, onChange, onSend, onCommand, onStop, on
     })
   }
   const monthLine = month && hasUsage(month.totals) ? formatMonth(month) : null
+  const accepted = attachments.filter((a) => a.state !== 'error')
+  const rejected = attachments.filter((a) => a.state === 'error')
+  useLayoutEffect(() => {
+    const el = attachmentScrollRef.current
+    if (!el) { setAttachmentOverflow(false); return }
+    const update = (): void => setAttachmentOverflow(el.scrollTop + el.clientHeight < el.scrollHeight - 1)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [attachments])
   // A click on any button inside closes the popover it is in.
   const closeOnPick = (e: React.MouseEvent<HTMLDivElement>): void => {
     if ((e.target as Element).closest('button')) e.currentTarget.hidePopover()
@@ -255,6 +275,16 @@ export function Composer({ scope, value, onChange, onSend, onCommand, onStop, on
         </div>
       )}
       {(chip || resources.length > 0) && <div className="ai-composer-chips">{chip}{resources.map((r) => <span key={`${r.type}/${r.region}/${r.id}`} className="ai-chip">{r.label}<button type="button" className="ai-chip-x" aria-label={`移除资源 ${r.label}`} onClick={() => onRemoveResource?.(r)}>×</button></span>)}</div>}
+      {rejected.length > 0 && <div className="ai-attachment-errors" aria-label="被拒绝的附件">{rejected.slice(0, 3).map((a) => <div key={a.localId} className="ai-attachment-error"><span aria-hidden="true">⚠</span><span className="ai-attachment-error-text" title={`${a.name}：${a.reason}`}>{a.name}：{a.reason}</span><button type="button" aria-label={`移除附件 ${a.name}`} onClick={() => onRemoveAttachment?.(a)}>×</button></div>)}{rejected.length > 3 && <div className="ai-attachment-error-more">另有 {rejected.length - 3} 个被拒绝</div>}</div>}
+      {accepted.length > 0 && <div className={`ai-attachment-scroll${attachmentOverflow ? ' has-more' : ''}`}><div ref={attachmentScrollRef} className="ai-attachment-chips" aria-label="待发送附件" onScroll={(e) => { const el = e.currentTarget; setAttachmentOverflow(el.scrollTop + el.clientHeight < el.scrollHeight - 1) }}>{accepted.map((a) => <div key={a.localId} className={`ai-attachment-chip ${a.kind} ${a.state}`} role="group" aria-label={`${a.name}：${a.state === 'preparing' ? '正在准备' : formatSize(a.size)}`}>
+        {safeImageSrc(a.thumbDataUrl) ? <img src={safeImageSrc(a.thumbDataUrl)} alt="" /> : <span className="ai-file-icon" aria-hidden="true">{a.kind === 'image' ? '▧' : /\.(json|jsonl|csv|tsv|yaml|yml|xml)$/i.test(a.name) ? '▦' : /\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|kt|rb|sh|bash|zsh|sql|tf|hcl|css|html)$/i.test(a.name) ? '⌘' : '▤'}</span>}
+        <span className="ai-attachment-info"><span className="ai-attachment-name" title={a.name}>{a.name}</span><span className="ai-attachment-meta"><small className="ai-attachment-size">{a.state === 'preparing' ? '正在准备…' : formatSize(a.size)}</small>{a.truncated && <small>已截断</small>}{Boolean(a.redactions) && <small className="ai-redactions" title={`已隐藏 ${a.redactions} 处密钥`} aria-label={`已隐藏 ${a.redactions} 处密钥`}>已隐藏 {a.redactions} 处</small>}</span></span>
+        {a.state === 'preparing' && <span className="spinner" aria-hidden="true" />}
+        <button type="button" aria-label={`移除附件 ${a.name}`} onClick={() => onRemoveAttachment?.(a)}>×</button>
+      </div>)}</div></div>}
+      {attachments.length > 0 && <div className="ai-attachment-privacy">附件会发送给 {label.split(' · ')[0]} 的模型；<strong>图片里的敏感信息不会被自动隐藏</strong></div>}
+      <div className="ai-attachment-notice" role="status">{attachmentNotice}</div>
+      <span className="sr-only" aria-live="polite">{attachmentAnnouncement}</span>
       <textarea
         ref={inputRef}
         value={value}
@@ -267,8 +297,15 @@ export function Composer({ scope, value, onChange, onSend, onCommand, onStop, on
         onChange={(e) => { setClosedCommand(null); setCommandIndex(-1); setClosedResource(null); setResourceIndex(0); setCaret(e.target.selectionStart); onChange(e.target.value); onResourceQuery?.(resourceToken(e.target.value, e.target.selectionStart)?.query ?? null) }}
         onSelect={(e) => { setCaret(e.currentTarget.selectionStart); onResourceQuery?.(resourceToken(value, e.currentTarget.selectionStart)?.query ?? null) }}
         onKeyDown={onKeyDown}
+        onPaste={(e) => {
+          const files = [...e.clipboardData.files]
+          if (!files.length) for (const item of e.clipboardData.items) if (item.kind === 'file') { const file = item.getAsFile(); if (file) files.push(file) }
+          if (shouldAttachPaste({ text: e.clipboardData.getData('text/plain'), html: e.clipboardData.getData('text/html'), files })) { e.preventDefault(); onAddAttachments?.(files) }
+        }}
       />
       <div className="ai-composer-tools">
+        <input ref={fileRef} type="file" multiple accept={`${IMAGE_ACCEPT},${FILE_ACCEPT}`} className="sr-only" tabIndex={-1} aria-hidden="true" onChange={(e) => { onAddAttachments?.([...e.target.files ?? []]); e.target.value = '' }} />
+        <button type="button" className="ai-attach-button" title="添加图片或文件" aria-label="添加图片或文件" onClick={() => fileRef.current?.click()}><svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.4 11.6-8.6 8.6a6 6 0 0 1-8.5-8.5l9.4-9.3a4 4 0 0 1 5.6 5.6l-9.4 9.4a2 2 0 0 1-2.8-2.8l8.6-8.6" /></svg></button>
         {onResourceQuery && <button type="button" className="ai-mention" aria-label="添加资源上下文" title="引用本账号最近的资源" disabled={resources.length >= 5} onClick={() => { const next = `${value}${value && !/\s$/.test(value) ? ' ' : ''}@`; onChange(next); onResourceQuery(''); requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(next.length, next.length) }) }}>@</button>}
         {models.length > 1 ? (
           <>
@@ -324,7 +361,7 @@ export function Composer({ scope, value, onChange, onSend, onCommand, onStop, on
             {pausedOnApproval && <span>停止回答</span>}
           </button>
         ) : (
-          <button type="button" className="ai-send" aria-label="发送" title="发送（↵）" disabled={!value.trim()} onClick={onSend}>
+          <button type="button" className="ai-send" aria-label="发送" title="发送（↵）" disabled={attachments.some((a) => a.state === 'preparing') || (!value.trim() && !attachments.some((a) => a.state === 'ready'))} onClick={onSend}>
             <IconArrowUp />
           </button>
         )}

@@ -30,6 +30,7 @@ import type { AwsCredentials } from '../credentialCommand'
 import { ANALYSIS_LIMITS, runImpactAnalysis } from './analysis'
 import { createdIndex, filterAudit, summarize } from './auditDigest'
 import { ApprovalStore, type ApprovalRequest, type Verdict } from './approvals'
+import { AttachmentPreparer, attachmentFence, attachmentMeta, sniffImage, imageTokenEstimate, nativeImageCodec, type AttachmentData, type ImageCodec, type ModelPart } from './attachments'
 import type { AwsCall, AwsInputMembers, AwsSupports } from './aws'
 import { explainBedrockError } from './bedrock'
 import { buildModelCard, cardActionLabel, cardActionText, checkCardAction, parseCardAction } from './cards'
@@ -43,7 +44,7 @@ import { ANSWER_REQUEST, hasAnswer, LIMIT_NOTE, LIMIT_REQUEST, sumUsage, textOf,
 import type { KeyStore } from './keystore'
 import { pageContext, type PageRead } from './page'
 import { buildSystemPrompt } from './prompt'
-import { createAppAgent, listModels, resolveModel, testModel } from './providers'
+import { createAppAgent, listModels, resolveModel, supportsImageInput, testModel } from './providers'
 import { redactSecrets } from './redact'
 import { resourceCandidates, resolveResources, resourcePromptSection } from './resources'
 import { checkReplies } from './replies'
@@ -104,6 +105,7 @@ export interface AiServiceDeps {
   runKeyCommand: (command: string) => Promise<string>
   now?: () => Date
   watchLimits?: WatchLimits
+  imageCodec?: ImageCodec
 }
 
 interface Run {
@@ -127,7 +129,7 @@ interface Resolved {
  * A turn main starts itself, waiting for the run in progress. card: a card button's reply (`label` is how the panel
  * shows it). result: a proposal's [proposal_result]; `silent` ones are only stored (the model reads them next time).
  */
-type QueuedTurn = { kind: 'card'; cardId: string; text: string; label: string } | { kind: 'result'; text: string; silent: boolean } | { kind: 'user'; id: string; text: string; context?: ResourceContext; resources?: ResourceCandidate[] }
+type QueuedTurn = { kind: 'card'; cardId: string; text: string; label: string } | { kind: 'result'; text: string; silent: boolean } | { kind: 'user'; id: string; text: string; context?: ResourceContext; resources?: ResourceCandidate[]; attachmentIds?: string[] }
 type CardTurn = Extract<QueuedTurn, { kind: 'card' }>
 
 const titleFrom = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, 40)
@@ -175,8 +177,10 @@ export class AiService {
   private regenerating = new Set<string>()
   /** Metadata only; no prompts, response content, headers or credentials. */
   private modelEvents: { conversationId: string; event: WatchEvent }[] = []
+  private attachments: AttachmentPreparer
 
   constructor(private d: AiServiceDeps) {
+    this.attachments = new AttachmentPreparer(d.imageCodec ?? nativeImageCodec, () => this.now())
     this.engine = new ProposalEngine({
       aws: (accountId, service, action, params, region) => d.aws(accountId, service, action, params, region),
       account: (id) => d.account(id),
@@ -193,7 +197,7 @@ export class AiService {
       now: () => this.now()
     })
     // Expiry is also checked on every confirm; this makes an untouched card turn grey (and its audit row appear) on time.
-    setInterval(() => (this.engine.sweep(), this.approvals.sweep()), 15_000).unref?.()
+    setInterval(() => (this.engine.sweep(), this.approvals.sweep(), this.attachments.sweep()), 15_000).unref?.()
   }
 
   private now(): number {
@@ -205,7 +209,8 @@ export class AiService {
     const hasKey = c.provider !== '' && (c.keyMode === 'command' ? Boolean(c.keyCommand) : this.d.keys.has(c.provider))
     // An account deleted since it was picked reads as "none picked": settings and the panel then ask for one.
     const bedrockAccountId = c.bedrockAccountId && this.d.account(c.bedrockAccountId) ? c.bedrockAccountId : null
-    return { ...c, bedrockAccountId, hasKey, canPersistKey: this.d.keys.canPersist() }
+    const canAttachImages = supportsImageInput(this.d.models, c)
+    return { ...c, bedrockAccountId, hasKey, canPersistKey: this.d.keys.canPersist(), canAttachImages }
   }
 
   saveConfig(input: unknown): AiConfigView {
@@ -343,9 +348,18 @@ export class AiService {
   view(accountId: string, conversationId: string): ConversationView {
     this.owned(accountId, conversationId)
     const quickReplies = this.d.config.get().quickReplies
+    const previews = this.d.store.attachmentPreviews(accountId, conversationId)
+    const messages = this.d.store.messages(conversationId).map((m) => {
+      const content = m.content as StoredAgentMessage
+      const attachments = content.attachments?.map((a) => {
+        const info = previews.get(a.id)
+        return info?.thumb ? { ...a, thumbDataUrl: `data:${info.mime};base64,${Buffer.from(info.thumb).toString('base64')}` } : a
+      })
+      return { ...content, ...(attachments && { attachments }), rowId: m.id, feedback: m.feedback }
+    })
     return {
       items: toChatItems(
-        this.d.store.messages(conversationId).map((m) => ({ ...(m.content as StoredAgentMessage), rowId: m.id, feedback: m.feedback })),
+        messages,
         this.now(),
         this.pendingCards.get(conversationId),
         (id) => this.engine.view(id),
@@ -404,6 +418,7 @@ export class AiService {
     this.costBudgets.clear()
     this.pendingCards.clear()
     this.queued.clear()
+    this.attachments.clear()
     this.d.store.deleteAll({ audit, now: this.now() })
     this.d.store.audit('ai_data_deleted', null, { audit, actor: 'user' })
   }
@@ -423,6 +438,24 @@ export class AiService {
     if (this.d.store.conversationAccount(conversationId) !== accountId) throw new Error('对话不存在')
   }
 
+  attachmentPrepare(accountId: string, conversationId: string | null, files: import('../../shared/ai').AttachmentSource[]): import('../../shared/ai').AttachmentPrepareResult[] {
+    if (!this.d.account(accountId)) throw new Error('账号不存在')
+    if (conversationId) this.owned(accountId, conversationId)
+    if (!Array.isArray(files) || files.some((f) => !f || typeof f.name !== 'string' || f.name.length > 500 || f.hintMime !== undefined && (typeof f.hintMime !== 'string' || f.hintMime.length > 100))) throw new Error('附件数据无效')
+    return this.attachments.prepare(accountId, conversationId, files, this.configView().canAttachImages)
+  }
+
+  attachmentDiscard(accountId: string, id: string): void { this.attachments.discard(accountId, id) }
+
+  attachmentGet(accountId: string, conversationId: string, id: string): import('../../shared/ai').AttachmentContent {
+    this.owned(accountId, conversationId)
+    const a = this.d.store.attachment(accountId, conversationId, id)
+    if (!a) throw new Error('附件不存在')
+    if (a.kind === 'file') return { kind: 'file', text: a.text ?? '' }
+    if (!a.bytes || a.bytes.length > 5 * 1024 * 1024) throw new Error('图片太大')
+    return { kind: 'image', dataUrl: `data:${a.mime};base64,${Buffer.from(a.bytes).toString('base64')}` }
+  }
+
   rename(accountId: string, conversationId: string, title: string): void {
     this.owned(accountId, conversationId)
     this.d.store.renameConversation(conversationId, title)
@@ -437,6 +470,7 @@ export class AiService {
 
   /** Every conversation of the account (the account was deleted, or the user cleared them). */
   clearAccount(accountId: string): void {
+    this.attachments.clearAccount(accountId)
     for (const [id, run] of this.runs) if (run.accountId === accountId) this.abort(id, '对话已删除')
     for (const id of this.pendingSetup.keys()) if (this.d.store.conversationAccount(id) === accountId) this.abort(id, '对话已删除')
     for (const c of this.d.store.conversations(accountId)) this.forget(c.id)
@@ -446,6 +480,7 @@ export class AiService {
   /** The conversation is going away: its cards, queued clicks and pending proposals go with it. */
   private forget(conversationId: string): void {
     // queueEpoch entries stay so late async work cannot reuse an old epoch after deletion.
+    this.attachments.clearConversation(conversationId)
     this.costBudgets.delete(conversationId)
     this.pendingCards.delete(conversationId)
     this.queued.delete(conversationId)
@@ -479,7 +514,7 @@ export class AiService {
 
   private queueView(conversationId: string): QueuedMessage[] {
     return (this.queued.get(conversationId) ?? []).filter((t): t is Extract<QueuedTurn, { kind: 'user' }> => t.kind === 'user')
-      .map(({ id, text, context }) => ({ id, text, ...(context && { context }) }))
+      .map(({ id, text, context, attachmentIds }) => ({ id, text, ...(context && { context }), ...(attachmentIds?.length && { attachmentIds }) }))
   }
 
   private emitQueue(accountId: string, conversationId: string): void {
@@ -487,7 +522,8 @@ export class AiService {
   }
 
   private failQueued(accountId: string, conversationId: string, turn: Extract<QueuedTurn, { kind: 'user' }>, err: unknown): void {
-    this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'queue-failed', id: turn.id, text: turn.text, ...(turn.context && { context: turn.context }), ...(turn.resources && { resources: turn.resources }), message: this.clean(err instanceof Error ? err.message : String(err)) } })
+    const valid = turn.attachmentIds && this.attachments.valid(accountId, conversationId, turn.attachmentIds)
+    this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'queue-failed', id: turn.id, text: turn.text, ...(turn.context && { context: turn.context }), ...(turn.resources && { resources: turn.resources }), ...(valid && { attachmentIds: turn.attachmentIds }), message: this.clean(err instanceof Error ? err.message : String(err)) + (turn.attachmentIds?.length && !valid ? '。附件已过期' : '') } })
   }
 
   private dropTurn(accountId: string, conversationId: string, turn: QueuedTurn, err: unknown, emit: (event: AiEvent) => void, note = true): void {
@@ -500,11 +536,11 @@ export class AiService {
     emit({ type: 'error', message, retryable: false })
   }
 
-  private enqueueUser(accountId: string, conversationId: string, text: string, context?: ResourceContext, resources?: ResourceCandidate[]): AiSendResult {
+  private enqueueUser(accountId: string, conversationId: string, text: string, context?: ResourceContext, resources?: ResourceCandidate[], attachmentIds: string[] = []): AiSendResult {
     const queue = this.queued.get(conversationId) ?? []
     if (queue.filter((t) => t.kind === 'user').length >= 3) throw new Error('最多排队 3 条消息')
     const id = randomUUID()
-    this.queued.set(conversationId, [...queue, { kind: 'user', id, text, ...(context && { context }), ...(resources && { resources }) }])
+    this.queued.set(conversationId, [...queue, { kind: 'user', id, text, ...(context && { context }), ...(resources && { resources }), ...(attachmentIds.length && { attachmentIds }) }])
     this.emitQueue(accountId, conversationId)
     return { conversationId, runId: this.runs.get(conversationId)?.runId ?? 0, queued: { id } }
   }
@@ -753,9 +789,11 @@ export class AiService {
 
   /** Resolves once the run has started; its progress comes as ai:event. Config problems reject here. */
   /** `page`: a new conversation's page toggle (an existing one keeps its own). */
-  async send(accountId: string, conversationId: string | null, text: string, page = true, context?: ResourceContext): Promise<AiSendResult> {
+  async send(accountId: string, conversationId: string | null, text: string, page = true, context?: ResourceContext, attachmentIds: string[] = []): Promise<AiSendResult> {
     text = checkPrompt(text)
     context = checkResourceContext(context)
+    if (!Array.isArray(attachmentIds) || attachmentIds.length > 7 || attachmentIds.some((id) => typeof id !== 'string')) throw new Error('附件数量超出限制')
+    if (!this.attachments.valid(accountId, conversationId, attachmentIds)) throw new Error('附件已过期，请重新添加')
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
     if (conversationId) {
@@ -765,7 +803,7 @@ export class AiService {
     // Those prefixes mark turns main composed (a card click, a proposal's outcome); a typed one would pass for one.
     this.checkUserPrompt(text)
     const resources = this.resolveResources(accountId, context)
-    if (conversationId && (this.runs.has(conversationId) || this.pendingSetup.has(conversationId))) return this.enqueueUser(accountId, conversationId, text, context, resources)
+    if (conversationId && (this.runs.has(conversationId) || this.pendingSetup.has(conversationId))) return this.enqueueUser(accountId, conversationId, text, context, resources, attachmentIds)
     const month = this.monthUsage()
     if (month.blocked) throw new Error(month.budget ?? '本月 AI 预算已用完')
     let resolved
@@ -779,16 +817,19 @@ export class AiService {
     const freshResources = context ? this.resolveResources(accountId, context) : resources
     const laterBudget = this.monthUsage()
     if (laterBudget.blocked) throw new Error(laterBudget.budget ?? '本月 AI 预算已用完')
+    if (!this.attachments.valid(accountId, conversationId, attachmentIds)) throw new Error('附件已过期，请重新添加')
+    if (this.attachments.hasImage(attachmentIds) && !resolved.model.input.includes('image')) throw new Error('当前模型不支持图片，请换一个支持图片的模型')
     const id = conversationId ?? this.d.store.createConversation(accountId, this.clean(titleFrom(text), resolved.apiKey), page)
     // Re-checked after the await: a second send may have started meanwhile.
     if (conversationId) this.owned(accountId, id)
     if (this.regenerating.has(id)) throw new Error('上一条消息还在处理中')
-    if (conversationId && (this.runs.has(id) || this.pendingSetup.has(id))) return this.enqueueUser(accountId, id, text, context, freshResources)
-    return { ...this.start(account, id, text, resolved, undefined, undefined, freshResources), ...(month.budget && { warning: month.budget }) }
+    if (conversationId && (this.runs.has(id) || this.pendingSetup.has(id))) return this.enqueueUser(accountId, id, text, context, freshResources, attachmentIds)
+    const prepared = this.attachments.consume(accountId, conversationId, attachmentIds)
+    return { ...this.start(account, id, text, resolved, undefined, undefined, freshResources, prepared), ...(month.budget && { warning: month.budget }) }
   }
 
   /** A user turn ordinal and its displayed original text. Keeps audit and billed usage. */
-  async regenerate(accountId: string, conversationId: string, fromUserIndex: number, expectedText: string, text?: string, context?: ResourceContext): Promise<AiSendResult> {
+  async regenerate(accountId: string, conversationId: string, fromUserIndex: number, expectedText: string, text?: string, context?: ResourceContext, attachmentIds?: string[]): Promise<AiSendResult> {
     let epoch = this.queueEpoch.get(conversationId) ?? 0
     const account = this.d.account(accountId)
     if (!account) throw new Error('账号不存在')
@@ -814,6 +855,15 @@ export class AiService {
     const initialRows = this.d.store.messages(conversationId)
     const selected = select(initialRows)
     const originalText = textOf((selected.content as StoredAgentMessage).content)
+    const originalAttachments = (selected.content as StoredAgentMessage).attachments ?? []
+    if (attachmentIds && (!Array.isArray(attachmentIds) || new Set(attachmentIds).size !== attachmentIds.length || attachmentIds.some((id) => !originalAttachments.some((a) => a.id === id)))) throw new Error('只能保留原消息的附件')
+    const retainedAttachments = originalAttachments.filter((a) => attachmentIds === undefined || attachmentIds.includes(a.id))
+      .map((a): AttachmentData | undefined => {
+        const stored = this.d.store.attachment(accountId, conversationId, a.id)
+        return stored ? { ...stored, ...(a.redactions !== undefined && { redactions: a.redactions }), ...(a.truncated !== undefined && { truncated: a.truncated }) } : undefined
+      })
+      .filter((a): a is AttachmentData => Boolean(a))
+    const missingAttachments = (attachmentIds ?? originalAttachments.map((a) => a.id)).length - retainedAttachments.length
     const originalResources = (selected.content as StoredAgentMessage).resources
     const storedResources: unknown[] = Array.isArray(originalResources) ? originalResources : originalResources === undefined ? [] : [originalResources]
     const seenResources = new Set<string>()
@@ -859,6 +909,7 @@ export class AiService {
         this.resolve(),
         new Promise<never>((_, reject) => { setupTimer = setTimeout(() => reject(new Error('模型配置超时，请重试')), 25_000) })
       ]).finally(() => clearTimeout(setupTimer))
+      if (retainedAttachments.some((a) => a.kind === 'image') && !resolved.model.input.includes('image')) throw new Error('当前模型不支持图片，请换一个支持图片的模型')
       if (epoch !== (this.queueEpoch.get(conversationId) ?? 0)) throw new Error('已停止')
       if (this.runs.has(conversationId) || this.pendingSetup.has(conversationId) || this.d.store.conversationAccount(conversationId) !== accountId) throw new Error('上一条消息还在处理中')
       const queued = this.queued.get(conversationId) ?? []
@@ -903,10 +954,10 @@ export class AiService {
       }).map((r) => r.id)
       this.d.store.truncateMessages(conversationId, fromId, keepIds)
       this.d.store.audit('conversation_regenerated', accountId, { conversationId, fromUserIndex, edited: !retry, actor: 'user' })
-      const notice = `${waiting ? '已取消待处理审批。' : ''}${cancelled ? `已取消 ${cancelled} 个待确认提案。` : ''}${droppedResources ? `${droppedResources} 个资源引用无效、已手动移除或不在本账号最近访问记录中，重新生成时已移除。` : ''}之前的操作可能已经执行；重新生成不会撤销已完成的查询或变更，请查看审计记录。`
+      const notice = `${waiting ? '已取消待处理审批。' : ''}${cancelled ? `已取消 ${cancelled} 个待确认提案。` : ''}${droppedResources ? `${droppedResources} 个资源引用无效、已手动移除或不在本账号最近访问记录中，重新生成时已移除。` : ''}${missingAttachments ? `${missingAttachments} 个附件已不存在，重新生成时已移除。` : ''}之前的操作可能已经执行；重新生成不会撤销已完成的查询或变更，请查看审计记录。`
       this.d.store.addMessage(conversationId, { role: 'note', content: { role: 'note', content: notice, timestamp: this.now() } })
       this.d.emit({ accountId, conversationId, runId: 0, event: { type: 'note', text: notice } })
-      return { ...this.start(account, conversationId, prompt, resolved, undefined, notice, resources), ...(month.budget && { warning: month.budget }) }
+      return { ...this.start(account, conversationId, prompt, resolved, undefined, notice, resources, retainedAttachments), ...(month.budget && { warning: month.budget }) }
     } finally {
       this.regenerating.delete(conversationId)
       const retained = this.queued.get(conversationId) ?? []
@@ -923,20 +974,20 @@ export class AiService {
   }
 
   /** `shown`: main started this turn (a card reply), so the panel gets the user item from here. */
-  private start(account: AwsAccount, id: string, text: string, resolved: Resolved, shown?: string, runNotice?: string, resources: ResourceCandidate[] = []): AiSendResult {
+  private start(account: AwsAccount, id: string, text: string, resolved: Resolved, shown?: string, runNotice?: string, resources: ResourceCandidate[] = [], attachments: AttachmentData[] = []): AiSendResult {
     let finish = (): void => {}
     const finished = new Promise<void>((resolve) => { finish = resolve })
     const run: Run = { runId: this.nextRunId++, accountId: account.id, aborted: false, finished, finish }
     this.runs.set(id, run)
     const emit = (event: AiEvent): void => this.d.emit({ accountId: account.id, conversationId: id, runId: run.runId, event })
     try {
-      if (shown) emit({ type: 'user', text: shown, ...(resources.length && { resources }) })
+      if (shown) emit({ type: 'user', text: shown, ...(resources.length && { resources }), ...(attachments.length && { attachments: attachments.map((a) => ({ ...attachmentMeta(a), ...(a.thumb && { thumbDataUrl: `data:${sniffImage(a.thumb) ?? 'image/jpeg'};base64,${Buffer.from(a.thumb).toString('base64')}` }) })) }) })
     } catch (err) {
       this.runs.delete(id)
       run.finish()
       throw err
     }
-    void this.execute(account, id, run, text, resolved, emit, runNotice, resources).finally(() => {
+    void this.execute(account, id, run, text, resolved, emit, runNotice, resources, attachments).finally(() => {
       this.runs.delete(id)
       try { this.next(account, id, emit) }
       finally { run.finish() }
@@ -1020,7 +1071,9 @@ export class AiService {
           }
           settled = true
           try {
-            this.start(account, id, t.text, fresh, t.kind === 'card' ? t.label : t.kind === 'user' ? t.text : undefined, undefined, resources)
+            if (t.kind === 'user' && this.attachments.hasImage(t.attachmentIds ?? []) && !fresh.model.input.includes('image')) throw new Error('当前模型不支持图片，请换一个支持图片的模型')
+            const attachments = t.kind === 'user' ? this.attachments.consume(account.id, id, t.attachmentIds ?? []) : []
+            this.start(account, id, t.text, fresh, t.kind === 'card' ? t.label : t.kind === 'user' ? t.text : undefined, undefined, resources, attachments)
           } catch (err) {
             if (!this.runs.has(id)) settled = false
             throw err
@@ -1067,16 +1120,20 @@ export class AiService {
     { model, apiKey, explain }: Resolved,
     emit: (event: AiEvent) => void,
     runNotice?: string,
-    resources: ResourceCandidate[] = []
+    resources: ResourceCandidate[] = [],
+    attachments: AttachmentData[] = []
   ): Promise<void> {
+    let contextHasAttachments = attachments.length > 0
+    let storedRunUser = false
+    const safeError = (message: string): string => contextHasAttachments ? '附件请求失败，请检查模型和附件后重试' : this.clean(message, apiKey)
     const reportError = (message: string): void => {
-      const clean = this.clean(message, apiKey)
+      const clean = safeError(message)
       if (this.d.store.conversationAccount(conversationId) !== undefined)
         this.d.store.addMessage(conversationId, { role: 'note', content: { role: 'note', content: '', error: clean, timestamp: this.now() } })
       emit({ type: 'error', message: clean })
     }
     const fail = (message: string): void => {
-      const clean = this.clean(message, apiKey)
+      const clean = safeError(message)
       reportError(clean)
       this.d.toast(`AI 助手：${clean}`)
     }
@@ -1155,7 +1212,42 @@ export class AiService {
       const page = pageOn ? pageContext(this.d.activePage(account.id)) : null
       const readable = pageOn && this.d.config.get().readPage
       const quickReplies = this.d.config.get().quickReplies
-      const modelText = text + resourcePromptSection(resources)
+      const modelText = text + resourcePromptSection(resources) + (attachments.filter((a) => a.kind === 'file').length ? '\n\n' + attachments.filter((a) => a.kind === 'file').map(attachmentFence).join('\n\n') : '')
+      const currentImages = attachments.filter((a) => a.kind === 'image').map((a) => ({ type: 'image' as const, data: Buffer.from(a.bytes!).toString('base64'), mimeType: a.mime }))
+      // Rebuild older attachment contents from the owned DB rows. Message JSON remains metadata only.
+      let imageSlots = Math.max(0, 4 - currentImages.length)
+      let estimatedImageTokens = attachments.filter((a) => a.kind === 'image').reduce((n, a) => n + imageTokenEstimate(a.width!, a.height!), 0)
+      let fileBytes = attachments.filter((a) => a.kind === 'file').reduce((n, a) => n + a.size, 0)
+      const prior = this.transcript(conversationId).filter((m) => m.role !== 'note')
+      const priorContents = new Map<StoredAgentMessage, ModelPart[]>()
+      const replayInfo = this.d.store.attachmentPreviews(account.id, conversationId)
+      for (let i = prior.length - 1; i >= 0; i--) {
+        const m = prior[i]
+        if (m.role !== 'user' || !m.attachments?.length) continue
+        const parts: ModelPart[] = []
+        for (let j = m.attachments.length - 1; j >= 0; j--) {
+          const a = m.attachments[j]
+          const info = replayInfo.get(a.id)
+          if (!info) continue
+          if (info.kind === 'image') {
+            const include = imageSlots-- > 0
+            const stored = include ? this.d.store.attachment(account.id, conversationId, a.id) : undefined
+            if (stored?.bytes) {
+              contextHasAttachments = true
+              estimatedImageTokens += imageTokenEstimate(stored.width, stored.height)
+            }
+            parts.unshift(stored?.bytes ? { type: 'image', data: Buffer.from(stored.bytes).toString('base64'), mimeType: stored.mime }
+              : { type: 'text', text: `[图片已省略: ${info.name}]` })
+          }
+          else {
+            const include = fileBytes + info.size <= 100 * 1024
+            const stored = include ? this.d.store.attachment(account.id, conversationId, a.id) : undefined
+            if (stored?.text) { fileBytes += stored.size; contextHasAttachments = true }
+            parts.unshift(stored?.text ? { type: 'text', text: attachmentFence(stored) } : { type: 'text', text: `[文件内容已省略: ${info.name}]` })
+          }
+        }
+        priorContents.set(m, parts)
+      }
       // The latest assistant message has answer text.
       let answered = false
       let toolTimeMs = 0
@@ -1234,10 +1326,11 @@ export class AiService {
           model,
           tools,
           // The page a turn was asked on is the app's record, not something to send again.
-          messages: this.transcript(conversationId).filter((m) => m.role !== 'note')
-            .map(({ page: _page, resources: priorResources, feedback: _feedback, diagnosticText: _diagnosticText, rowId: _rowId, retryable: _retryable, error: _error, ...m }) => m.role === 'user' && priorResources?.length
-              ? { ...m, content: [{ type: 'text', text: textOf(m.content) + resourcePromptSection(priorResources) }] }
-              : m) as AgentMessage[]
+          messages: prior.map((original) => {
+            const { page: _page, resources: priorResources, attachments: _attachments, feedback: _feedback, diagnosticText: _diagnosticText, rowId: _rowId, retryable: _retryable, error: _error, ...m } = original
+            if (m.role !== 'user') return m
+            return { ...m, content: [{ type: 'text', text: textOf(m.content) + resourcePromptSection(priorResources ?? []) }, ...(priorContents.get(original) ?? [])] }
+          }) as AgentMessage[]
         },
         getApiKey: () => apiKey,
         toolExecution: 'sequential',
@@ -1319,11 +1412,13 @@ export class AiService {
           // Stored as it happens, so a stop or a crash keeps what was said so far.
           const live = e.message as StoredAgentMessage
           // The panel shows a failed reply's stored error, so that copy gets the explanation (pi's message stays as is).
+          const isRunUser = live.role === 'user' && !storedRunUser
+          if (isRunUser) storedRunUser = true
           let m =
             live.stopReason === 'error' && live.errorMessage
-              ? { ...live, errorMessage: explain(live.errorMessage) }
-              : live.role === 'user' && textOf(live.content) === modelText
-                ? { ...live, content: [{ type: 'text' as const, text }], ...(page && { page: { label: page.label, url: page.url } }), ...(resources.length && { resources }) }
+              ? { ...live, errorMessage: safeError(explain(live.errorMessage)) }
+              : isRunUser
+                ? { ...live, content: [{ type: 'text' as const, text }], ...(page && { page: { label: page.label, url: page.url } }), ...(resources.length && { resources }), ...(attachments.length && { attachments: attachments.map((a) => ({ ...attachmentMeta(a), ...(a.thumb && { thumbDataUrl: `data:${sniffImage(a.thumb) ?? 'image/jpeg'};base64,${Buffer.from(a.thumb).toString('base64')}` }) })) }) }
                 : live
           if (m.role === 'assistant' && m.stopReason === 'error') m = { ...m, diagnosticText: diagnostic(requestEvents.at(-1)?.type === 'stalled' ? 'ModelRequestStalled' : 'ProviderError') }
           if (m.role === 'toolResult' && m.toolCallId && toolStarted.has(m.toolCallId)) {
@@ -1334,14 +1429,27 @@ export class AiService {
           }
           // The store's pattern scrub misses keys without a known shape (Gemini's AIza…); drop the active key by value.
           const content = apiKey && apiKey.length >= 16 ? JSON.parse(JSON.stringify(m).split(apiKey).join('[redacted]')) : m
-          this.d.store.addMessage(conversationId, { role: m.role, content, tokensIn: m.usage?.input, tokensOut: m.usage?.output })
+          const messageId = this.d.store.addMessage(conversationId, { role: m.role, content, tokensIn: m.usage?.input, tokensOut: m.usage?.output })
+          if (m.role === 'user' && m.attachments?.length) for (const a of attachments) {
+            this.d.store.addAttachment(conversationId, messageId, a)
+            this.d.store.audit('attachment_added', account.id, { conversationId, kind: a.kind, size: a.size, sha256Prefix: a.sha256.slice(0, 8), redactions: a.redactions ?? 0 })
+          }
           // The stored [card_action] turn is the record now; the in-memory "accepted" mark can go.
           const clicked = m.role === 'user' ? parseCardAction(typeof m.content === 'string' ? m.content : (m.content ?? []).map((p) => p.text ?? '').join('')) : null
           if (clicked) this.pendingCards.get(conversationId)?.delete(clicked.cardId)
           if (m.role === 'assistant') emit({ type: 'usage', usage: this.usage(conversationId), month: this.monthUsage() })
         }
       })
-      await agent.prompt(modelText)
+      if (estimatedImageTokens) {
+        const estimatedCost = estimatedImageTokens * (this.rates(model.provider, model.id)?.input ?? 0) / 1e6
+        const billed = this.usage(conversationId)
+        const usage = { ...billed, input: billed.input + estimatedImageTokens, cost: billed.cost + estimatedCost }
+        const billedMonth = this.monthUsage()
+        const totals = { ...billedMonth.totals, input: billedMonth.totals.input + estimatedImageTokens, cost: billedMonth.totals.cost + estimatedCost }
+        const month = { totals, ...budgetVerdict(this.d.config.get().budget, totals) }
+        this.d.emit({ accountId: account.id, conversationId, runId: run.runId, event: { type: 'usage', usage, month } })
+      }
+      await agent.prompt(modelText, currentImages)
       const reply = (): StoredAgentMessage | undefined => agent.state.messages.findLast((m) => m.role === 'assistant') as StoredAgentMessage | undefined
       const stopped = (): boolean => run.aborted || notice !== null || reply()?.stopReason === 'error' || reply()?.stopReason === 'aborted'
       // Hit a cap, or ended on tool calls alone or an empty reply: one hidden nudge per turn to answer from what it

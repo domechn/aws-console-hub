@@ -74,6 +74,24 @@ describe('AI panel CSS (plan ai-ux-redesign §3.18)', () => {
     expect(rule.slice(0, rule.indexOf('}'))).toMatch(/field-sizing: content;[^]*min-height: calc\(1lh \+ 12px\);[^]*max-height: calc\(8lh \+ 12px\);/)
   })
 
+  it('shows rejected rows above three rows of scrollable chips and stacks them at 320px', () => {
+    expect(css).toMatch(/\.ai-attachment-chips \{[^}]*max-height: 190px;[^}]*overflow-y: auto;/)
+    expect(css).toMatch(/\.ai-attachment-chips \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/)
+    expect(css).toMatch(/\.ai-attachment-chip\.file \{[^}]*grid-column: 1 \/ -1;/)
+    expect(css).toMatch(/\.ai-attachment-chip\.file \.ai-file-icon \{[^}]*width: 48px;/)
+    expect(css).toMatch(/\.ai-attachment-chip\.file \.ai-attachment-name \{[^}]*min-width: 8ch;/)
+    expect(css).toMatch(/\.ai-attachment-chip img \{[^}]*border: 1px solid var\(--border-strong\);/)
+    expect(css).toMatch(/@container ai-composer \(max-width: 359px\) \{[^}]*\.ai-attachment-chips \{ grid-template-columns: minmax\(0, 1fr\)/)
+    expect(css).toMatch(/\.ai-lightbox \{[^}]*position: fixed;/)
+    expect(css).toMatch(/\.ai-lightbox button:focus-visible \{ outline: 2px solid var\(--focus\)/)
+    expect(css).toMatch(/\.ai-attachment-privacy \{[^}]*text-wrap: balance;/)
+    expect(css).toMatch(/\.ai-msg-image-frame \{[^}]*width: 96px;[^}]*height: 96px;/)
+    expect(css).toMatch(/\.ai-msg-image-frame img \{[^}]*object-fit: cover;[^}]*object-position: top center;/)
+    expect(css).toMatch(/\.ai-lightbox-stage img \{[^}]*object-fit: contain;/)
+    expect(lightTokens.backdrop).toBe('rgba(0, 0, 0, 0.72)')
+    expect(darkTokens.backdrop).toBe('rgba(0, 0, 0, 0.72)')
+  })
+
   it('shows composer textarea focus on the rounded container without an inner outline', () => {
     expect(css).toMatch(/\.ai-composer:focus-within\s*\{[^}]*border-color:\s*var\(--accent\);[^}]*box-shadow:\s*0 0 0 [23]px color-mix\(in srgb, var\(--accent\) \d+%, transparent\);/)
     expect(css).toMatch(/html \.ai-panel \.ai-composer textarea:focus-visible\s*\{[^}]*outline:\s*none;[^}]*box-shadow:\s*none;/)

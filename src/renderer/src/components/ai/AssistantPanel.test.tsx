@@ -13,6 +13,14 @@ it('shows queued user messages and a per-item cancellation control', () => {
   expect(html).not.toContain('<b>')
 })
 
+it('shows queued attachments and user file metadata without exposing content', () => {
+  const attachment = { id: 'safe', kind: 'file' as const, name: 'notes.txt', size: 42, redactions: 2, truncated: true }
+  const html = renderToStaticMarkup(<QueueView queue={[{ id: 'q1', text: 'read', attachments: [attachment] }]} onCancel={() => {}} />)
+  expect(html).toContain('notes.txt')
+  expect(html).toContain('已隐藏 2 处疑似密钥')
+  expect(html).toContain('已截断')
+})
+
 it('shows trusted resources on a user turn as plain text', () => {
   const html = renderToStaticMarkup(<Item item={{ kind: 'user', text: '<b>question</b>', resources: [{ type: 'ec2', id: 'i-1', region: 'us-east-1', label: '<img>' }] }} index={0} userIndex={0}
     retryable={false} actionsDisabled={false} cardDisabled={false} editing={false} editText="" onEditText={() => {}}
