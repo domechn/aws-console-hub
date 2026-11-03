@@ -64,25 +64,30 @@ export class ToastOverlay {
   show(kind: ToastKind, message: string): void {
     const toast = { kind, message: message.slice(0, MAX_MESSAGE) }
     void this.ready.then(() => {
-      if (!this.view.webContents.isDestroyed()) this.view.webContents.send('toast:push', toast)
+      const wc = this.view.webContents
+      if (wc && !wc.isDestroyed()) wc.send('toast:push', toast)
     })
   }
 
   setSystemDark(dark: boolean): void {
-    if (!this.view.webContents.isDestroyed()) this.view.webContents.send('app:system-dark-changed', dark)
+    const wc = this.view.webContents
+    if (wc && !wc.isDestroyed()) wc.send('app:system-dark-changed', dark)
   }
 
   /** Back on top; call after adding any other child view to the window. */
   raise(): void {
-    this.win.contentView.addChildView(this.view)
+    const wc = this.view.webContents
+    if (wc && !wc.isDestroyed()) this.win.contentView.addChildView(this.view)
   }
 
   private giveBackFocus(): void {
-    if (this.view.webContents.isFocused()) this.restoreFocus()
+    const wc = this.view.webContents
+    if (wc && !wc.isDestroyed() && wc.isFocused()) this.restoreFocus()
   }
 
   private layout(): void {
-    if (this.win.isDestroyed()) return
+    const wc = this.view.webContents
+    if (this.win.isDestroyed() || !wc || wc.isDestroyed()) return
     const [width, height] = this.win.getContentSize()
     const h = Math.min(this.height, Math.max(0, height - BOTTOM))
     // The width stays put even while hidden, so the page measures its stack at the real width.

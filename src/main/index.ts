@@ -6,6 +6,7 @@ import { logActivity, pageLabel, trimActivityLog } from './activity'
 import { RecentsStore } from './recents'
 import { ViewManager } from './views'
 import { ToastOverlay } from './toast'
+import { runTabAction } from './tabIpc'
 import { consoleRegion, isConsoleUrl, windowOpenAction } from './urls'
 import { AwsClients } from './ai/aws'
 import { loginIdentity } from './ai/changes/engine'
@@ -194,6 +195,11 @@ function createWindow(): void {
 
   // Created before any tab, and raised above each new one.
   const toasts = new ToastOverlay(win, () => views.focus())
+  const tabAction = (action: () => void | Promise<void>): Promise<void> =>
+    runTabAction(action, (err) => {
+      console.error('Tab action failed:', err instanceof Error ? err.name : 'Error', redactSecrets(err instanceof Error ? err.message : String(err)))
+      toasts.show('error', '标签页操作失败，请重试')
+    })
 
   views = new ViewManager(win, {
     onNavigated: (accountId, url) => {
@@ -405,7 +411,7 @@ function createWindow(): void {
   }, 60_000)
   win.on('closed', () => clearInterval(refreshTimer))
 
-  ipcMain.handle('accounts:open', async (_e, id: string, source?: string) => {
+  ipcMain.handle('accounts:open', (_e, id: string, source?: string) => tabAction(async () => {
     const account = accounts.get(id)
     if (!account) return
     logActivity({ type: 'switch', accountId: id, source: source ?? 'unknown' })
@@ -415,8 +421,8 @@ function createWindow(): void {
     // handing the user a page that is about to bounce to the sign-in screen.
     if (views.hasContent(account.id) && sessionAlive(account.id)) return
     await federateInto(account, views.returnUrl(account.id))
-  })
-  ipcMain.handle('accounts:relogin', async (_e, id: string) => {
+  }))
+  ipcMain.handle('accounts:relogin', (_e, id: string) => tabAction(async () => {
     const account = accounts.get(id)
     if (!account) return
     logActivity({ type: 'relogin', accountId: id })
@@ -425,7 +431,7 @@ function createWindow(): void {
     views.show(account)
     // Back to the page the active tab was on, not the console home.
     await federateInto(account, views.returnUrl(account.id))
-  })
+  }))
   const navigateConsole = async (accountId: string, url: string): Promise<void> => {
     const account = accounts.get(accountId)
     // Recents and palette links are always console pages; anything else is not ours to load.
@@ -439,7 +445,7 @@ function createWindow(): void {
       await federateInto(account, url)
     }
   }
-  ipcMain.handle('console:navigate', (_e, accountId: string, url: string) => navigateConsole(accountId, url))
+  ipcMain.handle('console:navigate', (_e, accountId: string, url: string) => tabAction(() => navigateConsole(accountId, url)))
 
   // AI assistant. LLM keys, AWS credentials and raw tool results all stay in this process; changes run only after
   // the user confirms them in the panel (ai/changes/engine.ts).
@@ -503,34 +509,36 @@ function createWindow(): void {
   app.on('will-quit', () => maintainAi(true))
   // Links in replies: console pages through the same path as console:navigate; other web links by the tab policy.
   registerAiIpc(win, ai, (accountId, url) => {
-    if (isConsoleUrl(url)) return void navigateConsole(accountId, url)
-    const action = windowOpenAction(url)
-    if (action === 'tab' && views.openTab(accountId, url, true)) return
-    if (action === 'tab' || action === 'external') void shell.openExternal(url)
+    void tabAction(async () => {
+      if (isConsoleUrl(url)) return navigateConsole(accountId, url)
+      const action = windowOpenAction(url)
+      if (action === 'tab' && views.openTab(accountId, url, true)) return
+      if (action === 'tab' || action === 'external') await shell.openExternal(url)
+    })
   })
-  ipcMain.on('console:bounds', (_e, rect: Rect) => views.setBounds(rect))
-  ipcMain.on('console:visible', (_e, visible: boolean) => views.setConsoleVisible(visible))
-  ipcMain.on('console:focus', () => views.focus())
-  ipcMain.on('console:back', () => {
+  ipcMain.on('console:bounds', (_e, rect: Rect) => void tabAction(() => views.setBounds(rect)))
+  ipcMain.on('console:visible', (_e, visible: boolean) => void tabAction(() => views.setConsoleVisible(visible)))
+  ipcMain.on('console:focus', () => void tabAction(() => views.focus()))
+  ipcMain.on('console:back', () => void tabAction(() => {
     logActivity({ type: 'back', accountId: views.activeId })
     views.goBack()
-  })
-  ipcMain.on('console:forward', () => {
+  }))
+  ipcMain.on('console:forward', () => void tabAction(() => {
     logActivity({ type: 'forward', accountId: views.activeId })
     views.goForward()
-  })
-  ipcMain.on('console:reload', () => {
+  }))
+  ipcMain.on('console:reload', () => void tabAction(() => {
     logActivity({ type: 'reload', accountId: views.activeId })
     views.reload()
-  })
-  ipcMain.on('console:find', (_e, text: string, options: FindOptions) => views.find(text, options))
-  ipcMain.on('console:find-stop', () => views.stopFind())
-  ipcMain.on('tabs:activate', (_e, tabId: unknown) => {
+  }))
+  ipcMain.on('console:find', (_e, text: string, options: FindOptions) => void tabAction(() => views.find(text, options)))
+  ipcMain.on('console:find-stop', () => void tabAction(() => views.stopFind()))
+  ipcMain.on('tabs:activate', (_e, tabId: unknown) => void tabAction(() => {
     if (Number.isInteger(tabId)) views.activateTab(tabId as number)
-  })
-  ipcMain.on('tabs:close', (_e, tabId: unknown) => {
+  }))
+  ipcMain.on('tabs:close', (_e, tabId: unknown) => void tabAction(() => {
     if (Number.isInteger(tabId)) views.closeTab(tabId as number)
-  })
+  }))
   ipcMain.handle('recents:list', () => recents.list())
   ipcMain.handle('recents:pin', (_e, key: string, pinned: boolean) => {
     logActivity({ type: 'pin', key, pinned })

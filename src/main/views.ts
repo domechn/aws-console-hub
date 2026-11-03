@@ -2,6 +2,7 @@ import { BrowserWindow, WebContentsView, session, shell } from 'electron'
 import type { AwsAccount, FindOptions, FindResult, NavState, Rect } from '../shared/types'
 import { isConsoleUrl, isSignInUrl, windowOpenAction } from './urls'
 import { shortcutFor, type Shortcut } from './shortcuts'
+import { runTabAction } from './tabIpc'
 import type { PageTab } from './ai/page'
 
 /** Web permissions the console actually needs (copy buttons, full-screen editors). */
@@ -16,6 +17,11 @@ const PAGE_READ_WORLD_ID = 1001
 
 /** How long an off-screen session refresh may take before it counts as failed. */
 const REFRESH_TIMEOUT_MS = 60_000
+
+const liveContents = (view?: WebContentsView): Electron.WebContents | undefined => {
+  const wc = view?.webContents
+  return wc && !wc.isDestroyed() ? wc : undefined
+}
 
 interface ViewCallbacks {
   onNavigated: (accountId: string, url: string) => void
@@ -50,21 +56,26 @@ export class ViewManager {
   private activeTabs = new Map<string, WebContentsView>()
   /** Last console page per tab, so a re-login can land back on it. */
   private returnUrls = new Map<number, string>()
+  private tabIds = new WeakMap<WebContentsView, number>()
   /**
    * Tabs that have committed a page. A tab without one stays hidden, since an
    * empty native view would paint blank white over the renderer's loading panel.
    */
   private painted = new WeakSet<WebContentsView>()
+  private loading = new WeakSet<WebContentsView>()
   private bounds: Rect = { x: 0, y: 0, width: 800, height: 600 }
   private consoleVisible = true
   /** Whether the renderer's find bar is up (it calls find() on open, stopFind() on close). */
   private findOpen = false
+  private closing = false
   activeId: string | null = null
 
   constructor(
     private win: BrowserWindow,
     private callbacks: ViewCallbacks
   ) {
+    win.once('close', () => { this.closing = true })
+    win.once('closed', () => { this.closing = true })
     // Tab shortcuts while focus is in the renderer UI. ⌘W in particular would
     // otherwise reach the default macOS menu and close the whole window.
     // ⌘K / ⌘⇧A / ⌘F / ⌘J / ⌘I / ⌘1-9 are left to the renderer, which knows its own state.
@@ -83,30 +94,31 @@ export class ViewManager {
 
   /** The active tab of the active account: the one on screen. */
   private current(): WebContentsView | undefined {
-    return this.activeId ? this.activeTabs.get(this.activeId) : undefined
+    const view = this.activeId ? this.activeTabs.get(this.activeId) : undefined
+    return liveContents(view) ? view : undefined
   }
 
   /** Whether any of the account's tabs has ever navigated. */
   hasContent(accountId: string): boolean {
-    return this.tabList(accountId).some((v) => Boolean(v.webContents.getURL()))
+    return this.tabList(accountId).some((v) => Boolean(liveContents(v)?.getURL()))
   }
 
   /** The page a tab (default: the account's active tab) should come back to after a re-login. */
   returnUrl(accountId: string, tabId?: number): string | undefined {
-    const id = tabId ?? this.activeTabs.get(accountId)?.webContents.id
+    const id = tabId ?? liveContents(this.activeTabs.get(accountId))?.id
     return id === undefined ? undefined : this.returnUrls.get(id)
   }
 
   /** The account's active tab, for the assistant's page context: URL and title only. */
   activePage(accountId: string): { url: string; title: string } | null {
-    const wc = this.activeTabs.get(accountId)?.webContents
-    return wc && !wc.isDestroyed() ? { url: wc.getURL(), title: wc.getTitle() } : null
+    const wc = liveContents(this.activeTabs.get(accountId))
+    return wc ? { url: wc.getURL(), title: wc.getTitle() } : null
   }
 
   /** The tab on screen, for read_current_page; ai/page.ts checks its account and URL before running anything. */
   onScreenTab(): PageTab | null {
-    const wc = this.current()?.webContents
-    if (!this.activeId || !wc || wc.isDestroyed()) return null
+    const wc = liveContents(this.current())
+    if (!this.activeId || !wc) return null
     return { accountId: this.activeId, url: wc.getURL(), title: wc.getTitle(), run: (code) => wc.executeJavaScriptInIsolatedWorld(PAGE_READ_WORLD_ID, [{ code }]) }
   }
 
@@ -120,6 +132,8 @@ export class ViewManager {
     view.setBackgroundColor('#ffffff')
     const wc = view.webContents
     const tabId = wc.id
+    this.tabIds.set(view, tabId)
+    wc.once('destroyed', () => this.onTabDestroyed(accountId, view, tabId))
     // Electron grants every permission by default; tabs and popups share this session.
     wc.session.setPermissionRequestHandler((_wc, permission, callback) =>
       callback(ALLOWED_PERMISSIONS.has(permission))
@@ -146,7 +160,11 @@ export class ViewManager {
       if (isMainFrame) emitNav(url)
     })
     wc.on('did-start-loading', () => this.emitNavState(accountId))
-    wc.on('did-stop-loading', () => this.emitNavState(accountId))
+    wc.on('did-stop-loading', () => {
+      this.loading.delete(view)
+      this.emitNavState(accountId)
+    })
+    wc.on('render-process-gone', () => this.emitNavState(accountId))
     wc.on('page-title-updated', () => this.emitNavState(accountId))
 
     wc.on('found-in-page', (_e, result) => {
@@ -170,7 +188,7 @@ export class ViewManager {
     this.win.contentView.addChildView(view)
     view.setBounds(this.bounds)
     view.setVisible(false)
-    this.tabs.set(accountId, [...this.tabList(accountId), view])
+    this.tabs.set(accountId, [...(this.tabs.get(accountId) ?? []), view])
     this.callbacks.onTabAdded()
     return view
   }
@@ -191,7 +209,8 @@ export class ViewManager {
         return this.callbacks.onSwitchAccount(s.index)
       case 'close-tab': {
         const view = this.current()
-        if (view) this.closeTab(view.webContents.id)
+        const id = liveContents(view)?.id
+        if (id !== undefined) this.closeTab(id)
         return
       }
       case 'next-tab':
@@ -227,7 +246,10 @@ export class ViewManager {
       if (action === 'tab') {
         // Deferred: creating a view from inside the handler runs while
         // Chromium is still resolving the open it just asked us about.
-        setImmediate(() => this.openTab(accountId, url, disposition !== 'background-tab'))
+        setImmediate(() => void runTabAction(
+          () => { this.openTab(accountId, url, disposition !== 'background-tab') },
+          () => console.error('Deferred tab open failed')
+        ))
       } else if (action === 'external') {
         void shell.openExternal(url)
       }
@@ -245,16 +267,16 @@ export class ViewManager {
     // The account was removed while the open was pending.
     if (!this.tabs.has(accountId)) return false
     const view = this.createTab(accountId)
-    if (activate) this.setActiveTab(accountId, view)
+    if (activate || !liveContents(this.activeTabs.get(accountId))) this.setActiveTab(accountId, view)
     else this.emitNavState(accountId)
-    void view.webContents.loadURL(url).catch(() => {})
+    void liveContents(view)?.loadURL(url).catch(() => {})
     return true
   }
 
   /** The account's active tab, creating its first tab on demand. */
   private ensure(accountId: string): WebContentsView {
     const existing = this.activeTabs.get(accountId)
-    if (existing) return existing
+    if (liveContents(existing)) return existing!
     const view = this.createTab(accountId)
     this.activeTabs.set(accountId, view)
     return view
@@ -268,19 +290,20 @@ export class ViewManager {
         view.setVisible(this.consoleVisible && view === current && this.painted.has(view))
       }
     }
-    if (this.consoleVisible) current?.webContents.focus()
+    if (this.consoleVisible) liveContents(current)?.focus()
   }
 
   /** Keyboard to where it belongs: the on-screen tab, or the app UI while it is hidden. */
   focus(): void {
     const current = this.current()
-    if (this.consoleVisible && current && this.painted.has(current)) current.webContents.focus()
+    if (this.consoleVisible && current && this.painted.has(current)) liveContents(current)?.focus()
     else this.win.webContents.focus()
   }
 
   /** A tab left on the sign-in page by an expiry goes back to its page; the session may be fresh by now. */
   private restoreTab(view: WebContentsView): void {
-    const wc = view.webContents
+    const wc = liveContents(view)
+    if (!wc) return
     const back = this.returnUrls.get(wc.id)
     if (back && isSignInUrl(wc.getURL())) void wc.loadURL(back).catch(() => {})
   }
@@ -288,7 +311,8 @@ export class ViewManager {
   private setActiveTab(accountId: string, view: WebContentsView): void {
     const previous = this.activeTabs.get(accountId)
     // Highlights would otherwise linger on a page nobody is looking at.
-    if (previous && previous !== view) previous.webContents.stopFindInPage('clearSelection')
+    if (previous && previous !== view) liveContents(previous)?.stopFindInPage('clearSelection')
+    if (!liveContents(view)) return
     this.activeTabs.set(accountId, view)
     // Lazy: if the session is still dead this bounces to sign-in again, and
     // the sign-out handler logs in and returns here.
@@ -299,7 +323,7 @@ export class ViewManager {
 
   private findTab(tabId: number): { accountId: string; list: WebContentsView[]; index: number } | null {
     for (const [accountId, list] of this.tabs) {
-      const index = list.findIndex((v) => v.webContents.id === tabId)
+      const index = list.findIndex((v) => liveContents(v)?.id === tabId)
       if (index >= 0) return { accountId, list, index }
     }
     return null
@@ -313,22 +337,65 @@ export class ViewManager {
   /** Close a tab. An account's last tab stays: it is where its logins land. */
   closeTab(tabId: number): void {
     const found = this.findTab(tabId)
-    if (!found || found.list.length === 1) return
+    if (!found || found.list.filter((view) => liveContents(view)).length === 1) return
     const { accountId, list, index } = found
     const [view] = list.splice(index, 1)
     this.returnUrls.delete(tabId)
     if (this.activeTabs.get(accountId) === view) {
-      this.setActiveTab(accountId, list[Math.min(index, list.length - 1)])
+      const next = list.slice(index).find((v) => liveContents(v)) ?? list.slice(0, index).reverse().find((v) => liveContents(v))
+      if (next) this.setActiveTab(accountId, next)
     } else {
       this.emitNavState(accountId)
     }
     this.destroy(view)
   }
 
+  private onTabDestroyed(accountId: string, view: WebContentsView, tabId: number): void {
+    const list = this.tabs.get(accountId)
+    if (!list) return
+    const index = list.indexOf(view)
+    if (index < 0) return
+    const back = this.returnUrls.get(tabId)
+    list.splice(index, 1)
+    this.returnUrls.delete(tabId)
+    if (this.closing || this.win.isDestroyed()) return
+    try {
+      this.win.contentView.removeChildView(view)
+      let neighbourIndex = index
+      for (const stale of [...list]) {
+        if (liveContents(stale)) continue
+        const staleIndex = list.indexOf(stale)
+        if (staleIndex < neighbourIndex) neighbourIndex--
+        list.splice(staleIndex, 1)
+        const staleId = this.tabIds.get(stale)
+        if (staleId !== undefined) this.returnUrls.delete(staleId)
+        this.win.contentView.removeChildView(stale)
+      }
+      let next = list[Math.min(neighbourIndex, list.length - 1)]
+      if (!next) {
+        next = this.createTab(accountId)
+        if (back && isConsoleUrl(back)) {
+          this.returnUrls.set(this.tabIds.get(next)!, back)
+          this.loading.add(next)
+        }
+      }
+      if (this.activeTabs.get(accountId) === view || !liveContents(this.activeTabs.get(accountId))) this.setActiveTab(accountId, next)
+      else this.emitNavState(accountId)
+      if (this.loading.has(next) && back) {
+        void liveContents(next)?.loadURL(back).catch(() => {
+          this.loading.delete(next)
+          this.emitNavState(accountId)
+        })
+      }
+    } catch {
+      console.error('Tab recreation failed')
+    }
+  }
+
   private cycleTab(delta: number): void {
     const current = this.current()
     if (!this.activeId || !current) return
-    const list = this.tabList(this.activeId)
+    const list = this.tabList(this.activeId).filter((view) => liveContents(view))
     if (list.length < 2) return
     const next = list[(list.indexOf(current) + delta + list.length) % list.length]
     this.setActiveTab(this.activeId, next)
@@ -336,27 +403,25 @@ export class ViewManager {
 
   private destroy(view: WebContentsView): void {
     this.win.contentView.removeChildView(view)
-    view.webContents.close()
+    liveContents(view)?.close()
   }
 
   private emitNavState(accountId: string): void {
     const view = this.activeTabs.get(accountId)
-    const wc = view?.webContents
-    if (!view || !wc || wc.isDestroyed()) return
+    const wc = liveContents(view)
+    if (!view || !wc) return
     this.callbacks.onNavState({
       accountId,
       url: wc.getURL(),
       hasPage: this.painted.has(view),
       canGoBack: wc.navigationHistory.canGoBack(),
       canGoForward: wc.navigationHistory.canGoForward(),
-      loading: wc.isLoading(),
+      loading: wc.isLoading() || this.loading.has(view),
       activeTabId: wc.id,
-      tabs: this.tabList(accountId).map((v) => ({
-        id: v.webContents.id,
-        title: v.webContents.getTitle(),
-        url: v.webContents.getURL(),
-        loading: v.webContents.isLoading()
-      }))
+      tabs: this.tabList(accountId).flatMap((v) => {
+        const tab = liveContents(v)
+        return tab ? [{ id: tab.id, title: tab.getTitle(), url: tab.getURL(), loading: tab.isLoading() || this.loading.has(v) }] : []
+      })
     })
   }
 
@@ -367,7 +432,7 @@ export class ViewManager {
    */
   show(account: AwsAccount): void {
     this.ensure(account.id)
-    if (this.activeId !== account.id) this.current()?.webContents.stopFindInPage('clearSelection')
+    if (this.activeId !== account.id) liveContents(this.current())?.stopFindInPage('clearSelection')
     this.activeId = account.id
     this.display()
     this.emitNavState(account.id)
@@ -384,7 +449,7 @@ export class ViewManager {
     const view =
       target && target.accountId === account.id ? target.list[target.index] : this.ensure(account.id)
     if (activate) this.show(account)
-    return view.webContents.loadURL(url).catch(() => {})
+    return liveContents(view)?.loadURL(url).catch(() => {}) ?? Promise.resolve()
   }
 
   /** After a fresh login, send every tab of the account that sits on the sign-in page back to its page. */
@@ -423,20 +488,22 @@ export class ViewManager {
     } finally {
       clearTimeout(timer)
     }
-    const ok = isConsoleUrl(wc.getURL())
-    wc.close()
+    const ok = !wc.isDestroyed() && isConsoleUrl(wc.getURL())
+    if (!wc.isDestroyed()) wc.close()
     return ok
   }
 
   /** Drop the account's tabs and its on-disk login state (cookies, storage). */
   async removeAccount(id: string): Promise<void> {
-    for (const view of this.tabList(id)) {
-      this.returnUrls.delete(view.webContents.id)
-      this.destroy(view)
-    }
+    const list = this.tabList(id)
     this.tabs.delete(id)
     this.activeTabs.delete(id)
     if (this.activeId === id) this.activeId = null
+    for (const view of list) {
+      const tabId = this.tabIds.get(view)
+      if (tabId !== undefined) this.returnUrls.delete(tabId)
+      this.destroy(view)
+    }
     await session.fromPartition(partitionFor(id)).clearStorageData()
   }
 
@@ -452,21 +519,21 @@ export class ViewManager {
   }
 
   goBack(): void {
-    this.current()?.webContents.navigationHistory.goBack()
+    liveContents(this.current())?.navigationHistory.goBack()
   }
 
   goForward(): void {
-    this.current()?.webContents.navigationHistory.goForward()
+    liveContents(this.current())?.navigationHistory.goForward()
   }
 
   reload(): void {
-    this.current()?.webContents.reload()
+    liveContents(this.current())?.reload()
   }
 
   /** In-page find on the on-screen tab; empty text clears the highlights. */
   find(text: string, options: FindOptions): void {
     this.findOpen = true
-    const wc = this.current()?.webContents
+    const wc = liveContents(this.current())
     if (!wc) return
     if (text) wc.findInPage(text, options)
     else wc.stopFindInPage('clearSelection')
@@ -474,6 +541,6 @@ export class ViewManager {
 
   stopFind(): void {
     this.findOpen = false
-    this.current()?.webContents.stopFindInPage('clearSelection')
+    liveContents(this.current())?.stopFindInPage('clearSelection')
   }
 }
