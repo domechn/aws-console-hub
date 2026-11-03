@@ -131,7 +131,7 @@ src/
 │       ├── context.ts     纯函数：发给 LLM 前的上下文压缩
 │       ├── prompt.ts      纯函数：system prompt（账号、region、只读、时间）
 │       ├── history.ts     纯函数：存储的对话 → 面板显示项（含卡片及其状态）；token 与费用合计
-│       ├── config.ts      ai-config.json 的校验、v1→v5 迁移与读写（不含 key / 凭证）
+│       ├── config.ts      ai-config.json 的校验、v1→v7 迁移与读写（不含 key / 凭证）
 │       ├── replies.ts     纯函数：suggest_replies 的选项校验（快捷回复，见「快捷回复」）
 │       ├── validate.ts    纯函数：ai:* IPC 参数校验
 │       ├── ipc.ts         ai:* 固定 channel 注册（只接受主界面 webContents）
@@ -162,7 +162,7 @@ src/
 
 - **console 是原生 view，画在 DOM 之上**。渲染进程里 `.console-slot` 内的占位 `.console-view` 通过 `getBoundingClientRect()` 把矩形用 `console:bounds` 上报给主进程来定位 `WebContentsView`。因此打开面板 / 账号列表 / 弹窗时必须通过 `console:visible` 把 view 藏起来，否则它会盖住覆盖层。搜索条走的是另一条路：它作为 `.console-slot` 的兄弟节点排在 `.console-view` 之前，`ResizeObserver` 会把缩小后的矩形重新上报，于是 view 让位而不是被遮住。底部最近访问条同理，是排在 `.console-view` 之后的兄弟节点，view 只缩小条的高度；显示 / 隐藏它也走同一条重新上报的路径。AI 面板是第三次用这个办法：`.console-slot` 是横向 flex，左边 `.console-column`（搜索条 + `.console-view` + 最近访问条），右边 `<aside class="ai-panel">`，打开、拖宽面板时 view 跟着变窄，主进程布局一行没改。
 - **提示是单独的一层原生 view**。DOM 里的浮层会被 console view 盖住，所以右下角提示放在 `ToastOverlay` 自己的透明 `WebContentsView` 里（独立的 `toast.html` 入口和 `preload/toast.js`，`sandbox` + `contextIsolation`，CSP 与主界面相同）。它最先加进 `win.contentView`，之后每新建一个标签页 view 都用 `addChildView` 把它重新提到最上面。页面每次变化都量一下提示栈的高度经 `toast:size` 上报，主进程把 view 设成右下角恰好包住提示栈的矩形（宽 380px，距底 40px 让开最近访问条），其余区域不挡点击；没有提示时高度为 0 并 `setVisible(false)`。点过 ✕ / 复制或提示全部消失后，焦点还给 console 或主界面，快捷键照常可用。
-- **标签页属于账号，窗口只有一个**。每个账号有自己的一组标签页和一个当前标签页；屏幕上只显示当前账号的当前标签页，切账号 / 切标签页都只是切显示。标签页 id 就是它的 `webContents.id`，通过 `nav:state` 里的 `tabs` / `activeTabId` 发给渲染进程。账号的最后一个标签页不能关：联邦登录总要有个落地的地方。
+- **标签页属于账号，窗口只有一个**。每个账号有自己的一组标签页和一个当前标签页；屏幕上只显示当前账号的当前标签页，切账号 / 切标签页都只是切显示。标签页 id 就是它的 `webContents.id`，通过 `nav:state` 里的 `tabs` / `activeTabId` 发给渲染进程。账号的最后一个标签页不能主动关：联邦登录总要有个落地的地方。若页面自行销毁 `webContents`，主进程从列表移除该 view、清掉旧标签页的回跳 URL、激活邻近标签页；若是最后一个则新建标签页，并加载旧标签页保存的 Console URL（登录过期时照常走重新登录）。窗口正在关闭时不重建标签页；重建失败只记一行错误。渲染进程发来的旧标签页 id 会被忽略。渲染进程崩溃而 `webContents` 仍存活时保留标签页，供用户刷新。
 - **单实例锁**。session 分区的 LevelDB LOCK 是独占的，第二个实例只会把已有窗口拉到前台。
 - **UA 清理**。`app.userAgentFallback` 去掉了 `Electron/…` 和 `aws-console-hub/…` 片段，避免部分认证流程拒绝非浏览器 UA。
 - **Console 强制浅色**。`nativeTheme.themeSource = 'light'` 保持内嵌 console 的原有浅色行为；应用外框由 renderer 的 `data-theme` 使用 `tokens.css` 独立着色。
@@ -191,7 +191,7 @@ src/
 - `recents.json` — 最近访问与固定项
 - `activity.jsonl` — 操作日志（见下）
 - `Partitions/account-<id>/` — 每个账号的 Chromium 会话数据（cookie、localStorage 等）
-- `ai-config.json` — AI 设置（`version: 5`）：provider、model、baseUrl、key 存储方式、密钥命令、Bedrock 的认证方式 / 账号 id / region、保留期、预算、`readPage`（v4）、`quickReplies`（v5，默认 `true`）。不含 key 和凭证；旧版本文件读入时缺的字段补默认值（`migrateAiConfig`）
+- `ai-config.json` — AI 设置（`version: 7`）：provider、model、baseUrl、key 存储方式、密钥命令、Bedrock 的认证方式 / 账号 id / region、保留期、预算、`readPage`（v4）、`quickReplies`（v5，默认 `true`）、`impactAnalysis`（v6，默认 `true`）、`scriptMaxMinutes`（v7，默认 5，主进程限制到 1–30 分钟）。不含 key 和凭证；旧版本文件读入时缺的字段补默认值（`migrateAiConfig`）
 - `ai-keys.json` — LLM API key 的 safeStorage 密文（base64，按 provider），只在「加密保存」且 safeStorage 可信时写
 - `ai.sqlite`（及 `-wal` / `-shm`）— AI 对话（完整的 pi 消息，含已脱敏、已裁剪的工具结果）和审计日志
 
@@ -246,8 +246,8 @@ M4 新增的文件：`changes/dynamodb.ts`（DynamoDB UpdateTable）、`changes/
 1. 先解析配置：provider / model（`resolveModel`，自定义端点每次按配置重新注册），取 key（密钥命令模式下每次运行跑一次，缓存在内存）。缺什么就直接 reject（同时 toast），这时什么都没创建。
 2. 新对话就建一条 `conversations` 记录（标题取消息前 40 字，脱敏）。同一对话同时只能有一个运行。
 3. 建 pi `Agent`：system prompt（`prompt.ts`：账号名 / id / role / 类型、当前 region、模式（只读 / 可提出变更，按账号**当时**的 `aiAllowWrite`、`production`）、时间、当前页面（见「当前页面」））每次重算；`messages` 是该对话存储的完整记录；工具是 `buildReadTools` +（允许时）`read_current_page` + `render_card` + `propose_change` +（`quickReplies` 开启时）`suggest_replies`，闭包里绑定了**这个对话的账号**，不读「当前活动账号」，运行中切账号也不会打到别的账号上。region 默认取该账号当前标签页 URL 的 `region=`（不在 15 个 region 里时用账号默认 region）。
-4. 事件：`text_delta` → `text-delta`；`tool_execution_start/end` → `tool-start`（「正在查询 EC2 实例…」）/ `tool-end`（ok + 一行摘要）；`render_card` 不发 `tool-start`，而是从 `toolcall_start` 起发 `card-pending`（骨架），成功后发 `card`（失败照常 `tool-end`，面板显示成失败的工具行）；`suggest_replies` 不发 `tool-start` / `tool-end`（没有工具行），结束时发 `replies`（主进程从工具结果里重新校验过的选项）；每条消息结束时写进 SQLite（用户、助手、工具结果，所以停止或崩溃也保留已有内容），助手消息结束后推一次 `usage`。最后推 `done`，面板据此重新拉 `ai:history`。排队的卡片回复（见下文「卡片」）紧接着用同一个模型和 key 开下一轮，中间不发 `done`。
-5. 限额（`service.ts` 的 `LIMITS`）：每条消息最多 40 次工具调用（超了 `beforeToolCall` 拦下；一个 `run_script` 算 1 次，不管脚本里调了多少次 `aws()`，它有自己的限额，见「脚本」）、最多 20 轮带工具调用的 LLM 往返（`finishTurn` 结束）、整个运行 5 分钟超时（abort；等审批的时间不算）。触到次数上限、或一轮结束时剩不到 30 秒（`landingMs`）不是硬停：推一条 `note`（「已达到步骤上限，以下基于已有结果」；存档里是隐藏的 `LIMIT_REQUEST` 回合），再跑一轮所有工具调用都被拦下的收尾，让模型根据已有结果回答。它和「没有文字回复」的 `ANSWER_REQUEST` 共用每轮一次的提醒；收尾仍没有文字才推 `error`。
+4. 事件：`text_delta` → `text-delta`；`tool_execution_start/end` → `tool-start`（「正在查询 EC2 实例…」）/ `tool-end`（ok + 一行摘要）；`render_card` 不发 `tool-start`，而是从 `toolcall_start` 起发 `card-pending`（骨架），成功后发 `card`（执行失败发 `tool-end`，Stop 不发）；`suggest_replies` 不发 `tool-start` / `tool-end`（没有工具行），结束时发 `replies`（主进程从工具结果里重新校验过的选项）；每条消息结束时写进 SQLite（用户、助手、工具结果，所以停止或崩溃也保留已有内容），助手消息结束后推一次 `usage`。最后推 `done`，面板据此重新拉 `ai:history`。排队的卡片回复（见下文「卡片」）紧接着用同一个模型和 key 开下一轮，中间不发 `done`。
+5. 限额（`service.ts` 的 `LIMITS`）：每条消息最多 40 次工具调用（一个 `run_script` 算 1 次）、20 轮带工具调用的 LLM 往返；模型与编排时间最多 5 分钟（工具执行和审批等待不计入；模型流的 60 秒首事件 / 90 秒空闲看门狗独立生效）；工具累计执行最多 60 分钟（审批等待不计入）。触到次数或工具时间上限、或一轮结束时剩不到 30 秒（`landingMs`）会推一条安静的 `note`（「已达到步骤上限，以下基于已有结果」；存档里是隐藏的 `LIMIT_REQUEST` 回合），再跑一轮所有工具调用都被拦下的收尾；工具时间上限的拒绝结果是「工具累计运行时间已达上限」。它和「没有文字回复」的 `ANSWER_REQUEST` 共用每轮一次的提醒；收尾仍没有文字才推 `error`。
 6. 上下文：`transformContext` 调 `compactContext` 再 `mergeUserTurns`（主进程不跑模型直接写进记录的 `[proposal_result]` 之后紧跟用户消息时，合成一条，有的 provider 不接受连续两条用户消息），最近 20 轮完整保留，更早的工具结果换成占位；估算 token 超过模型上下文的 60% 时，先占位最老的工具结果，再丢最老的整轮（system 和最新一轮永远保留）。
 7. abort：`ai:abort` → `agent.abort()`，共享的 signal 也会中止正在进行的 AWS 调用；中止的回复保留已收到的部分，标「已停止」。pi 重放历史时会跳过中止 / 出错的助手消息，并给没有结果的工具调用补占位结果。
 8. 出错：provider 错误（401、429…）记在对话里（面板里那条回复显示错误）并 toast；超时、步骤上限、没有文字回复等运行错误也写进消息历史，重载后仍显示错误和重试；运行前的配置错误由 `ai:send` reject，面板就地显示并把输入还给用户。
@@ -321,13 +321,26 @@ tier B 的读（`aws_read`）在 `ApprovalStore.request` 上**暂停**：
 - `JSON` 和 ES 内置对象。没有 `fs`、网络、`require`、`import()`（没有模块加载器）、`setTimeout`、`process`；没有 `sleep`。
 - 代码是 async 函数的函数体，`return` 的值（JSON）就是结果。
 
-**限额**（`SCRIPT_LIMITS`）：代码 ≤ 8000 字符；墙钟 60 秒（`ScriptClock`：等审批的时间不算；忙循环由 QuickJS 的中断回调停下，只在等调用的脚本由 200 ms 的 watch 定时器停下）；内存 64 MB（`setMemoryLimit`）；栈 192 KB（`setMaxStackSize`，再大的话普通递归会先撑爆 V8 的栈）；每个脚本最多 300 次 `aws()`、同时 8 个；返回值读回主进程前 ≤ 1 MB，之后和其他工具一样 `shapeData` 裁剪到 12 KB（带 `truncated`），放进 `<aws_data source="run_script">` 围栏（错误信息和日志也在围栏里：它们可能引用 AWS 数据）。
+**限额**：
+
+| 范围 | 上限 | 计时方式 |
+| --- | --- | --- |
+| 每条消息的模型与编排 | 5 分钟 | 工具执行、审批等待暂停；另有 20 轮 / 40 次工具调用上限 |
+| 每条消息的工具执行合计 | 60 分钟 | 审批等待暂停；`run_script` 用剩余时间与用户设置中的较短者；剩余不足 5 秒时拒绝后续工具并收尾 |
+| 单个 `run_script` 墙钟 | AI 设置可选 1–30 分钟，默认 5 分钟 | 等审批暂停；等待 `aws()` 的时间照计 |
+| 单个 `run_script` 连续同步计算 / 累计本地计算 | 2 秒 / 60 秒 | 等待 `aws()` 的时间不计入本地计算 |
+
+QuickJS 在独立的 `worker_threads` Worker 中运行。Worker 线程有完整 Node 能力；`env: {}` 只隐藏 `process.env`，不限制文件、网络或进程访问。Worker 用于保持主线程响应，并让失控脚本可以被终止；安全边界仍是 QuickJS / WASM。若 QuickJS 被突破，攻击代码会得到 Worker 线程的主进程文件、网络和进程权限（但没有 Electron API），与先前 QuickJS 在主线程运行时相同。更强的隔离可留待 `utilityProcess` 加 OS 沙箱或 Node permission model。主进程把 Worker 视为不可信：只接受首次 `ready`，验证 `aws()` 的 id、名称、JSON 对象参数及 region，拒绝参数中的危险键并限制请求排队及消息总数；Worker 将结果发成 JSON 文本，主进程在解析前检查长度，只接受有限大小的 JSON 值、短错误、已知 cause 和自己收集的有限日志。这些校验用于防范 Worker 的程序错误并限制资源占用，不构成安全边界；完全被攻破的 Worker 仍有上述完整 Node 权限。请求仍经 `readCall` 做分类、审批、脱敏和结果大小限制；普通 QuickJS 脚本只能通过提供的 `aws()` 函数查询。墙钟从 Worker 完成 QuickJS 加载后开始，启动另有 15 秒超时。QuickJS 的中断错误可能被同步调用的 async 函数或 Promise executor 吞掉，所以主进程用进入 VM / 让出 VM 的消息监测连续运行；超出 2 秒加 150 ms 宽限后，再让事件循环处理待收消息，然后复查并 `worker.terminate()`。Stop 和墙钟到期也由主进程终止 Worker，并中止进行中的读取。累计本地计算由 Worker 报告值与主进程观测的进入/让出间隔取最大值。
+
+脚本另有代码 ≤ 8000 字符、内存 64 MB（`setMemoryLimit`）、栈 192 KB（`setMaxStackSize`）、最多 300 次 `aws()` 且同时最多 8 个。Worker 内返回值上限 1 MB，发给主进程前把超过 12 KB 的返回值替换为截断提示，之后和其他工具一样用 `shapeData` 裁剪（带 `truncated`），放进 `<aws_data source="run_script">` 围栏（错误信息和日志也在围栏里：它们可能引用 AWS 数据）。忙循环通常由 QuickJS 中断回调停下；主进程的 25 ms 看门狗负责强制终止。Promise 作业队列每批最多执行 100 个作业，然后让 Worker 事件循环处理消息。脚本 CPU 最多累计 60 秒，在独立线程上运行，主进程保持响应。脚本受工具累计时间限制；其它工具各有自己的超时，因此单条消息约 80 分钟不是严格上界。20 轮 / 40 次工具调用仍有效。
 
 **宿主栈溢出**：QuickJS 的栈检查管不到所有 C 递归（深层嵌套的 `JSON.stringify` / `JSON.parse` 在任何栈上限下都会让 V8 抛 `RangeError`）。所有从主进程进入 QuickJS 的调用都经过 `inVm`：宿主异常 → 这次脚本失败（「嵌套或递归太深」），实例标记 `poisoned`，不再碰、也不 `dispose`（release 版开着断言，状态不一致时 dispose 会 abort），直接丢掉；下一个脚本是新实例。
 
-**停止**：pi 的 signal 中止 → 立即 `finish`：内部 `AbortController` 中止进行中的 AWS 调用和等待中的审批，`dispose` 运行时（正在 QuickJS 调用里时等它返回）；之后才到的结果直接丢弃。
+**停止**：pi 的 signal 中止 → 主进程立即停止接收该脚本的调用、中止进行中的 AWS 调用和等待中的审批，并 `worker.terminate()`；之后才到的结果直接丢弃。
 
-**审批**：脚本的 tier B 调用用普通审批卡（`toolCallId` 是这次 `run_script`，`reason` 是工具参数里的 `reason`），`why` 多一行「来自脚本（run_script）」。限额规则不变（每条消息 3 张、每账号同时 3 张、每分钟 6 次、拒绝冷却 10 分钟、「一直允许」）。普通读（`sessionAllowed`）在**这个脚本里**按 `service:action:region` 只问一次：允许后，脚本里后面的同类调用直接用各自的参数执行，同时在等这张卡的调用等它的结果；敏感读取、带 URL / 外部账号 / 别人的桶的调用每次都问。等卡片的时间同时暂停运行的 5 分钟和脚本的 60 秒。`details.approvals` 存下所有卡片，`history.ts` 把它们放在工具行后面；`forToolCall` 优先返回等待中的那张；渲染进程只要还有一张在等，工具行就保持「等待审批」。
+**计时与进度**：任何工具执行期间都暂停主对话的 5 分钟计时；工具与审批用引用计数，最后一项结束后按剩余时间恢复。工具行每秒显示扣除审批等待后的「已运行 N 秒」，脚本还显示「已调用 M 次」；只有 30 秒、60 秒及后续整分钟通过 `aria-live` 提示。脚本超时结果含所设时限、成功完成的调用数和已发起的调用数。主对话工具时间最多约 60 分钟，另加 5 分钟模型与编排时间和最多 3 张审批卡各 5 分钟的等待。其它工具由各自超时控制（AWS 请求见 `aws.ts`）。主进程崩溃，以及外部 SDK 未遵守取消信号不受这些软计时器保证。
+
+**审批**：脚本的 tier B 调用用普通审批卡（`toolCallId` 是这次 `run_script`，`reason` 是工具参数里的 `reason`），`why` 多一行「来自脚本（run_script）」。限额规则不变（每条消息 3 张、每账号同时 3 张、每分钟 6 次、拒绝冷却 10 分钟、「一直允许」）。普通读（`sessionAllowed`）在**这个脚本里**按 `service:action:region` 只问一次：允许后，脚本里后面的同类调用直接用各自的参数执行，同时在等这张卡的调用等它的结果；敏感读取、带 URL / 外部账号 / 别人的桶的调用每次都问。等卡片的时间同时暂停运行的 5 分钟和脚本的所设时限。`details.approvals` 存下所有卡片，`history.ts` 把它们放在工具行后面；`forToolCall` 优先返回等待中的那张；渲染进程只要还有一张在等，工具行就保持「等待审批」。
 
 **显示与审计**：Activity 里的一步「运行脚本 · N 次调用」（失败时「· 超时 / 出错 / 已停止 / 内存超限」）；点开这一步是调用芯片（`s3:GetBucketTagging ×11`，`details.calls`，最多 50 项）和只读的代码（`<pre>`，纯文本，最高 220px、内部滚动；来自工具调用参数，`tool-start` 事件的 `code`，读历史时重新截到 8000 字）。审计只有一行 `tool_call`：`tool: run_script`、`ok`、`ms`、`calls`、`actions`（`{ "s3:GetBucketTagging": 11 }`）、`codeHash`（sha256 前 16 位）、`codeChars`、失败原因（`timeout` / `memory` / `stopped` / `error` / `too-long`，不记错误文字）；**没有代码、参数和结果**。被拒的调用照常另记 `tool_refused`（`tool: run_script`）。
 
@@ -559,7 +572,7 @@ npm run -s activity | claude -p "这是我用 AWS console 的操作日志摘要�
 - `parser.ts` 只认识 21 个服务的资源详情页；其他页面按路由记成页面条目，名字是路由本身（如 `jobs/details/my-job`），不如资源条目好读。
 - 只支持 `catalog.ts` 里列出的 15 个 region。
 - AI 变更：只覆盖上面写表里的 30 个操作（没有 Lambda 新建 / 删除、没有「兜底」adapter）；待确认的提案只在内存里，重启即失效；参考价是手工表；CloudFormation 只能更新已有 stack、不能授予 capabilities，模板按文本扫描（会误伤，例如参数名叫 `Role`）；权限模拟只是参考（不含资源策略、SCP 以外的上下文条件；带路径的角色模拟不了）；通用标签只模拟 `tag:*` 权限；所有 adapter 只对假 AWS 测过。渲染进程被攻破（XSS）时等于用户本人：两步确认和 1 秒延迟只在界面里，主进程只收一次确认调用（CSP 是真正的边界）。卡片点击排队期间退出应用，这次点击会丢掉，重开后卡片恢复成可点（记录里没有它的 `[card_action]`）。工具只覆盖白名单里的 11 个服务，模型目录价格没有和官网逐个核对，费用是估算。自定义端点的上下文长度固定按 128k / 输出 8k 处理。「模型是否支持工具调用」只在「测试连接」里提示，不会阻止使用。
-- AI 脚本（`run_script`）跑在主进程的线程上：忙循环在中断回调停下它之前会占住主进程（测试里是毫秒级）；没有在打包后的 Electron / `app.asar` 里实际运行过（见 [plans/ai-run-script.md](plans/ai-run-script.md)「没验证」）。
+- AI 脚本（`run_script`）跑在独立 Worker 线程上；即使 QuickJS 的中断被脚本吞掉，主进程也能终止 Worker，保持 Stop 响应。每段脚本累计本地计算最多 60 秒。构建出的 Worker 和相邻 chunks 已打进临时 asar，并用 Electron 运行时执行本地脚本成功；完整图形界面尚未手工验收。
 - 没有自动更新、遥测、代码签名 / 公证。测试（`npm test`，vitest）只覆盖纯逻辑：URL 解析、开窗决策、快捷键、续期调度、最近访问记录、凭证命令（校验 / 占位符 / 执行 / 带噪声的 JSON 提取 / PATH 标记解析）、账号迁移与草稿校验、测试连接（步骤 / 跳过 / 超时 / 身份校验 / 时长文案）、提示队列（去重 / 上限 / 计时 / 悬停暂停），以及 AI：action 分类、结果脱敏 / 裁剪 / 围栏、上下文压缩、费用、显示项、配置与 IPC 校验、只读工具（假 AWS）、`AiService` 端到端（pi 的 faux provider：工具调用 → 结果 → 回答、abort、轮数 / 调用次数上限、敏感读取被拒、key 不出现在事件和数据库里）、markdown 净化、面板事件合并，以及卡片：schema 接受 / 拒绝表、正则守卫、点击校验、`render_card` → 点击 → 下一轮收到 `[card_action]`、非法卡片自我修正、排队 / 停止 / 并发点击、过期与替代、历史重载；`CardView` 用 `renderToStaticMarkup` 测纯文本、system-only 块、完整参数、分页、禁用态；对话切换与失败恢复用纯状态函数测试；以及变更：禁止 / 不支持 / 允许的表驱动分类、每个 adapter 的 golden diff / 风险 / 后果、提案生命周期（hash 篡改、TTL、nonce 重用、并发确认、错对话、策略关闭、登录变化、漂移、输入不一致、取消、限额、去重、生产升级、确认前的写保护）、faux 模型端到端（确认前 AWS 写调用为 0、确认后正好 1 次、注入、模型声称已批准、禁止操作、排队的结果回灌）、审计摘要、`ProposalCard` 渲染。当前 Vitest 没有安装 DOM 测试环境，因此审批卡焦点与键盘事件、输入框回车不会批准的约束只测纯按键判定和静态标记，尚无挂载后的事件分发测试。界面和 Electron 行为（包括提示层的定位、层级和点击穿透、AI 面板布局）没有自动化测试。`npm run ai-smoke` 在断网守卫下用真实的 `providers.ts` 跑一遍 Agent 和「测试连接」。
 
 ### AI 面板 P2 前端交互

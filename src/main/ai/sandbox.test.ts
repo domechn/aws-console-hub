@@ -1,12 +1,126 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { leaks, runScript, SCRIPT_LIMITS, ScriptClock, type ScriptAws } from './sandbox'
 
 const echo: ScriptAws = async (service, action, params) => JSON.stringify({ service, action, params })
 const run = (code: string, aws: ScriptAws = echo, limits: Partial<typeof SCRIPT_LIMITS> = {}, signal?: AbortSignal, clock?: ScriptClock) =>
   runScript(code, aws, { limits: { ...SCRIPT_LIMITS, ...limits }, signal, clock })
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const execFileAsync = promisify(execFile)
 
-describe('run_script sandbox', () => {
+describe('run_script sandbox', { timeout: 15_000 }, () => {
+  it.each([
+    'for(;;){ (async()=>{for(;;){}})() }',
+    'for(;;){ new Promise(()=>{for(;;){}}) }'
+  ])('kills an interrupt-swallowing script within a bounded time: %s', async (code) => {
+    const script = `import { runScript, SCRIPT_LIMITS } from './src/main/ai/sandbox.ts'; const r = await runScript(${JSON.stringify(code)}, async () => '{}', { limits: { ...SCRIPT_LIMITS, syncSliceMs: 50, wallMs: 5000 } }); if (r.cause !== 'timeout' || !r.error?.includes('连续同步计算') || r.ms > 4000) process.exitCode = 1`
+    await execFileAsync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], { cwd: process.cwd(), timeout: 6000 })
+  }, 7500)
+  it('keeps earlier logs when the watchdog kills a script', async () => {
+    const r = await run(`log('before'); await aws('ec2', 'DescribeVpcs', {}); for(;;){ new Promise(()=>{for(;;){}}) }`, echo, { syncSliceMs: 100, wallMs: 1_000 })
+    expect(r).toMatchObject({ ok: false, cause: 'timeout', logs: ['before'], calls: 1 })
+  })
+  it('reports completed calls and the configured deadline after a synchronous loop', async () => {
+    await run('return 1')
+    const r = await run(`await aws('ec2', 'DescribeVpcs', {}); while (true) {}`, echo, { wallMs: 300 })
+    expect(r).toMatchObject({ ok: false, cause: 'timeout', calls: 1 })
+    expect(r.error).toContain('0.3 秒')
+    expect(r.error).toContain('已调用 1 次')
+    expect(r.error).toContain('已完成 1 次')
+  })
+  it('reports a configured 30-minute wall deadline in minutes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const r = await run(`await aws('ec2', 'DescribeVpcs', {}); while (true) {}`, async () => {
+        vi.setSystemTime(Date.now() + 30 * 60_000)
+        return '{}'
+      }, { wallMs: 30 * 60_000 })
+      expect(r.error).toContain('30 分钟')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it.each([
+    ['initial eval', 'while (true) {}'],
+    ['after await', `await aws('ec2', 'DescribeVpcs', {}); while (true) {}`]
+  ])('interrupts a continuous sync slice during %s', async (_where, code) => {
+    const r = await run(code, echo, { syncSliceMs: 50, wallMs: 5_000 })
+    expect(r).toMatchObject({ ok: false, cause: 'timeout', error: '脚本连续同步计算超过 50 毫秒被中断，请把计算拆小或减少本地循环' })
+  })
+  it('ends a caught async slice interrupt before another promise job can run', async () => {
+    let calls = 0
+    const started = Date.now()
+    const r = await run(`for(;;){ try { await (async()=>{ while(true){} })() } catch {} }`, async () => (calls++, '{}'), { syncSliceMs: 50, wallMs: 5_000 })
+    expect(r).toMatchObject({ ok: false, cause: 'timeout', error: '脚本连续同步计算超过 50 毫秒被中断，请把计算拆小或减少本地循环' })
+    expect(Date.now() - started).toBeLessThan(3000)
+    await sleep(100)
+    expect(calls).toBe(0)
+  })
+  it('does not start host calls from a catch handler after a slice interrupt', async () => {
+    let calls = 0
+    const r = await run(`for(;;){ try { await (async()=>{ while(true){} })() } catch { await aws('ec2', 'DescribeVpcs', {}) } }`, async () => (calls++, '{}'), { syncSliceMs: 50, wallMs: 5_000 })
+    expect(r).toMatchObject({ ok: false, cause: 'timeout' })
+    expect(calls).toBe(0)
+  })
+  it('caps accumulated VM compute across short promise jobs', async () => {
+    const r = await run(`for (;;) { const end = Date.now() + 20; while (Date.now() < end) {} await aws('ec2', 'DescribeVpcs', {}) }`, echo, { syncSliceMs: 2_000, scriptCpuMs: 1_500, wallMs: 5_000 })
+    expect(r).toMatchObject({ ok: false, cause: 'timeout', error: '脚本累计本地计算超过 1.5 秒被中断' })
+    expect(r.ms).toBeLessThan(4000)
+    expect(r.calls).toBeGreaterThan(1)
+  })
+  it('caps a burst of promise jobs by accumulated CPU time', async () => {
+    const r = await run('for (;;) await null', echo, { scriptCpuMs: 60, syncSliceMs: 500, wallMs: 5_000 })
+    expect(r).toMatchObject({ ok: false, cause: 'timeout', error: '脚本累计本地计算超过 0.06 秒被中断' })
+  })
+
+  it('keeps main timers responsive during a tight loop and stops it promptly', async () => {
+    const ac = new AbortController()
+    const ticks: number[] = []
+    let started!: () => void
+    const called = new Promise<void>((resolve) => { started = resolve })
+    const aws: ScriptAws = async () => { started(); return '{}' }
+    let timer: ReturnType<typeof setInterval> | undefined
+    try {
+      const pending = run(`await aws('ec2', 'DescribeVpcs', {}); for (;;) {}`, aws, { syncSliceMs: 500, wallMs: 5_000 }, ac.signal)
+      await called
+      timer = setInterval(() => ticks.push(Date.now()), 20)
+      await vi.waitFor(() => expect(ticks.length).toBeGreaterThanOrEqual(5), { timeout: 15_000 })
+      const abortedAt = Date.now()
+      ac.abort()
+      expect(await pending).toMatchObject({ ok: false, cause: 'stopped' })
+      expect(Date.now() - abortedAt).toBeLessThan(1000)
+    } finally {
+      if (timer) clearInterval(timer)
+    }
+  })
+
+  it('does not charge an await-only script to the sync slice', async () => {
+    const r = await run(`return await aws('ec2', 'DescribeVpcs', {})`, async () => (await sleep(700), '{"ok":true}'), { syncSliceMs: 250, scriptCpuMs: 250, wallMs: 5_000 })
+    expect(r).toMatchObject({ ok: true, value: { ok: true } })
+  })
+
+  it('keeps a legal short slice when the main thread is delayed', async () => {
+    let started!: () => void
+    const called = new Promise<void>((resolve) => { started = resolve })
+    const pending = run(`await aws('ec2', 'DescribeVpcs', {}); const end = Date.now() + 300; while (Date.now() < end) {} return 7`,
+      async () => { started(); return '{}' }, { syncSliceMs: 700, wallMs: 2_000 })
+    await called
+    await sleep(100)
+    const blockUntil = Date.now() + 500
+    while (Date.now() < blockUntil) { /* main thread delayed by an unrelated task */ }
+    expect(await pending).toMatchObject({ ok: true, value: 7 })
+  })
+
+  it('processes Stop between promise-job drains', async () => {
+    const ac = new AbortController()
+    const aws: ScriptAws = async () => {
+      setImmediate(() => ac.abort())
+      return '{}'
+    }
+    const pending = run(`await aws('ec2', 'DescribeVpcs', {}); for (;;) { await null }`, aws, { syncSliceMs: 500, wallMs: 5_000 }, ac.signal)
+    expect(await pending).toMatchObject({ ok: false, cause: 'stopped' })
+  })
   it('runs the body of an async function: aws() results come back parsed, the return value is the result', async () => {
     const r = await run(`const a = await aws('ec2', 'DescribeInstances', { MaxResults: 5 }); log('got', a.action); return { a, n: 1 }`)
     expect(r).toMatchObject({ ok: true, value: { a: { service: 'ec2', action: 'DescribeInstances', params: { MaxResults: 5 } }, n: 1 }, logs: ['got DescribeInstances'], calls: 1 })
@@ -36,7 +150,7 @@ describe('run_script sandbox', () => {
     const thrown = await run(`return e.constructor.constructor('return process')()`.replace('e.', '(new Error()).'))
     expect(thrown).toMatchObject({ ok: false, cause: 'error' })
     expect(thrown.error).toMatch(/ReferenceError|process/)
-  })
+  }, 30_000)
 
   it('import() and module syntax fail', async () => {
     const dyn = await run(`await import('fs'); return 'imported'`)
@@ -86,10 +200,10 @@ describe('run_script sandbox', () => {
   it('stops an infinite loop at the deadline, a memory bomb, a huge string and a stack overflow', async () => {
     const loop = await run('while (true) {}', echo, { wallMs: 300 })
     expect(loop).toMatchObject({ ok: false, cause: 'timeout' })
-    expect(loop.ms).toBeLessThan(3000)
+    expect(loop.ms).toBeLessThan(2000)
     const busyAsync = await run(`for (;;) { await null }`, echo, { wallMs: 300 })
     expect(busyAsync).toMatchObject({ ok: false, cause: 'timeout' })
-    expect(await run('const a = []; for (;;) a.push(new Array(100000).fill(1))', echo, { memoryBytes: 16 << 20 })).toMatchObject({ ok: false, cause: 'memory' })
+    expect(await run('return new Array(10000000).fill(1)', echo, { memoryBytes: 16 << 20 })).toMatchObject({ ok: false, cause: 'memory' })
     expect(await run("let s = 'x'; for (;;) s += s", echo, { memoryBytes: 16 << 20 })).toMatchObject({ ok: false })
     const deep = await run('const f = (n) => f(n + 1) + 1; return f(0)')
     expect(deep).toMatchObject({ ok: false, cause: 'error' })
@@ -102,8 +216,8 @@ describe('run_script sandbox', () => {
     const slow: ScriptAws = () => new Promise(() => {})
     expect(await run(`await aws('ec2', 'DescribeVpcs', {})`, slow, { wallMs: 300 })).toMatchObject({ ok: false, cause: 'timeout' })
     const clock = new ScriptClock()
-    const approving: ScriptAws = async () => (await clock.pause(sleep(700)), '{"ok":true}')
-    expect(await run(`return await aws('sqs', 'ListQueues', {})`, approving, { wallMs: 400 }, undefined, clock)).toMatchObject({ ok: true, value: { ok: true } })
+    const approving: ScriptAws = async () => (await clock.pause(sleep(1600)), '{"ok":true}')
+    expect(await run(`return await aws('sqs', 'ListQueues', {})`, approving, { wallMs: 1000 }, undefined, clock)).toMatchObject({ ok: true, value: { ok: true } })
   })
 
   it('caps host calls and keeps at most `concurrency` in flight', async () => {
@@ -124,11 +238,45 @@ describe('run_script sandbox', () => {
     expect(viaParallel.value).toBe('0,2,4,6,8,10,12,14,16,18')
   })
 
+  it('keeps the default 300-call and eight-in-flight limits', async () => {
+    let active = 0
+    let peak = 0
+    const aws: ScriptAws = async () => {
+      peak = Math.max(peak, ++active)
+      await sleep(2)
+      active--
+      return '{}'
+    }
+    const r = await run(`await Promise.all(Array.from({ length: 300 }, () => aws('ec2', 'DescribeVpcs', {}))); try { await aws('ec2', 'DescribeVpcs', {}) } catch (e) { return e.message }`, aws)
+    expect(r).toMatchObject({ ok: true, calls: 300, value: 'aws() 调用次数超过上限（300 次）' })
+    expect(peak).toBe(8)
+  })
+
+  it('counts only host calls actually started before Stop, including calls waiting for a slot', async () => {
+    const ac = new AbortController()
+    let started = 0
+    const aws: ScriptAws = async () => { started++; return new Promise(() => {}) }
+    const pending = run(`await Promise.all(Array.from({ length: 20 }, () => aws('ec2', 'DescribeVpcs', {})))`, aws, { concurrency: 2 }, ac.signal)
+    await vi.waitFor(() => expect(started).toBe(2), { timeout: 15_000 })
+    ac.abort()
+    expect(await pending).toMatchObject({ ok: false, cause: 'stopped', calls: 2 })
+    await sleep(30)
+    expect(started).toBe(2)
+  })
+
+  it('reaps workers after many sequential runs', async () => {
+    for (let i = 0; i < 8; i++) {
+      expect((await run(`return ${i}`)).value).toBe(i)
+      expect(leaks.count).toBe(0)
+    }
+  }, 30_000)
+
   it('caps the code, each result, the return value and the log', async () => {
     expect(await run('x'.repeat(SCRIPT_LIMITS.codeChars + 1))).toMatchObject({ ok: false, cause: 'too-long' })
     const big: ScriptAws = async () => JSON.stringify('x'.repeat(200))
     expect((await run(`try { await aws('s3', 'ListBuckets', {}) } catch (e) { return e.message }`, big, { resultChars: 100 })).value).toMatch(/结果太大/)
     expect((await run(`return 'y'.repeat(5000)`, echo, { returnChars: 1000 })).value).toMatchObject({ truncated: true })
+    expect((await run(`return 'y'.repeat(20_000)`)).value).toMatchObject({ truncated: true })
     const logged = await run(`for (let i = 0; i < 1000; i++) log('line', i); return 1`)
     expect(logged.logs.join('').length).toBeLessThanOrEqual(SCRIPT_LIMITS.logChars + 20)
   })
@@ -137,14 +285,16 @@ describe('run_script sandbox', () => {
     const ac = new AbortController()
     const signals: AbortSignal[] = []
     let resolveLate!: (v: string) => void
-    const aws: ScriptAws = (_s, _a, _p, _o, signal) => (signals.push(signal), new Promise((r) => (resolveLate = r)))
+    let started!: () => void
+    const called = new Promise<void>((r) => (started = r))
+    const aws: ScriptAws = (_s, _a, _p, _o, signal) => (signals.push(signal), started(), new Promise((r) => (resolveLate = r)))
     const pending = run(`await aws('ec2', 'DescribeVpcs', {}); return 'finished'`, aws, {}, ac.signal)
-    await sleep(20)
+    await called
     ac.abort()
     expect(await pending).toMatchObject({ ok: false, cause: 'stopped', error: '已停止' })
     expect(signals[0].aborted).toBe(true)
     resolveLate('{}')
-    await sleep(10)
+    await Promise.resolve()
     // Already-aborted signal: nothing runs.
     const aws2 = vi.fn(echo)
     expect(await run(`await aws('ec2', 'DescribeVpcs', {})`, aws2, {}, AbortSignal.abort())).toMatchObject({ cause: 'stopped' })

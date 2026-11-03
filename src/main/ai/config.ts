@@ -4,7 +4,7 @@ import { REGIONS } from '../../shared/catalog'
 import { AI_PROVIDERS, AUDIT_RETENTION_LIMITS, CUSTOM_PROVIDER_ID, type AiBudget, type AiConfig, type AiKeyMode, type BedrockAuth, type ConversationRetention } from '../../shared/ai'
 
 export const DEFAULT_AI_CONFIG: AiConfig = {
-  version: 6,
+  version: 7,
   provider: '',
   model: '',
   baseUrl: null,
@@ -19,7 +19,8 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   budget: { monthlyTokens: null, monthlyUsd: null, block: false },
   readPage: true,
   quickReplies: true,
-  impactAnalysis: true
+  impactAnalysis: true,
+  scriptMaxMinutes: 5
 }
 
 const RETENTIONS: ConversationRetention[] = [0, 30, 90, null]
@@ -117,18 +118,25 @@ export function mergeAiConfig(prev: AiConfig, input: unknown, accountExists: (id
     if (typeof i.impactAnalysis !== 'boolean') throw new Error('无效的影响分析设置')
     next.impactAnalysis = i.impactAnalysis
   }
+  if (i.scriptMaxMinutes !== undefined) {
+    if (typeof i.scriptMaxMinutes !== 'number' || !Number.isFinite(i.scriptMaxMinutes)) throw new Error('无效的脚本运行时间')
+    next.scriptMaxMinutes = scriptMinutes(i.scriptMaxMinutes)
+  }
   if (next.provider !== CUSTOM_PROVIDER_ID) next.baseUrl = null
   if (next.keyMode === 'command' && !next.keyCommand) throw new Error('请填写密钥命令')
   return next
 }
 
+const scriptMinutes = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.max(1, Math.min(30, Math.floor(v))) : 5
+
 /**
  * A file from an older version: v1 had no Bedrock fields, v2 no retention or budget, v3 no readPage, v4 no
- * quickReplies, v5 no impactAnalysis; the defaults fill them in.
+ * quickReplies, v5 no impactAnalysis, v6 no script duration; the defaults fill them in.
  */
 export function migrateAiConfig(stored: Partial<AiConfig> | Record<string, unknown>): AiConfig {
   const flag = (k: 'readPage' | 'quickReplies' | 'impactAnalysis'): boolean => (typeof stored[k] === 'boolean' ? (stored[k] as boolean) : DEFAULT_AI_CONFIG[k])
-  return { ...DEFAULT_AI_CONFIG, ...stored, readPage: flag('readPage'), quickReplies: flag('quickReplies'), impactAnalysis: flag('impactAnalysis'), version: 6 }
+  return { ...DEFAULT_AI_CONFIG, ...stored, readPage: flag('readPage'), quickReplies: flag('quickReplies'), impactAnalysis: flag('impactAnalysis'), scriptMaxMinutes: scriptMinutes(stored.scriptMaxMinutes), version: 7 }
 }
 
 /** userData/ai-config.json: provider, model, endpoint, key mode, Bedrock account and region. Never a key or credential. */

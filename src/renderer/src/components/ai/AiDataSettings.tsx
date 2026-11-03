@@ -29,6 +29,7 @@ export function AiDataSettings({ config, onConfig, onOpenAudit, onDataDeleted }:
   const [month, setMonth] = useState<MonthUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [auditDays, setAuditDays] = useState('')
+  const [scriptMinutes, setScriptMinutes] = useState('')
   const [tokens, setTokens] = useState('')
   const [usd, setUsd] = useState('')
   const [deleting, setDeleting] = useState(false)
@@ -44,6 +45,7 @@ export function AiDataSettings({ config, onConfig, onOpenAudit, onDataDeleted }:
   useEffect(() => {
     if (!config) return
     setAuditDays(String(config.auditRetentionDays))
+    setScriptMinutes(String(config.scriptMaxMinutes))
     setTokens(config.budget.monthlyTokens ? String(config.budget.monthlyTokens / 1e6) : '')
     setUsd(config.budget.monthlyUsd ? String(config.budget.monthlyUsd) : '')
   }, [config])
@@ -123,6 +125,25 @@ export function AiDataSettings({ config, onConfig, onOpenAudit, onDataDeleted }:
       )}
 
       <h3 className="modal-section">数据与隐私</h3>
+      <div className="modal-row">
+        <label>
+          脚本最长运行时间（分钟）
+          <input
+            type="number"
+            min={1}
+            max={30}
+            step={1}
+            value={scriptMinutes}
+            onChange={(e) => setScriptMinutes(e.target.value)}
+            onBlur={() => {
+              const value = Number(scriptMinutes)
+              if (scriptMinutes.trim() && Number.isFinite(value)) void save({ scriptMaxMinutes: value })
+              else setScriptMinutes(String(config.scriptMaxMinutes))
+            }}
+          />
+        </label>
+      </div>
+      <div className="modal-hint">默认 5 分钟，可设 1–30 分钟；等待你审批的时间不计入脚本限时。</div>
       <div className="modal-row">
         <label>
           对话保留

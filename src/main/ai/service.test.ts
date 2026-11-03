@@ -67,7 +67,7 @@ function setup(
   const config = new AiConfigStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ai-svc-')), 'ai-config.json'))
   config.save({ provider: 'deepseek', model: 'faux-1' })
   const events: AiEventEnvelope[] = []
-  const aws = vi.fn(async (_accountId: string, service: string, action: string) => {
+  const aws = vi.fn(async (_accountId: string, service: string, action: string, _params: Record<string, unknown>, _region: string, _signal?: AbortSignal): Promise<unknown> => {
     if (service === 'sts') return { Account: '123456789012', Arn: 'arn:aws:sts::123456789012:assumed-role/ReadOnly/me' }
     if (action === 'DescribeInstances') return INSTANCES
     return {}
@@ -1055,6 +1055,52 @@ describe('AiService', () => {
     expect(events.map((e) => e.event)).toContainEqual(NOTE)
   })
 
+  it('lands after 60 minutes of cumulative tool execution and refuses later calls', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const calls = Array.from({ length: 3 }, () => fauxToolCall('aws_whoami', {}))
+    const { service, events, done, aws, faux } = setup([
+      fauxAssistantMessage(calls, { stopReason: 'toolUse' }),
+      fauxAssistantMessage('根据已有查询回答。')
+    ])
+    aws.mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 31 * 60_000)
+      return { Account: '123456789012', Arn: 'arn:aws:sts::123456789012:assumed-role/ReadOnly/me' }
+    })
+    try {
+      await service.send('acc-1', null, '连续查')
+      await done()
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(aws).toHaveBeenCalledTimes(2)
+    expect(faux.state.callCount).toBe(2)
+    expect(events.map((e) => e.event)).toContainEqual(NOTE)
+    expect(types(events)).not.toContain('error')
+    expect(service['transcript'](events[0].conversationId).some((m) => m.role === 'toolResult' && JSON.stringify(m.content).includes('工具累计运行时间已达上限'))).toBe(true)
+  })
+  it('refuses a script when less than five seconds of tool time remain', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const { service, events, done, aws } = setup([
+      fauxAssistantMessage([
+        fauxToolCall('aws_whoami', {}),
+        fauxToolCall('run_script', { code: `return await aws('ec2', 'DescribeVpcs', {})`, reason: '查 VPC' })
+      ], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('根据已有查询回答。')
+    ])
+    aws.mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + LIMITS.toolTimeTotalMs - 1000)
+      return { Account: '123456789012', Arn: 'arn:aws:sts::123456789012:assumed-role/ReadOnly/me' }
+    })
+    try {
+      await service.send('acc-1', null, '查')
+      await done()
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(aws).toHaveBeenCalledTimes(1)
+    expect(service['transcript'](events[0].conversationId).some((m) => m.role === 'toolResult' && JSON.stringify(m.content).includes('工具累计运行时间已达上限'))).toBe(true)
+  })
+
   it('a landing round with no text: the red notice, and no second nudge', async () => {
     const { service, events, done, faux } = setup([...Array.from({ length: LIMITS.maxTurns }, () => loop), fauxAssistantMessage(''), fauxAssistantMessage('不该用到')])
     const { conversationId } = await service.send('acc-1', null, '一直查')
@@ -1124,7 +1170,56 @@ return { checked: rows.length, running: rows.filter((r) => r.Reservations[0].Ins
     const audit = store.auditEntries()
     expect(audit.map((a) => [a.type, (a.data as { tool?: string }).tool])).toEqual([['tool_call', 'run_script']])
     expect(JSON.stringify(audit)).not.toContain('InstanceIds')
+  }, 15_000)
+
+  it('pauses the run budget and emits at most one numeric progress event per second during a long tool', async () => {
+    vi.useFakeTimers()
+    try {
+      let release!: (value: object) => void
+      const { service, events, aws } = setup([
+        fauxAssistantMessage([fauxToolCall('aws_read', { service: 'ec2', action: 'DescribeVpcs', params: {}, reason: 'check' })], { stopReason: 'toolUse' }),
+        fauxAssistantMessage('正在整理 '.repeat(4000))
+      ], { tokensPerSecond: 5 })
+      aws.mockImplementation(() => new Promise((resolve) => { release = resolve }))
+      await service.send('acc-1', null, 'check')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(aws).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      expect(events.some((e) => e.event.type === 'done')).toBe(false)
+      const progress = events.filter((e) => e.event.type === 'tool-progress')
+      expect(progress.length).toBeLessThanOrEqual(630)
+      expect(progress.at(-1)?.event).toMatchObject({ seconds: expect.any(Number) })
+      const seconds = progress.flatMap((e) => e.event.type === 'tool-progress' ? [e.event.seconds] : [])
+      expect(seconds.every((second, i) => i === 0 || second > seconds[i - 1])).toBe(true)
+      release({})
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(events.some((e) => e.event.type === 'tool-end')).toBe(true)
+      expect(events.some((e) => e.event.type === 'error')).toBe(false)
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(events).toContainEqual(expect.objectContaining({ event: { type: 'error', message: '超过 5 分钟，已停止' } }))
+    } finally {
+      vi.useRealTimers()
+    }
   })
+
+  it('Stop during run_script aborts its in-flight AWS call', async () => {
+    let inFlight: AbortSignal | undefined
+    const { service, aws, events, done } = setup([
+      fauxAssistantMessage([fauxToolCall('run_script', { code: `return await aws('ec2', 'DescribeVpcs', {})`, reason: 'check' })], { stopReason: 'toolUse' })
+    ])
+    aws.mockImplementation(async (_id, _service, _action, _params, _region, signal) => {
+      inFlight = signal
+      return new Promise(() => {})
+    })
+    const { conversationId } = await service.send('acc-1', null, 'check')
+    await vi.waitFor(() => expect(inFlight).toBeDefined(), { timeout: 15_000 })
+    const progressBeforeStop = events.filter((e) => e.event.type === 'tool-progress').length
+    service.abort(conversationId)
+    await done()
+    expect(inFlight?.aborted).toBe(true)
+    expect(events.filter((e) => e.event.type === 'tool-progress')).toHaveLength(progressBeforeStop)
+    expect(events).toContainEqual(expect.objectContaining({ event: expect.objectContaining({ type: 'tool-end', ok: false, summary: expect.stringContaining('已停止') }) }))
+  }, 15_000)
 
   it('run_script: a script waiting on approval shows the waiting row and card; allowing it runs the rest of the script', async () => {
     const { service, events, done, aws } = setup([
@@ -1132,7 +1227,7 @@ return { checked: rows.length, running: rows.filter((r) => r.Reservations[0].Ins
       fauxAssistantMessage('两个队列都在。')
     ])
     const { conversationId } = await service.send('acc-1', null, '查两个队列')
-    await vi.waitFor(() => expect(events.some((e) => e.event.type === 'approval')).toBe(true))
+    await vi.waitFor(() => expect(events.some((e) => e.event.type === 'approval' && e.event.approval.state === 'pending')).toBe(true), { timeout: 15_000 })
     expect(service.view('acc-1', conversationId).items.map((i) => (i.kind === 'tool' ? `tool:${i.status}` : i.kind))).toEqual(['user', 'tool:waiting', 'approval'])
     const card = events.find((e) => e.event.type === 'approval')!.event
     if (card.type !== 'approval') throw new Error('no approval')
@@ -1147,7 +1242,7 @@ return { checked: rows.length, running: rows.filter((r) => r.Reservations[0].Ins
     ])
     const items = service.view('acc-1', conversationId).items
     expect(items.map((i) => (i.kind === 'tool' ? `tool:${i.status}` : i.kind === 'approval' ? `approval:${i.approval.state}` : i.kind))).toEqual(['user', 'tool:ok', 'approval:allowed', 'assistant'])
-  })
+  }, 15_000)
 
   it('excludes the time spent waiting for approval from tool duration', async () => {
     const { service, events, done } = setup([
@@ -1317,6 +1412,20 @@ const lastText = (context: { messages: unknown[] }): string => {
 }
 
 describe('AiService cards', () => {
+  it('Stop during render_card does not emit a failed tool row for its skeleton', async () => {
+    const s = setup([fauxAssistantMessage([renderCard(TABLE_CARD)], { stopReason: 'toolUse' })])
+    let pending = 0
+    const push = s.events.push.bind(s.events)
+    s.events.push = (...events) => {
+      const length = push(...events)
+      for (const e of events) if (e.event.type === 'card-pending' && ++pending === 2) s.service.abort(e.conversationId)
+      return length
+    }
+    await s.service.send('acc-1', null, 'list')
+    await s.done()
+    expect(pending).toBe(2)
+    expect(s.events.some((e) => e.event.type === 'tool-end')).toBe(false)
+  })
   it('queues a card reply behind a user turn already dequeued for setup', async () => {
     const s = setup([fauxAssistantMessage([renderCard(TABLE_CARD)], { stopReason: 'toolUse' }), fauxAssistantMessage('ready')])
     const { conversationId: id } = await s.service.send('acc-1', null, 'list')

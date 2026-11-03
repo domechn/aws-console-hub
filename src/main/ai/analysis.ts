@@ -73,7 +73,7 @@ export interface AnalysisDeps {
   apiKey?: string
   /** One AWS call with the proposal's account; only readCall's reads reach it. */
   call: AwsCall
-  tools: Pick<ToolContext, 'account' | 'audit' | 'supports'>
+  tools: Pick<ToolContext, 'account' | 'audit' | 'supports' | 'scriptWallMs'>
   /** Ends the analysis (the proposal was cancelled, expired or confirmed elsewhere). */
   signal: AbortSignal
   /** AWS calls made so far. */

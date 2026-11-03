@@ -2,6 +2,9 @@
 // app's own entrypoint (src/main/ai/providers.ts, loaded via Node's type stripping, Node >= 22.18), with every
 // network path blocked and counted. Run: node scripts/ai-smoke.mjs
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+import { existsSync } from 'node:fs'
 import dgram from 'node:dgram'
 import dns from 'node:dns'
 import net from 'node:net'
@@ -31,6 +34,7 @@ dgram.createSocket = () => block('udp', '*')
 
 const { Type, calculateCost, fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } = await import('@earendil-works/pi-ai')
 const { APP_IDENTITY, createAppAgent, createAppModels, testModel } = await import('../src/main/ai/providers.ts')
+const { runScript } = await import('../src/main/ai/sandbox.ts')
 
 const faux = fauxProvider({ provider: 'faux', models: [{ id: 'faux-1', cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } }] })
 const models = createAppModels()
@@ -123,6 +127,40 @@ assert.equal(tested.toolCalling, true)
 assert.equal(testOptions.telemetry, undefined)
 assert.deepEqual(testOptions.identity, APP_IDENTITY)
 console.log(`  ${JSON.stringify(tested)}`)
+
+const scripted = await runScript(`return await aws('ec2', 'DescribeVpcs', {})`, async () => '{"local":true}')
+assert.equal(scripted.ok, true)
+assert.deepEqual(scripted.value, { local: true })
+assert.equal(scripted.calls, 1)
+console.log('run 4: run_script through sandbox Worker with a local fake aws()')
+
+const builtWorker = new URL('../out/main/sandbox.worker.js', import.meta.url)
+if (!existsSync(builtWorker)) throw new Error('built sandbox Worker missing: run npm run build before npm run ai-smoke')
+const builtSandbox = new URL('../out/main/sandbox.js', import.meta.url)
+if (!existsSync(builtSandbox)) throw new Error('built sandbox entry missing: run npm run build before npm run ai-smoke')
+const { runScript: runBuiltScript, SCRIPT_LIMITS: builtLimits } = createRequire(import.meta.url)(fileURLToPath(builtSandbox))
+const builtSmoke = async (code, expected) => {
+  const controller = new AbortController()
+  const hardStop = setTimeout(() => {
+    controller.abort()
+    console.error('built sandbox Worker did not finish within 8 seconds')
+    process.exit(1)
+  }, 8_000)
+  try {
+    const result = await runBuiltScript(code, async () => '{"local":true}', {
+      signal: controller.signal,
+      limits: { ...builtLimits, syncSliceMs: 100, wallMs: 5_000 }
+    })
+    assert.equal(result.ok, expected, `built sandbox result: ${JSON.stringify(result)}`)
+    if (!expected) assert.equal(result.cause, 'timeout')
+    return result
+  } finally {
+    clearTimeout(hardStop)
+  }
+}
+assert.equal((await builtSmoke('return 42', true)).value, 42)
+await builtSmoke('for(;;){ new Promise(()=>{for(;;){}}) }', false)
+console.log('run 5: built sandbox Worker returns and terminates a runaway script')
 
 // The guard must actually bite, or "0 attempts" proves nothing.
 await assert.rejects(fetch('https://example.com'), /network blocked/)

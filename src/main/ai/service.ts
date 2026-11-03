@@ -27,7 +27,7 @@ import type {
 } from '../../shared/ai'
 import type { AwsAccount, RecentResource } from '../../shared/types'
 import type { AwsCredentials } from '../credentialCommand'
-import { runImpactAnalysis } from './analysis'
+import { ANALYSIS_LIMITS, runImpactAnalysis } from './analysis'
 import { createdIndex, filterAudit, summarize } from './auditDigest'
 import { ApprovalStore, type ApprovalRequest, type Verdict } from './approvals'
 import type { AwsCall, AwsInputMembers, AwsSupports } from './aws'
@@ -58,7 +58,9 @@ export const LIMITS = {
   maxToolCalls: 40,
   /** LLM round trips that end in tool calls; then the run lands. Room for a list plus a describe per item. */
   maxTurns: 20,
-  /** Whole run, LLM and tools; then it is aborted. Time on an approval card does not count. */
+  /** Tool execution time in one run; pi runs tools sequentially. */
+  toolTimeTotalMs: 60 * 60_000,
+  /** Model and orchestration time; tool execution and approval waits are paused. */
   runTimeoutMs: 5 * 60_000,
   firstEventMs: 60_000,
   idleEventMs: 90_000,
@@ -111,6 +113,7 @@ interface Run {
   aborted: boolean
   finished: Promise<void>
   finish: () => void
+  stopProgress?: () => void
 }
 
 interface Resolved {
@@ -470,6 +473,7 @@ export class AiService {
     const run = this.runs.get(conversationId)
     if (!run) return
     run.aborted = true
+    run.stopProgress?.()
     run.agent?.abort()
   }
 
@@ -721,7 +725,8 @@ export class AiService {
           tools: {
             account,
             audit: (type, data) => this.d.store.audit(type, account.id, { conversationId, analysis: proposalId, ...data }),
-            supports: this.d.awsSupports
+            supports: this.d.awsSupports,
+            scriptWallMs: Math.min(this.d.config.get().scriptMaxMinutes * 60_000, ANALYSIS_LIMITS.timeoutMs)
           },
           signal: p.analysis.stop.signal,
           onCalls: (n) => this.engine.analysisProgress(proposalId, (calls = n)),
@@ -1080,19 +1085,26 @@ export class AiService {
     let timer: ReturnType<typeof setTimeout> | undefined
     let left = LIMITS.runTimeoutMs
     let since = Date.now()
-    const arm = (): void => {
+    let holds = 0
+    const schedule = (): void => {
       since = Date.now()
       timer = setTimeout(() => {
         notice = `超过 ${LIMITS.runTimeoutMs / 60_000} 分钟，已停止`
         this.abort(conversationId)
       }, left)
     }
-    // Time the user spends on an approval card does not count against the run.
+    const remaining = (): number => left - (holds ? 0 : Date.now() - since)
+    // Approval waits and executing tools do not spend the model/orchestration budget.
     const pause = (): void => {
-      clearTimeout(timer)
-      left = Math.max(0, left - (Date.now() - since))
+      if (holds++ === 0) {
+        clearTimeout(timer)
+        left = Math.max(0, left - (Date.now() - since))
+      }
     }
-    arm()
+    const arm = (): void => {
+      if (--holds === 0) schedule()
+    }
+    schedule()
     try {
       const region = this.d.regionFor(account.id)
       let budget = this.costBudgets.get(conversationId)
@@ -1146,15 +1158,40 @@ export class AiService {
       const modelText = text + resourcePromptSection(resources)
       // The latest assistant message has answer text.
       let answered = false
+      let toolTimeMs = 0
+      let activeTools = 0
+      let toolTimeStart = 0
+      let toolWaitStart = 0
+      const toolTimeUsed = (): number => toolTimeMs + (activeTools ? Date.now() - toolTimeStart - (elapsedApprovalWait() - toolWaitStart) : 0)
       const tools = [
-        ...buildReadTools({ account, region, call: (...call) => this.d.aws(account.id, ...call), audit, costBudget: budget, approve, supports: this.d.awsSupports }),
+        ...buildReadTools({ account, region, call: (...call) => this.d.aws(account.id, ...call), audit, costBudget: budget, approve, supports: this.d.awsSupports,
+          scriptWallMs: () => Math.min(this.d.config.get().scriptMaxMinutes * 60_000, Math.max(0, LIMITS.toolTimeTotalMs - toolTimeUsed())),
+          scriptProgress: (calls) => {
+            for (const state of toolStarted.values()) if (state.name === 'run_script') state.calls = calls
+          } }),
         ...(readable ? [buildPageTool(() => this.d.readPage(account.id), audit)] : []),
         buildCardTool(buildCard, audit),
         buildProposeTool(propose, changeCatalog()),
         ...(quickReplies ? [buildRepliesTool(audit, () => answered)] : [])
       ]
       let toolCalls = 0
-      const toolStarted = new Map<string, { at: number; wait: number }>()
+      const toolStarted = new Map<string, { at: number; wait: number; name: string; calls: number; tick: ReturnType<typeof setInterval>; active: boolean }>()
+      const stopTool = (id: string): void => {
+        const state = toolStarted.get(id)
+        if (!state?.active) return
+        clearInterval(state.tick)
+        state.active = false
+        if (activeTools === 1) toolTimeMs = toolTimeUsed()
+        activeTools--
+        arm()
+      }
+      run.stopProgress = () => {
+        for (const [id, state] of toolStarted) {
+          if (!state.active) continue
+          if (state.name !== 'render_card' && state.name !== 'suggest_replies') emit({ type: 'tool-end', id, ok: false, summary: '已停止' })
+          stopTool(id)
+        }
+      }
       let turns = 0
       // Which cap the run hit; it then lands: one last round where every tool call is blocked.
       let limit: string | null = null
@@ -1206,6 +1243,10 @@ export class AiService {
         toolExecution: 'sequential',
         transformContext: async (messages) => mergeUserTurns(compactContext(messages, Math.floor(model.contextWindow * LIMITS.contextShare))),
         beforeToolCall: async () => {
+          if (LIMITS.toolTimeTotalMs - toolTimeUsed() < 5_000) {
+            limit ??= '工具累计运行时间已达上限'
+            return { block: true, reason: '工具累计运行时间已达上限，请根据已有结果回答用户。', terminate: true }
+          }
           if (!landing && ++toolCalls <= LIMITS.maxToolCalls) return undefined
           limit ??= `本轮工具调用超过 ${LIMITS.maxToolCalls} 次`
           return { block: true, reason: '本轮工具调用次数已达上限，不能再调用工具。请根据已有结果回答用户。', terminate: true }
@@ -1213,7 +1254,7 @@ export class AiService {
         finishTurn: (turn) => {
           if (landing) return { action: 'end' }
           if (turn.toolResults.length > 0 && ++turns >= LIMITS.maxTurns) limit ??= `步骤过多（超过 ${LIMITS.maxTurns} 轮）`
-          else if (turn.toolResults.length > 0 && left - (Date.now() - since) < LIMITS.landingMs) limit ??= `快到 ${LIMITS.runTimeoutMs / 60_000} 分钟上限`
+          else if (turn.toolResults.length > 0 && remaining() < LIMITS.landingMs) limit ??= `快到 ${LIMITS.runTimeoutMs / 60_000} 分钟上限`
           return limit ? { action: 'end' } : undefined
         }
       })
@@ -1227,7 +1268,18 @@ export class AiService {
           const part = e.assistantMessageEvent.partial.content[e.assistantMessageEvent.contentIndex]
           if (part?.type === 'toolCall' && part.name === 'render_card') emit({ type: 'card-pending', id: part.id })
         } else if (e.type === 'tool_execution_start') {
-          toolStarted.set(e.toolCallId, { at: Date.now(), wait: elapsedApprovalWait() })
+          pause()
+          const at = Date.now()
+          if (activeTools++ === 0) {
+            toolTimeStart = at
+            toolWaitStart = elapsedApprovalWait()
+          }
+          const state = { at, wait: elapsedApprovalWait(), name: e.toolName, calls: 0, tick: undefined as unknown as ReturnType<typeof setInterval>, active: true }
+          state.tick = setInterval(() => {
+            if (run.aborted || this.d.store.conversationAccount(conversationId) === undefined) return
+            if (e.toolName !== 'render_card' && e.toolName !== 'suggest_replies') emit({ type: 'tool-progress', id: e.toolCallId, seconds: Math.floor((Date.now() - at - (elapsedApprovalWait() - state.wait)) / 1000), ...(e.toolName === 'run_script' && { calls: state.calls }) })
+          }, 1000)
+          toolStarted.set(e.toolCallId, state)
           if (e.toolName === 'render_card') emit({ type: 'card-pending', id: e.toolCallId })
           // Quiet: the chips are the result, a tool row would only clutter the reply.
           else if (e.toolName !== 'suggest_replies') {
@@ -1235,10 +1287,16 @@ export class AiService {
             emit({ type: 'tool-start', id: e.toolCallId, label: toolLabel(e.toolName, e.args), ...(code !== undefined && { code }), t: Date.now() })
           }
         } else if (e.type === 'tool_execution_end' && e.toolName === 'suggest_replies') {
+          stopTool(e.toolCallId)
+          if (toolTimeUsed() >= LIMITS.toolTimeTotalMs) limit ??= '工具累计运行时间已达上限'
           // Main's checked list from the result, never the model's arguments.
           const options = e.isError ? [] : checkReplies({ options: e.result?.details?.replies })
           if (options.length) emit({ type: 'replies', id: e.toolCallId, options })
         } else if (e.type === 'tool_execution_end') {
+          const started = toolStarted.get(e.toolCallId)
+          stopTool(e.toolCallId)
+          if (toolTimeUsed() >= LIMITS.toolTimeTotalMs) limit ??= '工具累计运行时间已达上限'
+          if (run.aborted) return
           const card = e.isError ? undefined : (e.result?.details?.card as Card | undefined)
           if (card) {
             emit({ type: 'card', id: e.toolCallId, card })
@@ -1252,7 +1310,6 @@ export class AiService {
           if (proposal) return emit({ type: 'proposal', id: e.toolCallId, proposal })
           const summary = e.isError ? this.clean(String(e.result?.content?.[0]?.text ?? '失败')).slice(0, 200) : e.result?.details?.summary
           const calls = e.toolName === 'run_script' ? scriptCalls(e.result?.details) : undefined
-          const started = toolStarted.get(e.toolCallId)
           emit({ type: 'tool-end', id: e.toolCallId, ok: !e.isError && e.result?.details?.denied !== true, summary, ...(calls && { calls }), t: Date.now() - (started ? elapsedApprovalWait() - started.wait : 0) })
         } else if (e.type === 'message_end' && e.message.role !== 'system') {
           // Ends before its tool calls run: suggest_replies asks this.
@@ -1270,8 +1327,10 @@ export class AiService {
                 : live
           if (m.role === 'assistant' && m.stopReason === 'error') m = { ...m, diagnosticText: diagnostic(requestEvents.at(-1)?.type === 'stalled' ? 'ModelRequestStalled' : 'ProviderError') }
           if (m.role === 'toolResult' && m.toolCallId && toolStarted.has(m.toolCallId)) {
-            const started = toolStarted.get(m.toolCallId)!
+            const toolCallId = m.toolCallId
+            const started = toolStarted.get(toolCallId)!
             m = { ...m, durationMs: Math.max(0, Date.now() - started.at - (elapsedApprovalWait() - started.wait)) }
+            toolStarted.delete(toolCallId)
           }
           // The store's pattern scrub misses keys without a known shape (Gemini's AIza…); drop the active key by value.
           const content = apiKey && apiKey.length >= 16 ? JSON.parse(JSON.stringify(m).split(apiKey).join('[redacted]')) : m
@@ -1302,6 +1361,8 @@ export class AiService {
     } catch (err) {
       fail(explain(err instanceof Error ? err.message : String(err)))
     } finally {
+      run.stopProgress?.()
+      run.stopProgress = undefined
       clearTimeout(timer)
     }
   }

@@ -15,10 +15,13 @@ export default defineConfig({
   main: {
     build: {
       // typebox (card schema, shared with pi) is ESM-only too.
-      externalizeDeps: { exclude: ['@earendil-works/pi-ai', '@earendil-works/pi-agent-core', 'typebox'] },
+      externalizeDeps: { exclude: ['@earendil-works/pi-ai', '@earendil-works/pi-agent-core', 'typebox', 'quickjs-emscripten-core', '@jitl/quickjs-singlefile-cjs-release-sync'] },
       // The AI tools load each @aws-sdk/client-* on first use; keep that a lazy require() of the CJS build
       // instead of a native import() going through Node's ESM loader.
-      rollupOptions: { output: { dynamicImportInCjs: false } }
+      rollupOptions: {
+        input: { index: resolve('src/main/index.ts'), sandbox: resolve('src/main/ai/sandbox.ts'), 'sandbox.worker': resolve('src/main/ai/sandbox.worker.ts') },
+        output: { dynamicImportInCjs: false }
+      }
     }
   },
   // Second entries: the toast overlay view (main/toast.ts) with its own minimal preload.

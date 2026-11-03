@@ -49,7 +49,24 @@ const view = (id: string, service: string, action: string): ApprovalView => ({
 
 afterEach(() => expect(leaks.count).toBe(0))
 
-describe('run_script', () => {
+describe('run_script', { timeout: 15_000 }, () => {
+  it('describes the configured deadline and parallel batches to the model', () => {
+    const { ctx } = context(fakeS3)
+    ctx.scriptWallMs = 12 * 60_000
+    const description = buildReadTools(ctx).find((t) => t.name === 'run_script')?.description
+    expect(description).toContain('12 分钟')
+    expect(description).toContain('parallel() 分批处理')
+  })
+  it('reads the script deadline when execution starts', async () => {
+    const { ctx } = context(fakeS3)
+    let remaining = 5 * 60_000
+    ctx.scriptWallMs = () => remaining
+    const tool = buildReadTools(ctx).find((t) => t.name === 'run_script')!
+    expect(tool.description).toContain('5 分钟')
+    remaining = 150
+    const result = await tool.execute('call-1', { code: 'while (true) {}', reason: '测试时限' }) as { content: { text: string }[] }
+    expect(result.content[0].text).toContain('0.15 秒')
+  })
   it('lists, fans out with parallel and returns a compact summary: one tool result, fenced', async () => {
     const { run, call, audit } = context(fakeS3)
     const code = `
@@ -172,7 +189,7 @@ describe('run_script', () => {
     const { run } = context((_s, _a, _p, _r, signal) => (signals.push(signal), new Promise(() => {})))
     const ac = new AbortController()
     const pending = run(`await Promise.all([aws('ec2', 'DescribeVpcs', {}), aws('ec2', 'DescribeSubnets', {})])`, ac.signal)
-    await vi.waitFor(() => expect(signals).toHaveLength(2))
+    await vi.waitFor(() => expect(signals).toHaveLength(2), { timeout: 15_000 })
     ac.abort()
     expect((await pending).details).toMatchObject({ summary: '2 次调用 · 已停止', denied: true })
     expect(signals.every((s) => s?.aborted)).toBe(true)

@@ -103,7 +103,8 @@ describe('applyEvent', () => {
 
 describe('aiReady', () => {
   const base: AiConfigView = {
-    version: 6,
+    version: 7,
+    scriptMaxMinutes: 5,
     provider: 'deepseek',
     model: 'deepseek-flash',
     baseUrl: null,

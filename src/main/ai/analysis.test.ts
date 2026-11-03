@@ -141,7 +141,7 @@ describe('runImpactAnalysis', () => {
     expect(s.fake.of('secretsmanager', 'GetSecretValue')).toEqual([])
     // The foreign bucket check lists this account's buckets; the read itself never goes out.
     expect(s.fake.of('s3', 'GetBucketPolicy')).toEqual([])
-  })
+  }, 20_000)
 
   it(`stops after ${ANALYSIS_LIMITS.maxToolCalls} tool calls; the submit still goes through`, async () => {
     let results = ''

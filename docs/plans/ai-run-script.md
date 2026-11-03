@@ -8,13 +8,13 @@
 
 ## 设计
 
-- **运行时**：QuickJS 编成 WebAssembly（`quickjs-emscripten-core` + `@jitl/quickjs-singlefile-cjs-release-sync`，0.32.0，钉版本），在主进程里运行，每个脚本一个新的 wasm 实例（约 10 ms）。singlefile 版把 wasm 内嵌在 JS 里；两个包是 externalize 的依赖，第一次运行脚本时才 `require`。
+- **运行时**：QuickJS 编成 WebAssembly（`quickjs-emscripten-core` + `@jitl/quickjs-singlefile-cjs-release-sync`，0.32.0，钉版本），在独立 `worker_threads` Worker 中运行，每个脚本一个新的 wasm 实例。singlefile 版把 wasm 内嵌在 JS 里，并随 Worker 打包。
   - 不用 `node:vm`：它不是安全边界，沙箱对象和宿主共用原型链，`this.constructor.constructor('return process')()` 就逃出去了。
   - 不用 `isolated-vm`：原生模块，每次升级 Electron 都要重编。
-  - 不用子进程 / worker：要另外的打包入口和 IPC，而且还是一个完整的 Node。
+  - Worker 只接收脚本和限额；主进程通过消息处理 `aws()`，保持原有审批与脱敏路径。
 - **API**（`sandbox.ts` 的 `PRELUDE`）：`aws(service, action, params?, { region? })`、`parallel(fns, n = 8)`、`log()` / `console.log`、ES 内置对象。没有 fs、网络、`require`、`import()`、定时器、`sleep`。值只以 JSON 文本过边界：脚本那边先 `JSON.stringify`，宿主只收字符串，再解析成普通对象。
 - **调用路径**：`aws()` → `tools.ts` 的 `readCall`，和 `aws_read` 是同一个函数：分类、PartiQL 只限 SELECT、`ce` / 写 / 名称不明一律拒绝、参数 ≤ 4000 字、出口检查（外部账号 / URL / 别人的桶）、tier B 审批、执行冻结的参数。每个结果先 `scrub` + `redactSecrets` 再交给脚本。
-- **审批**：用普通审批卡，`why` 多一行「来自脚本（run_script）」。普通读在一个脚本里按 `service:action:region` 只问一次（同时在等的调用等那张卡），敏感读取和有出口风险的调用每次都问。各项限额不变。等卡片的时间不算进脚本的 60 秒，也不算进运行的 5 分钟。
+- **审批**：用普通审批卡，`why` 多一行「来自脚本（run_script）」。普通读在一个脚本里按 `service:action:region` 只问一次（同时在等的调用等那张卡），敏感读取和有出口风险的调用每次都问。各项限额不变。等卡片的时间不算进脚本的所设墙钟时限，也不算进运行的 5 分钟。
 - **结果**：`{ result, logs?, calls }` 经 `shapeData` 裁剪到 12 KB，放进 `<aws_data source="run_script">` 围栏。脚本出错时，错误信息和日志也在围栏里，模型可以改了再跑一次。
 - **显示**：工具行「运行脚本 · N 次调用」，展开后是调用列表（`s3:GetBucketTagging ×11`）和只读的代码。
 - **审计**：一行 `tool_call`，内容是 `calls`、`actions`（`service:action` 计数）、`codeHash`、`codeChars`、`ok` / `ms` / 失败类别。不记代码、参数、结果和错误文字。
@@ -25,7 +25,8 @@
 | 项 | 值 | 怎么执行 |
 | --- | --- | --- |
 | 代码 | 8000 字符 | 工具 schema + 运行前检查 |
-| 墙钟 | 60 秒，等审批不算 | `ScriptClock`；QuickJS 中断回调（忙循环）+ 200 ms watch 定时器（在等调用） |
+| 墙钟 | 默认 5 分钟，可设 1–30 分钟，等审批不算 | 主进程 `ScriptClock` 和看门狗；Worker 就绪后开始 |
+| 连续同步计算 / 累计本地计算 | 2 秒 / 60 秒 | Worker 内中断和主进程强制终止 |
 | 内存 | 64 MB | `setMemoryLimit` |
 | 栈 | 192 KB | `setMaxStackSize`；超过约 200 KB 时，普通递归会先撑爆 V8 的栈 |
 | `aws()` 次数 | 300 次 / 脚本 | 超过的调用直接 reject |
@@ -47,7 +48,7 @@
 | 审计泄密 | 见「设计」的审计一条。 |
 | 结果里的注入 | 和其他工具一样放进围栏；`<` 转义，错误和日志也在围栏里。 |
 
-剩下的风险：脚本在主进程的线程上运行，忙循环会占住主线程直到中断回调触发。中断回调由 QuickJS 定期调用，测试里停下所需的时间在毫秒级，但这期间主进程不处理别的事件。
+后续修复：QuickJS 中断有时会被同步调用的 async 函数或 Promise executor 吞掉。现在脚本跑在 Worker 中，主进程可用 `worker.terminate()` 终止它，Stop 不再等脚本让出主线程。
 
 ## 验证
 
@@ -56,10 +57,10 @@
 - `script.test.ts`：列出 → `parallel` 扇出 → 汇总、逐调用脱敏、写 / tier C / 名称不明 / `ce` 被拒且不调 AWS、tier B 合并审批（5 个并发的同类调用只出 1 张卡，敏感读取每次都问）、拒绝时抛「用户拒绝」、等卡片的时间不计时、输出截断、300 次上限、停止、`opts` 校验、错误和日志在围栏里、审计不含代码、参数和结果。
 - `service.test.ts`（faux 模型）：45 次 `aws()` 的脚本是 1 次工具调用（超过 40 次的工具调用上限也不收尾）；事件里有代码和调用列表；审批时的等待行和卡片，允许后脚本继续。
 - `ToolRow.test.tsx`：工具行文字、展开后的调用列表和纯文本代码，以及多张卡时的等待状态。
-- `npm run build`：`out/main/index.js` 里两个包是 `load()` 里的懒 `require`，没有被打进 bundle，也没有 `.wasm` 文件要找。
+- `npm run build`：`out/main/sandbox.worker.js` 和相邻 chunks 包含 Worker 与内嵌 wasm，没有单独的 `.wasm` 文件要找。
 
 没验证：
-1. **打包后的 Electron**：没有在 Electron 43（Node 24.18）里，也没有从 `app.asar` 加载这两个包运行过（这次环境里运行 Electron 二进制需要额外授权）。依据：两个包都是 `dependencies`，和 `@aws-sdk/client-*` 一样由 electron-builder 放进 `app.asar` 的 `node_modules`；singlefile 版不读 wasm 文件，只 `require` 同目录的 `.cjs`。
+1. **完整打包后的界面**：已把构建出的 Worker 和相邻 chunks 放进临时 asar，并用 Electron 运行时执行本地脚本；尚未启动完整界面。
 2. **真实模型**：模型会不会在该用脚本时用、写出能运行的脚本、返回精简的汇总，只用 faux 模型验证过。工具描述约 1.5 KB，没量 token。
 3. **真实 AWS**：只对假 AWS 测过，没有用真实账号跑过并发查询，限流也没测。
 4. **界面**：展开后的代码块在 320–640px 宽度下的版式只做过静态渲染测试。

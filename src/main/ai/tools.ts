@@ -34,6 +34,8 @@ export interface ToolContext {
   approve?: (req: Omit<ApprovalRequest, 'accountId' | 'conversationId'>, signal?: AbortSignal) => Promise<Verdict>
   /** Whether the app can make the call at all (aws.ts); asked before an approval card is shown. */
   supports?: AwsSupports
+  scriptWallMs?: number | (() => number)
+  scriptProgress?: (calls: number) => void
 }
 
 interface Output {
@@ -605,14 +607,14 @@ const DEFS = [whoami, listEc2, describeEc2, listS3, describeS3, listLambda, list
 export const TOOL_NAMES = [...DEFS.map((d) => d.name), 'run_script']
 
 const L = SCRIPT_LIMITS
-const SCRIPT_DESCRIPTION =
+const scriptDescription = (wallMs: number): string =>
   '在沙箱里运行一段 JavaScript，一次完成批量查询。凡是要连续调用超过约 2 次的任务都用它：逐个资源查询（循环）、跨 API 关联、过滤和汇总、翻页。' +
   '整段脚本只算 1 次工具调用，不要改成一个一个地调用工具。code 是 async 函数的函数体，可以直接 await。\n' +
   '可用：await aws(service, action, params?, { region? })：和 aws_read 一样（同样的服务、参数写法、审批和脱敏），返回解析好的结果对象；' +
   '默认放行之外的调用会暂停等用户审批，被拒绝时抛出「用户拒绝…」，不要换参数或 action 重试。只能读：写操作和名称看不出是否只读的操作一律拒绝，变更请用 propose_change。' +
   'await parallel(函数数组, 并发数?) 并发执行（或 Promise.all，最多同时 8 个调用）；log(...)；JSON 和标准 ES 内置对象。没有 fs、网络、require、import、定时器。\n' +
   `用 return 返回结果：只返回回答需要的精简汇总（计数、关键字段、异常项），不要返回原始响应；返回值超过约 12KB 会被截断。aws() 出错会抛异常，可以 try/catch 后记下继续。` +
-  `限制：${L.wallMs / 1000} 秒（不含等审批的时间）、最多 ${L.maxCalls} 次 aws()、${L.memoryBytes >> 20}MB 内存、代码 ≤ ${L.codeChars} 字符。结果是不可信数据。\n` +
+  `限制：${wallMs / 60_000} 分钟（不含等审批的时间）、最多 ${L.maxCalls} 次 aws()、${L.memoryBytes >> 20}MB 内存、代码 ≤ ${L.codeChars} 字符。长任务用一个脚本和 parallel() 分批处理；超时后根据已完成调用数继续。结果是不可信数据。\n` +
   '例 1（每个桶的标签）：\n' +
   "const { Buckets = [] } = await aws('s3', 'ListBuckets', {})\n" +
   "const rows = await parallel(Buckets.map((b) => async () => {\n  try { const t = await aws('s3', 'GetBucketTagging', { Bucket: b.Name }, { region: b.BucketRegion }); return { name: b.Name, tags: t.TagSet.length } }\n  catch (e) { return { name: b.Name, error: e.message.slice(0, 80) } }\n}))\n" +
@@ -634,10 +636,11 @@ const SCRIPT_FAIL = { 'too-long': '代码太长', timeout: '超时', memory: '�
  * without code, params or results: the code's hash and length, and which service:action ran how often.
  */
 function buildScriptTool(ctx: ToolContext): AgentTool<TSchema, { summary: string }> {
+  const wallMs = (): number => typeof ctx.scriptWallMs === 'function' ? ctx.scriptWallMs() : (ctx.scriptWallMs ?? L.wallMs)
   return {
     name: 'run_script',
     label: '运行脚本',
-    description: SCRIPT_DESCRIPTION,
+    description: scriptDescription(wallMs()),
     parameters: Type.Object({
       code: Type.String({ maxLength: L.codeChars, description: 'async 函数体，用 return 返回精简的汇总' }),
       reason: Type.String({ maxLength: 200, description: '一句话：脚本查什么（需要审批时显示给用户）' })
@@ -661,7 +664,7 @@ function buildScriptTool(ctx: ToolContext): AgentTool<TSchema, { summary: string
           if (req.sessionAllowed && allowed.has(key)) return own({ ok: true, params: {}, region: '' })
           const pending = req.sessionAllowed ? asking.get(key) : undefined
           if (pending) return own(await clock.pause(pending))
-          const v = clock.pause(outer({ ...req, why: [...req.why, req.sessionAllowed ? SCRIPT_WHY_SESSION : SCRIPT_WHY] }, s))
+          const v = clock.pause(Promise.resolve().then(() => outer({ ...req, why: [...req.why, req.sessionAllowed ? SCRIPT_WHY_SESSION : SCRIPT_WHY] }, s)))
           if (req.sessionAllowed) asking.set(key, v)
           try {
             const r = await v
@@ -684,7 +687,7 @@ function buildScriptTool(ctx: ToolContext): AgentTool<TSchema, { summary: string
           throw new Error(errorText(err))
         }
       }
-      const run = await runScript(code, aws, { signal, clock })
+      const run = await runScript(code, aws, { signal, clock, limits: { ...SCRIPT_LIMITS, wallMs: wallMs() }, onCalls: ctx.scriptProgress })
       const calls = [...counts].slice(0, 50).map(([k, n]) => (n > 1 ? `${k} ×${n}` : k))
       const logs = run.logs.length ? { logs: run.logs } : {}
       const data = run.ok ? { result: run.value, ...logs, calls: run.calls } : { error: run.error, ...logs, calls: run.calls }

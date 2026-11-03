@@ -5,6 +5,23 @@ import { describe, expect, it } from 'vitest'
 import { AiConfigStore, DEFAULT_AI_CONFIG, isAllowedBaseUrl, mergeAiConfig } from './config'
 
 describe('mergeAiConfig', () => {
+  it('clamps the untrusted script duration and migrates old values safely', () => {
+    expect(DEFAULT_AI_CONFIG.scriptMaxMinutes).toBe(5)
+    expect(mergeAiConfig(DEFAULT_AI_CONFIG, { scriptMaxMinutes: -4 }).scriptMaxMinutes).toBe(1)
+    expect(mergeAiConfig(DEFAULT_AI_CONFIG, { scriptMaxMinutes: 90 }).scriptMaxMinutes).toBe(30)
+    expect(mergeAiConfig(DEFAULT_AI_CONFIG, { scriptMaxMinutes: 2.8 }).scriptMaxMinutes).toBe(2)
+    for (const bad of ['90', NaN, Infinity, null]) expect(() => mergeAiConfig(DEFAULT_AI_CONFIG, { scriptMaxMinutes: bad })).toThrow('脚本')
+  })
+
+  it('fills the script duration when loading v6 and clamps a tampered saved value', () => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ai-config-')), 'ai-config.json')
+    const old = { ...DEFAULT_AI_CONFIG, version: 6 } as Record<string, unknown>
+    delete old.scriptMaxMinutes
+    fs.writeFileSync(file, JSON.stringify(old))
+    expect(new AiConfigStore(file).get()).toMatchObject({ version: 7, scriptMaxMinutes: 5 })
+    fs.writeFileSync(file, JSON.stringify({ ...old, scriptMaxMinutes: 1000 }))
+    expect(new AiConfigStore(file).get().scriptMaxMinutes).toBe(30)
+  })
   it('takes known, valid fields only', () => {
     const next = mergeAiConfig(DEFAULT_AI_CONFIG, { provider: 'deepseek', model: 'deepseek-flash', apiKey: 'sk-should-not-stick', extra: 1 })
     expect(next).toEqual({ ...DEFAULT_AI_CONFIG, provider: 'deepseek', model: 'deepseek-flash' })
@@ -100,7 +117,7 @@ describe('AiConfigStore', () => {
     const store = new AiConfigStore(file)
     expect(store.get()).toEqual({
       ...v1,
-      version: 6,
+      version: 7,
       bedrockAuth: 'account',
       bedrockAccountId: null,
       bedrockRegion: 'us-east-1',
@@ -109,11 +126,12 @@ describe('AiConfigStore', () => {
       budget: { monthlyTokens: null, monthlyUsd: null, block: false },
       readPage: true,
       quickReplies: true,
-      impactAnalysis: true
+      impactAnalysis: true,
+      scriptMaxMinutes: 5
     })
     store.save({ provider: 'amazon-bedrock', bedrockAccountId: 'acc-1' }, (id) => id === 'acc-1')
     const saved = fs.readFileSync(file, 'utf8')
-    expect(JSON.parse(saved)).toMatchObject({ version: 6, provider: 'amazon-bedrock', bedrockAccountId: 'acc-1' })
+    expect(JSON.parse(saved)).toMatchObject({ version: 7, provider: 'amazon-bedrock', bedrockAccountId: 'acc-1' })
     // Only the account's id: credentials never reach the config file.
     expect(saved).not.toMatch(/AccessKeyId|SecretAccessKey|SessionToken|ASIA|AKIA/)
   })
@@ -128,7 +146,7 @@ describe('AiConfigStore', () => {
     const v3 = { ...DEFAULT_AI_CONFIG, version: 3, provider: 'deepseek', model: 'deepseek-flash' } as Record<string, unknown>
     delete v3.readPage
     delete v3.quickReplies
-    expect(load(v3).get()).toEqual({ ...DEFAULT_AI_CONFIG, provider: 'deepseek', model: 'deepseek-flash', version: 6, readPage: true, quickReplies: true, impactAnalysis: true })
+    expect(load(v3).get()).toEqual({ ...DEFAULT_AI_CONFIG, provider: 'deepseek', model: 'deepseek-flash', version: 7, readPage: true, quickReplies: true, impactAnalysis: true })
     expect(load({ ...v3, version: 4, readPage: false }).get().readPage).toBe(false)
     expect(load({ ...v3, readPage: 'no' }).get().readPage).toBe(true)
     const store = load(v3)
@@ -146,7 +164,7 @@ describe('AiConfigStore', () => {
     }
     const v4 = { ...DEFAULT_AI_CONFIG, version: 4, provider: 'deepseek', model: 'deepseek-flash', readPage: false } as Record<string, unknown>
     delete v4.quickReplies
-    expect(load(v4).get()).toEqual({ ...DEFAULT_AI_CONFIG, provider: 'deepseek', model: 'deepseek-flash', version: 6, readPage: false, quickReplies: true, impactAnalysis: true })
+    expect(load(v4).get()).toEqual({ ...DEFAULT_AI_CONFIG, provider: 'deepseek', model: 'deepseek-flash', version: 7, readPage: false, quickReplies: true, impactAnalysis: true })
     expect(load({ ...v4, version: 5, quickReplies: false }).get().quickReplies).toBe(false)
     expect(load({ ...v4, quickReplies: 1 }).get().quickReplies).toBe(true)
     const store = load(v4)
@@ -164,7 +182,7 @@ describe('AiConfigStore', () => {
     }
     const v5 = { ...DEFAULT_AI_CONFIG, version: 5, provider: 'deepseek', model: 'deepseek-flash', quickReplies: false } as Record<string, unknown>
     delete v5.impactAnalysis
-    expect(load(v5).get()).toEqual({ ...DEFAULT_AI_CONFIG, provider: 'deepseek', model: 'deepseek-flash', version: 6, quickReplies: false, impactAnalysis: true })
+    expect(load(v5).get()).toEqual({ ...DEFAULT_AI_CONFIG, provider: 'deepseek', model: 'deepseek-flash', version: 7, quickReplies: false, impactAnalysis: true })
     expect(load({ ...v5, version: 6, impactAnalysis: false }).get().impactAnalysis).toBe(false)
     expect(load({ ...v5, impactAnalysis: 'no' }).get().impactAnalysis).toBe(true)
     const store = load(v5)

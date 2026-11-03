@@ -27,6 +27,17 @@ describe('groupTools', () => {
 })
 
 describe('ActivityGroup', () => {
+  it('shows live elapsed time and script calls without an aria announcement each second', () => {
+    let items = applyEvent([], { type: 'tool-start', id: 't', label: '运行脚本', code: 'return 1' })
+    items = applyEvent(items, { type: 'tool-progress', id: 't', seconds: 29, calls: 3 })
+    expect(render(items as ToolItem[])).toContain('已运行 29 秒 · 已调用 3 次')
+    expect(render(items as ToolItem[])).toContain('<span class="sr-only" aria-live="polite"></span>')
+    items = applyEvent(items, { type: 'tool-progress', id: 't', seconds: 30, calls: 4 })
+    expect(render(items as ToolItem[])).toContain('>已运行 30 秒</span>')
+    expect(render(items as ToolItem[])).toMatch(/<\/button><span class="sr-only" aria-live="polite">已运行 30 秒<\/span>/)
+    items = applyEvent(items, { type: 'tool-end', id: 't', ok: true })
+    expect(render(items as ToolItem[])).not.toContain('已运行')
+  })
   it('renders no activity container when there are no tool items', () => {
     expect(render([])).toBe('')
   })

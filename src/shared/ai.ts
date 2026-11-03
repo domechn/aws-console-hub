@@ -45,7 +45,7 @@ export interface AiBudget {
 
 /** userData/ai-config.json. Never holds a key. */
 export interface AiConfig {
-  version: 6
+  version: 7
   /** '' until the user picks one. */
   provider: string
   model: string
@@ -68,6 +68,8 @@ export interface AiConfig {
   quickReplies: boolean
   /** Generic (no-adapter) change proposals get an AI impact analysis before they can be confirmed (main/ai/analysis.ts). */
   impactAnalysis: boolean
+  /** Script execution time, excluding approval waits. */
+  scriptMaxMinutes: number
 }
 
 /** A quick-reply chip: `label` on the chip, `text` sent as a user message when it is clicked. Checked in main/ai/replies.ts. */
@@ -170,7 +172,7 @@ export type ChatItem =
   | { kind: 'user'; text: string; page?: string; cardAction?: boolean; ordinal?: number; resources?: ResourceCandidate[] }
   | { kind: 'assistant'; text: string; error?: string; diagnosticText?: string; aborted?: boolean; retryable?: boolean; usage?: { input: number; output: number; costUsd?: number }; model?: string; ordinal?: number; feedback?: 'up' | 'down' | null }
   /** waiting: paused on an approval card (the approval item follows it). run_script: `code` and the `calls` it made (`ec2:DescribeInstances ×3`), shown on expand. */
-  | { kind: 'tool'; id: string; label: string; status: 'running' | 'waiting' | 'ok' | 'error'; summary?: string; code?: string; calls?: string[]; ms?: number }
+  | { kind: 'tool'; id: string; label: string; status: 'running' | 'waiting' | 'ok' | 'error'; summary?: string; code?: string; calls?: string[]; ms?: number; seconds?: number; callCount?: number }
   /** A render_card call (`id` is the tool call's); `card` is null while it streams (skeleton). */
   | { kind: 'card'; id: string; card: Card | null }
   /** A propose_change call that made a proposal (`id` is the tool call's). */
@@ -206,6 +208,7 @@ export type AiEvent =
   | { type: 'text-delta'; text: string }
   /** `code`: run_script's script, shown read-only on the row. */
   | { type: 'tool-start'; id: string; label: string; code?: string; t?: number }
+  | { type: 'tool-progress'; id: string; seconds: number; calls?: number }
   | { type: 'tool-end'; id: string; ok: boolean; summary?: string; calls?: string[]; t?: number }
   /** A render_card call started streaming; `card`, or a failed tool-end, follows. */
   | { type: 'card-pending'; id: string }

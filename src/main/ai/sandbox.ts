@@ -1,17 +1,11 @@
-/**
- * run_script's sandbox (docs/plans/ai-run-script.md): model-written JavaScript runs in QuickJS compiled to
- * WebAssembly, not node:vm (whose contexts share the host's objects: a constructor chain reaches `process`). Inside
- * there is only the ES language plus what this file installs: `aws()` (the host call, strings in and out: values cross
- * the boundary as JSON text only), `parallel()` and `log()`. No fs, network, require, import, timers or host objects.
- * Limits: wall clock (time waiting for the user on an approval card does not count), memory, stack, host calls,
- * concurrent host calls, code and output size. The module is loaded on first use (startup stays as is); the wasm is
- * inlined in the variant's JS, so there is no file to resolve in the packaged app.
- */
-import type { QuickJSDeferredPromise, QuickJSHandle, QuickJSWASMModule } from 'quickjs-emscripten-core'
+import { Worker } from 'node:worker_threads'
 
+export const SYNC_SLICE_MS = 2_000
 export const SCRIPT_LIMITS = {
   codeChars: 8000,
-  wallMs: 60_000,
+  wallMs: 5 * 60_000,
+  syncSliceMs: SYNC_SLICE_MS,
+  scriptCpuMs: 60_000,
   memoryBytes: 64 * 1024 * 1024,
   /** QuickJS's own check; above ~200 KB plain recursion overflows the host's (V8's) stack first. */
   stackBytes: 192 * 1024,
@@ -25,17 +19,7 @@ export const SCRIPT_LIMITS = {
 }
 export type ScriptLimits = typeof SCRIPT_LIMITS
 
-/**
- * A fresh WebAssembly instance per script (~10 ms): nothing carries over between scripts, and an instance a host
- * stack overflow went through (see `poisoned` below) is simply dropped.
- */
-async function load(): Promise<QuickJSWASMModule> {
-  const [core, variant] = await Promise.all([import('quickjs-emscripten-core'), import('@jitl/quickjs-singlefile-cjs-release-sync')])
-  // The namespace as is: core's smartUnwrap takes off one or two `default` layers (ESM and CJS interop differ).
-  return core.newQuickJSWASMModuleFromVariant(variant as never)
-}
-
-/** Instances that failed to dispose cleanly (a leaked handle); tests keep it at 0. */
+/** Workers still running; tests keep this at zero after each run. */
 export const leaks = { count: 0 }
 
 /** Wall clock that stops while the script waits for the user (approval cards). */
@@ -43,6 +27,11 @@ export class ScriptClock {
   private used = 0
   private since = Date.now()
   private paused = 0
+
+  start(): void {
+    this.used = 0
+    this.since = Date.now()
+  }
 
   elapsed(): number {
     return this.used + (this.paused ? 0 : Date.now() - this.since)
@@ -73,233 +62,174 @@ export interface ScriptRun {
   ms: number
 }
 
-/** Installed before the script, then the raw host functions are gone from the global object. */
-const PRELUDE = `"use strict";
-(() => {
-  const g = globalThis, raw = g.__aws, rawLog = g.__log, stringify = JSON.stringify, parse = JSON.parse;
-  delete g.__aws; delete g.__log;
-  const json = (v, what) => {
-    const s = stringify(v === undefined ? {} : v);
-    if (typeof s !== 'string' || s[0] !== '{') throw new TypeError(what + ' 必须是能转成 JSON 的对象');
-    return s;
-  };
-  g.aws = (service, action, params, opts) => raw(service, action, json(params, 'params'), json(opts, 'opts')).then(parse);
-  const show = (v) => { if (typeof v === 'string') return v; try { return stringify(v); } catch { return String(v); } };
-  g.log = (...a) => { rawLog(a.map(show).join(' ')); };
-  g.console = { log: g.log, info: g.log, warn: g.log, error: g.log };
-  g.parallel = async (tasks, limit = 8) => {
-    const list = Array.from(tasks), out = new Array(list.length);
-    let next = 0;
-    const worker = async () => { while (next < list.length) { const i = next++; out[i] = await (typeof list[i] === 'function' ? list[i]() : list[i]); } };
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(Number(limit) || 8, list.length)) }, worker));
-    return out;
-  };
-})();`
+const duration = (ms: number, short = false): string => ms >= 60_000 && ms % 60_000 === 0 ? `${ms / 60_000} 分钟` : ms < 1000 && short ? `${ms} 毫秒` : `${ms / 1000} 秒`
+const SLICE_GRACE_MS = 150
+const STARTUP_MS = 15_000
+const MAX_LOG_LINES = 1000
+/** Keep in sync with shapeData's MAX_RESULT_CHARS, the model-facing output cap. */
+const MAX_RESULT_CHARS = 12_000
+const MAX_WORKER_MESSAGES = 20_000
+const MAX_RESULT_MESSAGE_CHARS = 2 * MAX_RESULT_CHARS
+const INTERNAL_ERROR = '脚本出错：沙箱内部错误'
+const RESULT_CAUSES = new Set<ScriptRun['cause']>(['too-long', 'timeout', 'memory', 'stopped', 'error'])
+const safeJson = (key: string, item: unknown): unknown =>
+  key === '__proto__' || key === 'constructor' || key === 'prototype' ? undefined : item
+const plainJsonObject = (text: unknown, limit: number, reserved?: { found: boolean }): Record<string, unknown> | null => {
+  if (typeof text !== 'string' || text.length > limit) return null
+  try {
+    const value: unknown = JSON.parse(text, (key: string, item: unknown) => {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        if (reserved) reserved.found = true
+        return undefined
+      }
+      return item
+    })
+    return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+      ? value as Record<string, unknown> : null
+  } catch { return null }
+}
 
-/** The code is the body of an async function; its return value comes back as JSON text. */
-const wrap = (code: string): string =>
-  `(async () => {\n${code}\n})().then((v) => { const s = JSON.stringify(v === undefined ? null : v); return typeof s === 'string' ? s : 'null'; })`
-
-export async function runScript(code: string, aws: ScriptAws, opts: { signal?: AbortSignal; clock?: ScriptClock; limits?: ScriptLimits } = {}): Promise<ScriptRun> {
+export async function runScript(code: string, aws: ScriptAws, opts: { signal?: AbortSignal; clock?: ScriptClock; limits?: ScriptLimits; onCalls?: (calls: number) => void } = {}): Promise<ScriptRun> {
   const limits = opts.limits ?? SCRIPT_LIMITS
   const clock = opts.clock ?? new ScriptClock()
   const started = Date.now()
-  const logs: string[] = []
-  let logChars = 0
-  let calls = 0
-  if (code.length > limits.codeChars) return { ok: false, error: `代码太长（${code.length} 字符，上限 ${limits.codeChars}）`, cause: 'too-long', logs, calls, ms: 0 }
-  if (opts.signal?.aborted) return { ok: false, error: '已停止', cause: 'stopped', logs, calls, ms: 0 }
-  const mod = await load()
-  if (opts.signal?.aborted) return { ok: false, error: '已停止', cause: 'stopped', logs, calls, ms: Date.now() - started }
+  if (code.length > limits.codeChars) return { ok: false, error: `代码太长（${code.length} 字符，上限 ${limits.codeChars}）`, cause: 'too-long', logs: [], calls: 0, ms: 0 }
+  if (opts.signal?.aborted) return { ok: false, error: '已停止', cause: 'stopped', logs: [], calls: 0, ms: 0 }
+  const source = import.meta.url.endsWith('.ts')
+  const worker = new Worker(new URL(source ? './sandbox.worker.ts' : './sandbox.worker.js', import.meta.url), {
+    workerData: { code, limits }, env: {}, execArgv: source ? ['--experimental-strip-types', '--no-warnings'] : [],
+    resourceLimits: { maxOldGenerationSizeMb: 256, stackSizeMb: 4 }
+  })
+  leaks.count++
   const stop = new AbortController()
-  const timedOut = (): boolean => clock.elapsed() > limits.wallMs
-  const rt = mod.newRuntime()
-  rt.setMemoryLimit(limits.memoryBytes)
-  rt.setMaxStackSize(limits.stackBytes)
-  // Called regularly while QuickJS runs: a busy loop ends here, an idle script by the watch timer below.
-  rt.setInterruptHandler(() => stop.signal.aborted || timedOut())
-  const vm = rt.newContext()
-  const deferreds = new Set<QuickJSDeferredPromise>()
-  // Inside a QuickJS call (eval, pending jobs): disposing waits until it returns.
-  let depth = 0
-  let finished = false
-  let disposed = false
-  // A host exception went through the instance (V8's stack overflowed inside the wasm: deeply nested JSON does that
-  // whatever QuickJS's own stack limit): its state is unknown, so it is never touched again, only dropped.
-  let poisoned = false
-  let settle!: (r: ScriptRun) => void
-  const done = new Promise<ScriptRun>((resolve) => (settle = resolve))
-
-  const dispose = (): void => {
-    if (disposed) return
-    disposed = true
-    const pending = [...deferreds]
-    deferreds.clear()
-    if (poisoned) return
-    try {
-      for (const d of pending) if (d.alive) d.dispose()
-      vm.dispose()
-      rt.dispose()
-    } catch {
-      // A leaked handle makes QuickJS assert here; the instance is per script and the run is over either way.
-      leaks.count++
-    }
-  }
-  const finish = (r: Pick<ScriptRun, 'ok' | 'value' | 'error' | 'cause'>): void => {
-    if (finished) return
-    finished = true
-    stop.abort()
-    clearInterval(watch)
-    opts.signal?.removeEventListener('abort', onAbort)
-    settle({ ...r, logs, calls, ms: Date.now() - started })
-    if (depth === 0) dispose()
-  }
-  /** Every call from main into QuickJS goes through here: undefined once the instance is gone or poisoned. */
-  const inVm = <T,>(f: () => T): T | undefined => {
-    if (disposed || poisoned) return undefined
-    depth++
-    try {
-      return f()
-    } catch (err) {
-      poisoned = true
-      finish({ ok: false, cause: 'error', error: err instanceof RangeError ? '脚本出错：嵌套或递归太深（栈溢出）' : '脚本出错：沙箱内部错误' })
-      return undefined
-    } finally {
-      if (--depth === 0 && finished) dispose()
-    }
-  }
-  /** A thrown value from QuickJS as a short message, and what kind of failure it was. */
-  const failure = (h: QuickJSHandle): Pick<ScriptRun, 'ok' | 'error' | 'cause'> => {
-    const e = inVm(() => {
-      try {
-        return vm.dump(h)
-      } finally {
-        h.dispose()
-      }
-    })
-    const o = (e && typeof e === 'object' ? e : {}) as { name?: unknown; message?: unknown }
-    const text = typeof o.message === 'string' ? `${typeof o.name === 'string' ? `${o.name}: ` : ''}${o.message}` : String(e)
-    if (stop.signal.aborted && !timedOut()) return { ok: false, error: '已停止', cause: 'stopped' }
-    if (timedOut() || /interrupted/.test(text)) return { ok: false, error: `脚本超过 ${limits.wallMs / 1000} 秒（不含等待审批的时间），已停止`, cause: 'timeout' }
-    if (/out of memory/i.test(text)) return { ok: false, error: `脚本内存超过 ${limits.memoryBytes >> 20} MB，已停止`, cause: 'memory' }
-    return { ok: false, error: `脚本出错：${text.slice(0, 500)}`, cause: 'error' }
-  }
-  const pump = (): void => {
-    if (finished) return
-    const r = inVm(() => rt.executePendingJobs())
-    if (r?.error) finish(failure(r.error))
-  }
-
-  // Host calls beyond `concurrency` wait for a slot (Promise.all over 100 items is fine).
+  const logs: string[] = []
+  let calls = 0
+  let completed = 0
   let active = 0
-  const waiting: (() => void)[] = []
-  const slot = (): Promise<void> => (active < limits.concurrency ? (active++, Promise.resolve()) : new Promise((resolve) => waiting.push(resolve)))
-  const release = (): void => {
-    const next = waiting.shift()
-    if (next) next()
-    else active--
-  }
-
-  const str = (h: QuickJSHandle | undefined): string | null => (h && vm.typeof(h) === 'string' ? vm.getString(h) : null)
-  const object = (text: string | null): Record<string, unknown> | null => {
-    try {
-      const v = text === null ? null : JSON.parse(text)
-      return v && typeof v === 'object' && !Array.isArray(v) ? v : null
-    } catch {
-      return null
+  let busySince = Date.now()
+  let busy = false
+  let observedCpu = 0
+  let workerCpu = 0
+  let ready = false
+  let ended = false
+  let logChars = 0
+  let messages = 0
+  const ids = new Set<number>()
+  const waiting: { resolve: () => void; reject: (error: Error) => void }[] = []
+  const slot = (): Promise<void> => active < limits.concurrency ? (active++, Promise.resolve()) : new Promise((resolve, reject) => waiting.push({ resolve, reject }))
+  const release = (): void => { const next = waiting.shift(); if (next) next.resolve(); else active-- }
+  const result = await new Promise<ScriptRun>((resolve) => {
+    const finish = (r: Partial<Pick<ScriptRun, 'value' | 'error' | 'cause' | 'logs'>> & Pick<ScriptRun, 'ok'>): void => {
+      if (ended) return
+      ended = true
+      stop.abort()
+      for (const queued of waiting.splice(0)) queued.reject(new Error('已停止'))
+      clearInterval(watch)
+      clearTimeout(startup)
+      opts.signal?.removeEventListener('abort', onAbort)
+      const done = (): void => { leaks.count--; resolve({ ...r, logs, calls, ms: Date.now() - started }) }
+      void worker.terminate().then(done, done)
     }
-  }
-  const awsFn = vm.newFunction('__aws', (...args) => {
-    const d = vm.newPromise()
-    deferreds.add(d)
-    void d.settled.then(() => {
-      deferreds.delete(d)
-      pump()
-    })
-    const reject = (message: string): void =>
-      void inVm(() => {
-        if (finished || !d.alive) return
-        const e = vm.newError(message)
-        d.reject(e)
-        e.dispose()
-      })
-    const [service, action, paramsText, optsText] = args.slice(0, 4).map(str)
-    const params = object(paramsText)
-    const options = object(optsText)
-    if (typeof service !== 'string' || typeof action !== 'string') reject('aws(service, action, params?, opts?)：service 和 action 必须是字符串')
-    else if (!params || !options) reject('aws()：params 和 opts 必须是 JSON 对象')
-    else if (++calls > limits.maxCalls) reject(`aws() 调用次数超过上限（${limits.maxCalls} 次）`)
-    else {
-      void slot()
-        .then(() => (finished ? Promise.reject(new Error('已停止')) : aws(service, action, params, options, stop.signal)))
-        .finally(release)
-        .then(
-          (json) => {
-            if (finished || !d.alive) return
-            if (typeof json !== 'string' || json.length > limits.resultChars) return reject(`${service}:${action} 的结果太大（上限 ${limits.resultChars} 字符），请加过滤条件或分页`)
-            inVm(() => {
-              const s = vm.newString(json)
-              d.resolve(s)
-              s.dispose()
-            })
-          },
-          (err: unknown) => reject((err instanceof Error ? err.message : String(err)).slice(0, 600))
-        )
-    }
-    return d.handle
-  })
-  vm.setProp(vm.global, '__aws', awsFn)
-  awsFn.dispose()
-  const logFn = vm.newFunction('__log', (h) => {
-    const line = str(h)
-    if (line === null || logChars >= limits.logChars) return
-    const kept = line.slice(0, limits.logChars - logChars)
-    logChars += kept.length
-    logs.push(kept.length < line.length ? `${kept}…（日志已截断）` : kept)
-  })
-  vm.setProp(vm.global, '__log', logFn)
-  logFn.dispose()
-
-  const onAbort = (): void => finish({ ok: false, error: '已停止', cause: 'stopped' })
-  opts.signal?.addEventListener('abort', onAbort, { once: true })
-  // An idle script (waiting on calls) never hits the interrupt handler.
-  const watch = setInterval(() => timedOut() && finish({ ok: false, error: `脚本超过 ${limits.wallMs / 1000} 秒（不含等待审批的时间），已停止`, cause: 'timeout' }), 200)
-  watch.unref?.()
-
-  const prelude = inVm(() => vm.evalCode(PRELUDE, 'prelude.js'))
-  if (prelude?.error) finish(failure(prelude.error))
-  else prelude?.value.dispose()
-  if (finished) return done
-  const r = inVm(() => vm.evalCode(wrap(code), 'script.js'))
-  if (!r) return done
-  if (r.error) {
-    finish(failure(r.error))
-    return done
-  }
-  const value = r.value
-  const result = inVm(() => {
-    try {
-      return vm.resolvePromise(value)
-    } finally {
-      value.dispose()
-    }
-  })
-  void result?.then((res) => {
-    if (finished) return
-    if (res.error) return finish(failure(res.error))
-    const json = inVm(() => {
-      try {
-        return vm.getString(res.value)
-      } finally {
-        res.value.dispose()
+    const timeoutText = (): string => `脚本超过 ${duration(limits.wallMs)}（不含等待审批的时间），已停止；已完成 ${completed} 次调用（已调用 ${calls} 次 aws()）`
+    const sliceText = `脚本连续同步计算超过 ${duration(limits.syncSliceMs, true)}被中断，请把计算拆小或减少本地循环`
+    const cpuText = `脚本累计本地计算超过 ${limits.scriptCpuMs / 1000} 秒被中断`
+    const onAbort = (): void => finish({ ok: false, error: '已停止', cause: 'stopped' })
+    opts.signal?.addEventListener('abort', onAbort, { once: true })
+    worker.on('message', (raw: unknown) => {
+      if (ended) return
+      if (++messages > MAX_WORKER_MESSAGES) return finish({ ok: false, error: INTERNAL_ERROR, cause: 'error' })
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return
+      const m = raw as Record<string, unknown>
+      if (m.type === 'ready' && !ready) { clock.start(); ready = true; clearTimeout(startup) }
+      if (m.type === 'log' && typeof m.line === 'string' && logs.length < MAX_LOG_LINES && logChars < limits.logChars) {
+        const line = m.line.slice(0, limits.logChars - logChars)
+        logs.push(line)
+        logChars += line.length
       }
+      if (m.type === 'enter' && !busy) { busy = true; busySince = Date.now() }
+      if (m.type === 'yield' && busy) {
+        observedCpu += Date.now() - busySince
+        busy = false
+        if (typeof m.cpuUsed === 'number' && Number.isFinite(m.cpuUsed) && m.cpuUsed >= 0) workerCpu = Math.max(workerCpu, m.cpuUsed)
+        if (Math.max(observedCpu, workerCpu) > limits.scriptCpuMs) finish({ ok: false, error: cpuText, cause: 'timeout' })
+      }
+      if (m.type === 'result') {
+        if (typeof m.result !== 'string' || m.result.length > MAX_RESULT_MESSAGE_CHARS) return finish({ ok: false, error: INTERNAL_ERROR, cause: 'error' })
+        let candidate: Record<string, unknown>
+        try {
+          const parsed: unknown = JSON.parse(m.result, safeJson)
+          candidate = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+        } catch { return finish({ ok: false, error: INTERNAL_ERROR, cause: 'error' }) }
+        const ok = candidate.ok === true
+        const error = typeof candidate.error === 'string' ? candidate.error.slice(0, 600) : INTERNAL_ERROR
+        const cause = RESULT_CAUSES.has(candidate.cause as ScriptRun['cause']) ? candidate.cause as ScriptRun['cause'] : 'error'
+        if (!ok) return finish({ ok: false, error, cause })
+        try {
+          const value = candidate.value
+          if (value !== null && !['string', 'number', 'boolean', 'object'].includes(typeof value)) throw new Error('invalid value')
+          if (typeof value === 'number' && !Number.isFinite(value)) throw new Error('invalid value')
+          const json = JSON.stringify(value)
+          if (typeof json !== 'string') throw new Error('invalid value')
+          if (json.length > MAX_RESULT_CHARS) return finish({ ok: true, value: { truncated: true, note: `返回值太大（${json.length} 字符，上限 ${MAX_RESULT_CHARS}），已丢弃。请只返回汇总。` } })
+          return finish({ ok: true, value: JSON.parse(json, safeJson) as unknown })
+        } catch {
+          return finish({ ok: false, error: '脚本返回值无效或超过大小上限', cause: 'error' })
+        }
+      }
+      if (m.type !== 'aws') return
+      const id = m.id
+      if (!Number.isSafeInteger(id) || (id as number) <= 0 || ids.has(id as number)) return
+      if (ids.size >= limits.maxCalls) return finish({ ok: false, error: INTERNAL_ERROR, cause: 'error' })
+      ids.add(id as number)
+      const replyError = (error: string): void => { if (!ended) worker.postMessage({ id, error: error.slice(0, 600) }) }
+      const service = m.service, action = m.action
+      if (typeof m.params === 'string' && m.params.length > 4000) { replyError('aws() 参数太大（上限 4000 字符）'); return }
+      const reserved = { found: false }
+      const params = plainJsonObject(m.params, 4000, reserved)
+      const options = plainJsonObject(m.opts, Math.min(limits.codeChars, SCRIPT_LIMITS.codeChars))
+      if (reserved.found) { replyError('params 里不能用 __proto__/constructor/prototype 作键名'); return }
+      if (typeof service !== 'string' || service.length < 1 || service.length > 50 ||
+          typeof action !== 'string' || action.length < 1 || action.length > 100 ||
+          !params || !options ||
+          ('region' in options && (typeof options.region !== 'string' || !/^[a-z0-9-]{1,30}$/.test(options.region)))) {
+        replyError('aws() 参数无效')
+        return
+      }
+      void slot().then(async () => {
+        try {
+          if (ended) return
+          if (calls >= limits.maxCalls) throw new Error(`aws() 调用次数超过上限（${limits.maxCalls} 次）`)
+          calls++
+          opts.onCalls?.(calls)
+          const json = await aws(service, action, params, options, stop.signal)
+          if (ended) return
+          if (typeof json !== 'string' || json.length > limits.resultChars) throw new Error(`${service}:${action} 的结果太大（上限 ${limits.resultChars} 字符），请加过滤条件或分页`)
+          completed++
+          worker.postMessage({ id, json })
+        } catch (err) {
+          if (!ended) worker.postMessage({ id, error: (err instanceof Error ? err.message : String(err)).slice(0, 600) })
+        } finally { release() }
+      }).catch(() => {})
     })
-    if (json === undefined) return
-    if (json.length > limits.returnChars) {
-      return finish({ ok: true, value: { truncated: true, note: `返回值太大（${json.length} 字符，上限 ${limits.returnChars}），已丢弃。请只返回汇总。` } })
-    }
-    finish({ ok: true, value: JSON.parse(json) })
+    worker.on('error', (err: Error & { code?: string }) => {
+      if (err?.code) console.warn(`sandbox worker error: ${/^[A-Z0-9_]{1,80}$/.test(err.code) ? err.code : 'UNKNOWN'}`)
+      finish(err?.code === 'ERR_WORKER_OUT_OF_MEMORY'
+        ? { ok: false, error: '脚本内存不足，沙箱工作线程已停止', cause: 'memory' }
+        : { ok: false, error: INTERNAL_ERROR, cause: 'error' })
+    })
+    worker.on('messageerror', () => finish({ ok: false, error: INTERNAL_ERROR, cause: 'error' }))
+    worker.on('exit', () => finish({ ok: false, error: '脚本出错：沙箱工作线程意外退出', cause: 'error' }))
+    const watch = setInterval(() => {
+      if (ready && clock.elapsed() >= limits.wallMs) finish({ ok: false, error: timeoutText(), cause: 'timeout' })
+      else if (busy && Date.now() - busySince > limits.syncSliceMs + SLICE_GRACE_MS) {
+        setImmediate(() => {
+          if (!ended && busy && Date.now() - busySince > limits.syncSliceMs + SLICE_GRACE_MS) finish({ ok: false, error: sliceText, cause: 'timeout' })
+        })
+      }
+    }, 25)
+    watch.unref?.()
+    const startup = setTimeout(() => finish({ ok: false, error: '脚本沙箱启动超时', cause: 'timeout' }), STARTUP_MS)
+    if (opts.signal?.aborted) onAbort()
   })
-  pump()
-  return done
+  return result
 }

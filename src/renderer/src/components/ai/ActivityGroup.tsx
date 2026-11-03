@@ -84,12 +84,14 @@ export function Step({ item }: { item: ToolItem }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const label = item.status === 'running' ? `正在${item.label}…` : item.label
   const more = item.code !== undefined || (item.calls?.length ?? 0) > 0
+  const announceAt = item.seconds === undefined ? 0 : item.seconds >= 60 ? Math.floor(item.seconds / 60) * 60 : item.seconds >= 30 ? 30 : 0
   const text = (
     <>
       <StatusIcon status={item.status} />
       <span className="ai-step-text">
         {label}
         {item.summary && <span className="ai-step-summary"> · {item.summary}</span>}
+        {item.seconds !== undefined && <span className="ai-step-summary"> · 已运行 {item.seconds} 秒{item.callCount !== undefined && ` · 已调用 ${item.callCount} 次`}</span>}
         {item.status === 'waiting' && <span className="ai-step-summary"> · 等待你在下面的<span className="ai-keep-word">卡片</span>上审批</span>}
       </span>
       {item.ms !== undefined && <span className="ai-act-duration">{duration(item.ms)}</span>}
@@ -107,6 +109,7 @@ export function Step({ item }: { item: ToolItem }): React.JSX.Element {
       ) : (
         <div className="ai-step-row">{text}</div>
       )}
+      <span className="sr-only" aria-live="polite">{announceAt > 0 ? `已运行 ${announceAt} 秒` : ''}</span>
       {more && open && <StepDetail item={item} />}
     </li>
   )
