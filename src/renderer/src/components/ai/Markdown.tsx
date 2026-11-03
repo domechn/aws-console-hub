@@ -27,6 +27,7 @@ interface Props {
 export function Markdown({ text, onLink, consoleOnly }: Props): React.JSX.Element {
   const components: Components = {
     img: () => null,
+    table: ({ children }) => <div className="md-table"><table>{children}</table></div>,
     a: ({ href, children }) => {
       const url = safeHref(href, consoleOnly)
       if (!url) return <span>{children}</span>

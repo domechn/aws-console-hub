@@ -110,6 +110,7 @@ export async function runScript(code: string, aws: ScriptAws, opts: { signal?: A
   if (code.length > limits.codeChars) return { ok: false, error: `代码太长（${code.length} 字符，上限 ${limits.codeChars}）`, cause: 'too-long', logs, calls, ms: 0 }
   if (opts.signal?.aborted) return { ok: false, error: '已停止', cause: 'stopped', logs, calls, ms: 0 }
   const mod = await load()
+  if (opts.signal?.aborted) return { ok: false, error: '已停止', cause: 'stopped', logs, calls, ms: Date.now() - started }
   const stop = new AbortController()
   const timedOut = (): boolean => clock.elapsed() > limits.wallMs
   const rt = mod.newRuntime()

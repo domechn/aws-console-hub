@@ -68,7 +68,8 @@ it('assistant feedback is a local toggle with accessible labels', () => {
 })
 
 it('failed and stopped replies have local retry actions and readable reasons', () => {
-  const failed = renderToStaticMarkup(<MessageFailure error={'Bedrock 限流：稍后再试。\n原始错误：ThrottlingException'} onRetry={() => {}} onModel={() => {}} />)
+  const failed = renderToStaticMarkup(<MessageFailure error={'Bedrock 限流：稍后再试。\n原始错误：ThrottlingException'} diagnosticText="safe diagnostic" onRetry={() => {}} onModel={() => {}} />)
+  expect(failed).toContain('复制诊断信息')
   expect(failed).toContain('回答没有完成。')
   expect(failed).toContain('Bedrock 限流')
   expect(failed).toContain('ThrottlingException')

@@ -33,6 +33,8 @@ export const AUDIT_TYPE_LABEL: Record<string, string> = {
   approval_tampered: '审批校验失败',
   tool_call: '工具调用',
   tool_refused: '工具被拒',
+  model_request_stalled: '模型请求停滞',
+  model_request_retried: '模型请求重试',
   ai_data_deleted: '删除 AI 数据'
 }
 

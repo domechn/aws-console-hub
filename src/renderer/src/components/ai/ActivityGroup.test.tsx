@@ -27,6 +27,9 @@ describe('groupTools', () => {
 })
 
 describe('ActivityGroup', () => {
+  it('renders no activity container when there are no tool items', () => {
+    expect(render([])).toBe('')
+  })
   it('shows completed step times and their total, while missing times stay hidden', () => {
     const a = { ...tool('a', '查询 EC2 实例', 'ok'), ms: 400 }
     const b = { ...tool('b', '运行脚本', 'ok'), ms: 4400 }

@@ -36,6 +36,7 @@ export interface StoredAgentMessage {
   durationMs?: number
   error?: string
   retryable?: boolean
+  diagnosticText?: string
   /** User turns: the page they were asked on (app metadata, not sent to the model). */
   page?: { label: string; url: string }
   rowId?: number
@@ -161,7 +162,7 @@ export function toChatItems(
   let assistantOrdinal = 0
   for (const m of messages) {
     if (m.role === 'note') {
-      items.push(m.error ? { kind: 'assistant', text: '', error: m.error, ...(m.retryable === false && { retryable: false }) } : { kind: 'note', text: textOf(m.content) })
+      items.push(m.error ? { kind: 'assistant', text: '', error: m.error, ...(m.diagnosticText && { diagnosticText: m.diagnosticText }), ...(m.retryable === false && { retryable: false }) } : { kind: 'note', text: textOf(m.content) })
     } else if (m.role === 'user') {
       const text = textOf(m.content)
       if (text !== ANSWER_REQUEST && text !== LIMIT_REQUEST) {
@@ -198,7 +199,7 @@ export function toChatItems(
       const text = textOf(m.content)
       const error = m.stopReason === 'error' ? (m.errorMessage ?? '请求失败') : undefined
       if (text || error || m.stopReason === 'aborted') {
-        turnAssistant = { kind: 'assistant', text, ...(error && { error }), ...(m.stopReason === 'aborted' && { aborted: true }), ...(m.rowId !== undefined && { ordinal: assistantOrdinal }), ...(m.feedback && { feedback: m.feedback }) }
+        turnAssistant = { kind: 'assistant', text, ...(error && { error }), ...(m.diagnosticText && { diagnosticText: m.diagnosticText }), ...(m.stopReason === 'aborted' && { aborted: true }), ...(m.rowId !== undefined && { ordinal: assistantOrdinal }), ...(m.feedback && { feedback: m.feedback }) }
         items.push(turnAssistant)
         assistantOrdinal++
       }

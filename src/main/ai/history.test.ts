@@ -34,6 +34,15 @@ describe('cost', () => {
 })
 
 describe('toChatItems', () => {
+  it('keeps copied diagnostic text on stored notes and assistant turns', () => {
+    expect(toChatItems([
+      { role: 'note', content: 'failed', error: 'setup failed', diagnosticText: 'setup phases' },
+      { role: 'assistant', content: [{ type: 'text', text: 'partial' }], stopReason: 'error', errorMessage: 'provider failed', diagnosticText: 'provider phases' }
+    ])).toMatchObject([
+      { kind: 'assistant', diagnosticText: 'setup phases' },
+      { kind: 'assistant', diagnosticText: 'provider phases' }
+    ])
+  })
   it('rebuilds tool duration and whole-turn usage from stored messages', () => {
     const items = toChatItems([
       { role: 'user', content: '查', timestamp: 100 },

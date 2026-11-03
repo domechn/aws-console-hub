@@ -45,6 +45,25 @@ describe('buildSystemPrompt', () => {
     expect(p).toContain('run_script 只能读，变更仍然只能用 propose_change')
   })
 
+  it('qualifies earlier mutable state and distinct AWS states, costs, and instance-type advice', () => {
+    const p = at()
+    expect(p).toContain('截至上一轮查询')
+    expect(p).toContain('重新用工具查询')
+    expect(p).not.toMatch(/IP、成本、告警/)
+    expect(p).toContain('此前轮次的成本数字应标「截至上一轮查询」')
+    expect(p).toContain('cost_summary 或其他工具返回的价格')
+    expect(p).not.toContain('定价工具结果')
+    expect(p).toContain('modifying')
+    expect(p).toContain('optimizing')
+    expect(p).toContain('API 原样')
+    expect(p).toContain('实例小时价')
+    expect(p).toContain('EBS 不变')
+    expect(p).toContain('估算')
+    expect(p).toContain('InsufficientInstanceCapacity')
+    expect(p).toContain('vCPU 配额')
+    expect(p).toContain('instance-store')
+  })
+
   it('quick replies: labels carry the key difference, text names the target, still no approval wording', () => {
     const p = buildSystemPrompt({ account, region: 'ap-northeast-1', now: new Date(), quickReplies: true })
     expect(p).toContain('「停止（可恢复）」「终止（不可恢复）」')

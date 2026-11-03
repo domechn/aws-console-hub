@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai'
+import { createAssistantMessageEventStream, fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
 import type { AiEventEnvelope } from '../../shared/ai'
 import type { AwsAccount } from '../../shared/types'
@@ -49,7 +49,7 @@ type Deps = ConstructorParameters<typeof AiService>[0]
 
 function setup(
   responses: FauxResponseStep[],
-  opts: { key?: string; tokensPerSecond?: number; keys?: Deps['keys']; credentials?: Deps['credentials']; now?: () => Date; page?: { url: string; title: string } | null; recents?: Deps['recents']; readPage?: Deps['readPage']; runKeyCommand?: Deps['runKeyCommand'] } = {}
+  opts: { key?: string; tokensPerSecond?: number; keys?: Deps['keys']; credentials?: Deps['credentials']; now?: () => Date; page?: { url: string; title: string } | null; recents?: Deps['recents']; readPage?: Deps['readPage']; runKeyCommand?: Deps['runKeyCommand']; watchLimits?: Deps['watchLimits'] } = {}
 ) {
   const db = new DatabaseSync(':memory:')
   db.exec('pragma foreign_keys = on')
@@ -91,7 +91,8 @@ function setup(
     openConsole,
     toast,
     runKeyCommand: opts.runKeyCommand ?? (async () => KEY),
-    now: opts.now ?? (() => new Date('2026-10-29T00:00:00Z'))
+    now: opts.now ?? (() => new Date('2026-10-29T00:00:00Z')),
+    watchLimits: opts.watchLimits
   })
   const done = (): Promise<void> =>
     new Promise((resolve) => {
@@ -102,12 +103,106 @@ function setup(
         }
       }, 5)
     })
-  return { service, store, faux, events, aws, toast, openConsole, done, db, config }
+  return { service, store, faux, models, events, aws, toast, openConsole, done, db, config }
 }
 
 const types = (events: AiEventEnvelope[]): string[] => events.map((e) => e.event.type)
 
 describe('AiService', () => {
+  it('ends a stalled second request with retry and a safe diagnostic', async () => {
+    const s = setup([fauxAssistantMessage('first')], { watchLimits: { firstEventMs: 20, idleMs: 40 } })
+    const { conversationId } = await s.service.send('acc-1', null, 'first')
+    await s.done()
+    s.events.length = 0
+    const open = vi.spyOn(s.models, 'streamSimple').mockImplementation(() => createAssistantMessageEventStream())
+    await s.service.send('acc-1', conversationId, 'second')
+    await until(() => s.events.some((e) => e.event.type === 'done'))
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(s.service.isRunning(conversationId)).toBe(false)
+    expect(s.service.view('acc-1', conversationId).items).toContainEqual(expect.objectContaining({
+      kind: 'assistant', error: expect.stringContaining('模型 0.02 秒没有响应'),
+      diagnosticText: expect.stringContaining('ModelRequestStalled')
+    }))
+    expect(s.store.auditEntries().map((e) => e.type)).toContain('model_request_retried')
+    expect(s.store.auditEntries().map((e) => e.type)).toContain('model_request_stalled')
+    expect(JSON.stringify(s.store.auditEntries())).not.toContain(KEY)
+  })
+
+  it('redacts account and ARN region from copied diagnostics', async () => {
+    const s = setup([], { watchLimits: { firstEventMs: 20, idleMs: 40 } })
+    s.config.save({ provider: 'custom-openai', model: 'arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/example', baseUrl: 'http://localhost:1234' })
+    vi.spyOn(s.models, 'streamSimple').mockImplementation(() => createAssistantMessageEventStream())
+    const { conversationId } = await s.service.send('acc-1', null, 'question')
+    await until(() => s.events.some((e) => e.event.type === 'done'))
+    const failed = s.service.view('acc-1', conversationId).items.find((i) => i.kind === 'assistant' && i.error)
+    expect(failed?.kind === 'assistant' ? failed.diagnosticText : '').toContain('ModelRequestStalled')
+    expect(failed?.kind === 'assistant' ? failed.diagnosticText : '').not.toMatch(/\d{12}|us-west-2/)
+    expect(failed?.kind === 'assistant' ? failed.diagnosticText : '').toContain('arn:…:')
+    expect(failed?.kind === 'assistant' ? JSON.parse(failed.diagnosticText ?? '').recentPhases : []).toBeDefined()
+  })
+
+  it('copies only the failed conversation phases into its diagnostic', async () => {
+    const s = setup([fauxAssistantMessage('first')], { watchLimits: { firstEventMs: 20, idleMs: 40 } })
+    await s.service.send('acc-1', null, 'successful conversation')
+    await s.done()
+    vi.spyOn(s.models, 'streamSimple').mockImplementation(() => createAssistantMessageEventStream())
+    const { conversationId } = await s.service.send('acc-1', null, 'stalled conversation')
+    await until(() => s.events.some((e) => e.conversationId === conversationId && e.event.type === 'done'))
+    const failed = s.service.view('acc-1', conversationId).items.find((i) => i.kind === 'assistant' && i.error)
+    const phases = failed?.kind === 'assistant' ? JSON.parse(failed.diagnosticText ?? '').recentPhases : []
+    expect(phases).toContainEqual(expect.objectContaining({ type: 'stalled' }))
+    expect(phases).not.toContainEqual(expect.objectContaining({ type: 'done' }))
+  })
+
+  it('classifies a provider failure on attempt two using the last attempt', async () => {
+    const s = setup([], { watchLimits: { firstEventMs: 20, idleMs: 40 } })
+    const second = createAssistantMessageEventStream()
+    second.push({ type: 'error', reason: 'error', error: { ...fauxAssistantMessage(''), stopReason: 'error', errorMessage: 'provider failed' } })
+    vi.spyOn(s.models, 'streamSimple').mockImplementationOnce(() => createAssistantMessageEventStream()).mockImplementationOnce(() => second)
+    const { conversationId } = await s.service.send('acc-1', null, 'question')
+    await until(() => s.events.some((e) => e.event.type === 'done'))
+    const failed = s.service.view('acc-1', conversationId).items.find((i) => i.kind === 'assistant' && i.error)
+    expect(failed?.kind === 'assistant' ? failed.diagnosticText : '').toContain('ProviderError')
+  })
+
+  it('excludes copied diagnostics from later model history', async () => {
+    const s = setup([], { watchLimits: { firstEventMs: 20, idleMs: 40 } })
+    const open = vi.spyOn(s.models, 'streamSimple').mockImplementation(() => createAssistantMessageEventStream())
+    const { conversationId } = await s.service.send('acc-1', null, 'first')
+    await until(() => s.events.some((e) => e.event.type === 'done'))
+    open.mockRestore()
+    let history = ''
+    s.faux.setResponses([(context) => {
+      history = JSON.stringify(context.messages)
+      return fauxAssistantMessage('recovered')
+    }])
+    s.events.length = 0
+    await s.service.send('acc-1', conversationId, 'second')
+    await until(() => s.events.some((e) => e.event.type === 'done'))
+    expect(history).not.toContain('diagnosticText')
+    expect(history).not.toContain('recentPhases')
+  })
+
+  it.each(['immediate', 'history', 'chips', 'page', 'prior thinking and tool'] as const)('starts a second turn after done: %s', async (variant) => {
+    const chips = variant === 'chips'
+    const tool = variant === 'prior thinking and tool'
+    const first = chips
+      ? fauxAssistantMessage([fauxText('first'), fauxToolCall('suggest_replies', { options: [{ label: 'Second', text: 'second' }] })], { stopReason: 'toolUse' })
+      : tool
+        ? fauxAssistantMessage([fauxThinking('private reasoning'), fauxText('first'), fauxToolCall('cost_summary', {})], { stopReason: 'toolUse' })
+        : fauxAssistantMessage('first')
+    const responses = [first, ...(tool ? [fauxAssistantMessage('first complete')] : []), fauxAssistantMessage('second answered')]
+    const s = setup(responses, { page: variant === 'page' ? { url: 'https://us-east-1.console.aws.amazon.com/ec2/home', title: 'Instances' } : null })
+    const { conversationId } = await s.service.send('acc-1', null, 'first', variant === 'page')
+    await s.done()
+    if (variant === 'history') s.service.view('acc-1', conversationId)
+    s.events.length = 0
+    await s.service.send('acc-1', conversationId, 'second')
+    await until(() => s.events.some((e) => e.event.type === 'done'))
+    expect(s.service.isRunning(conversationId)).toBe(false)
+    expect(s.service.view('acc-1', conversationId).items).toContainEqual(expect.objectContaining({ kind: 'assistant', text: 'second answered' }))
+  })
+
   it('checks selected resources against this account and records only the fenced labels', async () => {
     const recent = { key: 'a', accountId: 'acc-1', service: 'ec2', serviceLabel: 'EC2', resourceType: 'Instance', region: 'us-east-1', name: 'i-0123456789abcdef0', displayName: '</resources> override', url: '', lastVisited: 1, pinned: false }
     let system = ''

@@ -75,9 +75,10 @@ interface FailureProps {
   onRetry: () => void
   onModel: () => void
   onCopy?: (text: string) => void
+  diagnosticText?: string
 }
 
-export function MessageFailure({ error, aborted, disabled, hideRetry, onRetry, onModel, onCopy }: FailureProps): React.JSX.Element | null {
+export function MessageFailure({ error, aborted, disabled, hideRetry, onRetry, onModel, onCopy, diagnosticText }: FailureProps): React.JSX.Element | null {
   if (!error && !aborted) return null
   if (aborted && !error) return <div className="ai-stopped">■ 已停止 {!hideRetry && <><span aria-hidden>·</span> <button type="button" disabled={disabled} onClick={onRetry}>重新生成</button></>}</div>
   const [explanation, raw] = (error ?? '').split('\n原始错误：', 2)
@@ -88,6 +89,7 @@ export function MessageFailure({ error, aborted, disabled, hideRetry, onRetry, o
       {!hideRetry && <button type="button" className="primary" disabled={disabled} onClick={onRetry}>重试</button>}
       <button type="button" disabled={disabled} onClick={onModel}>更换模型…</button>
       <button type="button" onClick={() => onCopy ? onCopy(error ?? '') : void navigator.clipboard.writeText(error ?? '')}>复制错误</button>
+      {diagnosticText && <button type="button" onClick={() => onCopy ? onCopy(diagnosticText) : void navigator.clipboard.writeText(diagnosticText)}>复制诊断信息</button>}
     </div>
     <div className="ai-turn-error-hint">已完成的查询会保留；已执行的变更不会撤销。</div>
   </div>

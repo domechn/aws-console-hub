@@ -1,8 +1,32 @@
 import { describe, expect, it } from 'vitest'
-import { cardDisabledState, liveStatus, regenerationOrdinal, regenerationPreview, resultChange, pendingDecisionCount, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload, historyConversationDeleted } from './panelLogic'
+import { cardDisabledState, liveStatus, regenerationOrdinal, regenerationPreview, resultChange, pendingDecisionCount, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload, historyConversationDeleted, modelWaitingText } from './panelLogic'
 import { draftStore } from './Composer'
 
 describe('panel decisions', () => {
+  it('shows per-request elapsed time and announces only at 10 and 30 seconds', () => {
+    expect(modelWaitingText({ status: 'waiting', startedAt: 1_000 }, 13_000)).toEqual({ visual: '等待模型响应… 12 秒', announcement: '' })
+    expect(modelWaitingText({ status: 'waiting', startedAt: 1_000 }, 11_000).announcement).toBe('等待模型响应 10 秒')
+    expect(modelWaitingText({ status: 'waiting', startedAt: 1_000 }, 31_000).announcement).toBe('等待模型响应 30 秒')
+    expect(modelWaitingText({ status: 'retrying', startedAt: 11_000 }, 31_000).visual).toBe('模型响应较慢，正在重试…')
+  })
+  it('shows only the spinner before a status and after model output starts', () => {
+    expect(modelWaitingText(undefined, 30_000)).toEqual({ visual: '', announcement: '' })
+    expect(modelWaitingText({ status: 'received', startedAt: 1_000 }, 30_000)).toEqual({ visual: '', announcement: '' })
+  })
+  it('announces when a delayed tick crosses a threshold only once', () => {
+    const waiting = { status: 'waiting' as const, startedAt: 1_000 }
+    expect(modelWaitingText(waiting, 12_000, 10_000).announcement).toBe('等待模型响应 10 秒')
+    expect(modelWaitingText(waiting, 13_000, 12_000).announcement).toBe('')
+    expect(modelWaitingText(waiting, 33_000, 30_000).announcement).toBe('等待模型响应 30 秒')
+    expect(modelWaitingText(waiting, 34_000, 33_000).announcement).toBe('')
+    expect(modelWaitingText(waiting, 65_000, 5_000).announcement).toBe('等待模型响应 30 秒')
+  })
+  it('uses only the selected conversation status', () => {
+    const statuses = new Map([['old', { status: 'waiting' as const, startedAt: 1_000 }]])
+    expect(modelWaitingText(statuses.get('new'), 31_000).visual).toBe('')
+    statuses.set('new', { status: 'waiting', startedAt: 30_000 })
+    expect(modelWaitingText(statuses.get('new'), 31_000).visual).toBe('等待模型响应… 1 秒')
+  })
   it('leaves a finished conversation only when history says it was deleted', () => {
     expect(historyConversationDeleted('Error invoking remote method ai:history: 对话不存在')).toBe(true)
     expect(historyConversationDeleted('临时读取失败')).toBe(false)

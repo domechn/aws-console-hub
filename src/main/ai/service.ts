@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { app } from 'electron'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { Model, MutableModels } from '@earendil-works/pi-ai'
 import { BEDROCK_PROVIDER_ID, CUSTOM_PROVIDER_ID, DELETE_AUDIT_PHRASE, scriptCalls, scriptCode, toolLabel, type AiBudget, type AuditFilter, type AuditView, type MonthUsage } from '../../shared/ai'
@@ -49,6 +50,7 @@ import { checkReplies } from './replies'
 import { displayParams } from './shape'
 import { buildCardTool, buildPageTool, buildProposeTool, buildReadTools, buildRepliesTool, MAX_COST_CALLS } from './tools'
 import { checkPrompt, checkUserIndex, checkResourceContext, checkSearchQuery } from './validate'
+import { watchedStream, type WatchEvent, type WatchLimits } from './watchdog'
 
 /** Per user message (plan §9.8). */
 export const LIMITS = {
@@ -58,6 +60,8 @@ export const LIMITS = {
   maxTurns: 20,
   /** Whole run, LLM and tools; then it is aborted. Time on an approval card does not count. */
   runTimeoutMs: 5 * 60_000,
+  firstEventMs: 60_000,
+  idleEventMs: 90_000,
   /** Less than this left on the clock after a round: the run lands instead of starting another. */
   landingMs: 30_000,
   /** Share of the model's context window the transcript may fill (§6). */
@@ -97,6 +101,7 @@ export interface AiServiceDeps {
   toast: (message: string) => void
   runKeyCommand: (command: string) => Promise<string>
   now?: () => Date
+  watchLimits?: WatchLimits
 }
 
 interface Run {
@@ -165,6 +170,8 @@ export class AiService {
   private queueEpoch = new Map<string, number>()
   private pendingSetup = new Map<string, { cancel: (reason: string) => void; finished: Promise<void> }>()
   private regenerating = new Set<string>()
+  /** Metadata only; no prompts, response content, headers or credentials. */
+  private modelEvents: { conversationId: string; event: WatchEvent }[] = []
 
   constructor(private d: AiServiceDeps) {
     this.engine = new ProposalEngine({
@@ -1152,7 +1159,32 @@ export class AiService {
       // Which cap the run hit; it then lands: one last round where every tool call is blocked.
       let limit: string | null = null
       let landing = false
+      let requestEvents: WatchEvent[] = []
+      const diagnostic = (errorClass: string): string => JSON.stringify({
+        appVersion: app.getVersion?.() ?? 'unknown',
+        electronVersion: process.versions.electron ?? 'unknown',
+        provider: model.provider,
+        model: model.id,
+        account: account.name,
+        phases: requestEvents.map(({ type, phase, ms, attempt }) => ({ type, phase, ms, attempt })),
+        recentPhases: this.modelEvents.filter((item) => item.conversationId === conversationId).map(({ event: { type, phase, ms, attempt } }) => ({ type, phase, ms, attempt })),
+        retryCount: requestEvents.filter((e) => e.type === 'retrying').length,
+        errorClass
+      }, null, 2).replace(/arn:[^:\s"]+:[^:\s"]+:[^:\s"]*:\d{12}:/g, 'arn:…:').replace(/\d{12}/g, '[redacted]')
+      const onWatch = (event: WatchEvent): void => {
+        if (event.type === 'waiting' && event.attempt === 1) requestEvents = []
+        requestEvents.push(event)
+        this.modelEvents.push({ conversationId, event })
+        if (this.modelEvents.length > 50) this.modelEvents.shift()
+        if (event.type === 'stalled') audit('model_request_stalled', { phase: event.phase, ms: event.ms, attempt: event.attempt })
+        if (event.type === 'retrying') audit('model_request_retried', { phase: event.phase, ms: event.ms, attempt: event.attempt })
+        if (event.type === 'waiting') emit({ type: 'model-status', status: event.attempt === 1 ? 'waiting' : 'retrying', startedAt: Date.now() })
+        if (event.type === 'first') emit({ type: 'model-status', status: 'received', startedAt: Date.now() })
+      }
       const agent = createAppAgent(this.d.models, {
+        wrapStream: (base) => (requestModel, context, options) =>
+          watchedStream((signal) => base(requestModel, context, { ...options, signal }), requestModel, options?.signal,
+            this.d.watchLimits ?? { firstEventMs: LIMITS.firstEventMs, idleMs: LIMITS.idleEventMs }, onWatch),
         initialState: {
           // The account as it is now: the write switch may have changed since the run's account was looked up.
           systemPrompt: buildSystemPrompt({
@@ -1166,7 +1198,7 @@ export class AiService {
           tools,
           // The page a turn was asked on is the app's record, not something to send again.
           messages: this.transcript(conversationId).filter((m) => m.role !== 'note')
-            .map(({ page: _page, resources: priorResources, feedback: _feedback, ...m }) => m.role === 'user' && priorResources?.length
+            .map(({ page: _page, resources: priorResources, feedback: _feedback, diagnosticText: _diagnosticText, rowId: _rowId, retryable: _retryable, error: _error, ...m }) => m.role === 'user' && priorResources?.length
               ? { ...m, content: [{ type: 'text', text: textOf(m.content) + resourcePromptSection(priorResources) }] }
               : m) as AgentMessage[]
         },
@@ -1236,6 +1268,7 @@ export class AiService {
               : live.role === 'user' && textOf(live.content) === modelText
                 ? { ...live, content: [{ type: 'text' as const, text }], ...(page && { page: { label: page.label, url: page.url } }), ...(resources.length && { resources }) }
                 : live
+          if (m.role === 'assistant' && m.stopReason === 'error') m = { ...m, diagnosticText: diagnostic(requestEvents.at(-1)?.type === 'stalled' ? 'ModelRequestStalled' : 'ProviderError') }
           if (m.role === 'toolResult' && m.toolCallId && toolStarted.has(m.toolCallId)) {
             const started = toolStarted.get(m.toolCallId)!
             m = { ...m, durationMs: Math.max(0, Date.now() - started.at - (elapsedApprovalWait() - started.wait)) }

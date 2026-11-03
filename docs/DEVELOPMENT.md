@@ -50,6 +50,14 @@ npm run build:icons  # 用 Electron 自己把 SVG 光栅化成 icon.png / icon.i
 
 `npm run dev` 会先执行 `scripts/dev-app-name.js`：开发模式下进程跑在 `node_modules` 里的原版 `Electron.app` 中，macOS 从那个 bundle 的 `Info.plist` 取 Dock 名称，`productName` 和 `app.setName()` 都覆盖不了，所以只能就地打补丁。脚本是幂等的，非 macOS 上直接跳过。
 
+### AI 模型请求停滞排查
+
+每次主对话的模型流从发起请求开始等首个内容、思考、工具或完成事件最多 60 秒。HTTP 响应头对应的 `start` 事件不算首事件；超时且没有收到首事件时，该请求会被单独取消并自动重试一次。第一次尝试虽然在应用用量中记为零，服务商仍可能已对它计费。收到首事件后，任意两个事件间最多等待 90 秒；中途停滞会结束该轮，不自动重试，以免重复已有输出。整个用户提问仍受 5 分钟上限控制。正常的 40 秒首 token 不会触发取消。
+
+等待首事件时面板逐秒显示「等待模型响应…」，在跨过 10 秒和 30 秒时用礼貌播报提示读屏器；自动重试时显示「模型响应较慢，正在重试…」。Stop 随时取消，切换对话不会串用计时。失败消息的「复制诊断信息」包含应用与 Electron 版本、服务商与脱敏模型 ID、账号显示名称、最近请求各阶段耗时、最近 50 个请求状态事件中属于本对话的阶段与耗时、重试次数和错误类别。ARN 的 region 和账号以及其他 12 位数字会被脱敏；内容不含提问、回答、请求头或凭证。停滞与重试的阶段和耗时写入现有审计表，类型为 `model_request_stalled` 和 `model_request_retried`。
+
+复现使用 `src/main/ai/watchdog.test.ts` 的本地假流和 `src/main/ai/service.test.ts` 的假 provider；可把测试的 `watchLimits` 缩短以检查时序。pi 的 Bedrock 实现每次请求新建 `BedrockRuntimeClient`，本应用通过取消当前请求后再次调用它发起重试；目前该 provider 没有提供从应用层配置 `NodeHttpHandler` 的连接或请求超时、强制新 socket 的接口，故没有声称重试一定绕开代理保留的连接。真实 Console 会话未验证。
+
 ### 依赖版本与安全审计（2026-11-02）
 
 直接依赖继续在 `package.json` 中钉精确版本：Electron `43.8.6`、Vite `7.3.7`、Vitest `5.0.5`、electron-builder `26.18.0`。Vitest `3.2.7` 修复了原有的 UI 告警，但其 `@vitest/mocker` 和 `tinypool` 又被报告新漏洞，因此升到 `5.0.5`；现有测试在开发机 Node 22 上通过。`@earendil-works/pi-ai@1.4.0` 固定使用 `openai@7.19.0`，其可选 `undici` peer 没有上游固定版本；`overrides` 分别把运行时的 `undici` 钉在 `7.30.1`，把 `node-gyp` 下的 6.x 副本钉在 `6.29.1`。Node engines 仍为 `>=22.19.0`。
@@ -502,6 +510,8 @@ P2 元信息与渲染：`tool-start` / `tool-end` 携带毫秒时间戳 `t`；�
 费用：每条助手消息的 usage 按**该消息所用模型**的目录单价（$/百万 token）估算，`history.ts` 的 `sumUsage` 求和；忽略长上下文分档价。不在目录里的模型和目录价全为 0 的模型（自定义端点等）不计入，面板显示「价格未知」（有部分有价时显示「…（部分价格未知）」）。
 
 ### 面板
+
+助手的 markdown 表格由 `Markdown.tsx` 放进局部滚动容器；普通两列表格在 320、400、640px 面板内换行，窄面板里四列及以上的表格保留列宽并在表格内滚动，隔行底色与表头和代码底色区分。用户消息操作栏浮在消息上方，隐藏时不占回复间距且不拦截指针；首条用户消息上方留出完整操作栏的空间；没有工具项时 Activity 不生成行。system prompt 要求：上一轮读取的可变 AWS 状态用于本轮建议前重新查询，否则标「截至上一轮查询」；此前轮次的成本数字标「截至上一轮查询」，只在用户问成本时重新调用收费的 `cost_summary`；状态名照 API 原样区分；费用比较说明范围，价格若非来自 `cost_summary` 或其他工具则标为估算；更换实例类型按情形说明停止状态、AZ 容量、vCPU 配额及 instance-store 数据风险。
 
 `AssistantPanel.tsx`：每个账号一组对话（标题按钮打开带搜索的对话弹层、新建、重命名、删除、清空），切走的对话在后台跑完。消息列表在用户没往上翻时跟随到底。回复用 `Markdown.tsx` 渲染：`react-markdown` + `remark-gfm`，`skipHtml`（不渲染任何原始 HTML），不渲染图片，只有 http(s) 链接可点，点击走 `ai:open-link`（主窗口本身也禁止导航）。工具调用按 Activity 显示（`ActivityGroup.tsx`，[plans/ai-ux-redesign.md](plans/ai-ux-redesign.md) §3.3，已显示耗时）：连续的工具调用（`groupTools`，中间夹了文字、审批卡或用户消息就断开）合成一行「✓ N 步 · 名称、名称」，默认收起，点击（或回车）展开成带状态图标的步骤列表（`ol`，摘要不截断）；有失败时这一行写「· K 步失败」（红色），全部失败时图标是 ✗；运行中是「正在…… · 第 K 步」；有一步等审批时图标换成琥珀色暂停、写「等待你审批第 K 步」，并且自动展开（用户自己点过就按用户的）。卡片见上文。输入框（`Composer.tsx`，§3.7）：一个带边框的盒子，里面依次是当前页面标签（`PageChip`）、输入区和工具栏。输入区 `field-sizing: content`，1 行起、最多 8 行后内部滚动。按键由 `composerKey`（纯函数，有测试）决定：`↵` 发送、`⇧↵` 换行；输入法组字时（`isComposing` 或 `keyCode 229`）`↵` 和 `esc` 都不处理；`esc` 在生成中先停止，否则收起面板；输入框为空或光标在最开头时 `↑` / `↓` 翻本对话里发过的消息（`recall`：从最新的往回，改动过就退出浏览，`↓` 越过最新的一条时恢复原来输入的内容；不写 `localStorage`）。**输入框里的任何键都不会批准**，焦点也从不移到审批卡上。每个对话一份草稿（`draftStore` / `draftKey(账号, 对话)`，只在内存里），切到别的对话或账号再切回来还在，发送后清掉，发送失败只放回发起发送的对话，若其草稿已有新输入则保留新输入；切换时旧消息和输入立即隐藏，`↑` 只读当前对话历史，切换会重置回溯位置。新对话首条发送后输入框保持挂载和原有焦点；切账号时立即清掉旧对话 ID 和本对话用量。工具栏：「服务商 · 模型」标签（`modelLabel`，如「Bedrock · Claude Sonnet 5.5」）；当前服务商在目录里有多个模型时点开是一个原生 `popover`，列出模型和目录价，标题写明「对所有账号和对话生效」，选中后走现有的 `ai:config-save`（只传 `{ model }`，`App` 用返回的配置更新 `aiConfig`），底部是本对话和本月用量以及「AI 设置…」；自定义端点或只有一个模型时，标签直接打开 AI 设置。右侧是本对话的估算费用（如「$0.03」），点开的弹层里是本对话（`formatUsage`）和本月（`formatMonth`）用量，原来常驻的两行用量就收在这里；面板不超过 340px 时费用入口缩成图标，仍可查看本对话和本月用量。发送和停止是同一个 28px 按钮：有内容时是强调色 ↑，空的时候灰色禁用，生成中是深色 ■。预算提醒和「回答已暂停」状态行照旧显示在盒子上方，不收进弹层。空状态（`EmptyState.tsx`，§3.8）：账号（色点、名称、12 位 id、「只在这个账号里查询」）；「基于当前页面 · <页面标签>」3 条问题，由纯函数 `pageSuggestions(page)` 按 `PageContext.resource` 的 `service/resourceType` 生成（EC2 实例、S3 桶、Lambda 函数、RDS 数据库、SQS 队列各 3 条，其他资源和只有 `route` 的服务页用通用的 3 条，不是 Console 页面或在 Console 首页时整组不显示；只用页面上已有的资源名，不调用模型）；「常用」3 条（成本那条标「每次约 $0.01」）；最近 2 个对话（点击打开）；只读 / 可提议变更的说明，只读时有「允许提出变更…」（走 `toggleWrite` 的警告）。点建议问题只是把文字填进输入框并聚焦，**不会自动发送**。面板宽度 320–640px（拖左边缘，或聚焦后用 ← →），存在 `localStorage` 的 `aiPanelWidth`。AI 设置弹窗打开时照例隐藏 console view。样式：`styles.css` 从「AI assistant」一节起只用 token，`:root` 加了语义别名（§3.18：`--warn` `--warn-ink` `--warn-bg` `--warn-border` `--danger-bg` `--ok-bg` `--on-accent` `--rule` `--focus` `--popover-shadow` `--mono`），`--text-dim` 从 `#6b7684` 调到 `#5f6b7a`（在 `--bg-sunken` 上从约 4.3:1 提到 5.1:1）；`styles.test.ts` 扫这一节，出现十六进制色、`rgb()` / `hsl()`、`white` / `black` 就失败（`mask-image` 里的 `#000` 是不透明度，不算），并检查次要文字和发送按钮的对比度不低于 4.5:1、输入区 1–8 行的规则还在。
 

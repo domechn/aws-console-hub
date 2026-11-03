@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { Markdown, safeHref } from './Markdown'
 
 const render = (text: string): string => renderToStaticMarkup(<Markdown text={text} onLink={() => {}} />)
+const volumeTable = '| 项目 | 影响 |\n| --- | --- |\n| 实例状态 | 修改实例类型前需停止实例，当前状态应重新查询 |\n| EBS 卷 | 卷的修改状态为 `optimizing` 时仍可继续读写 |\n| IP 地址 | 停止并启动后公网 IP 可能改变 |\n| 实例存储 | 停止实例会丢失 instance-store 数据 |\n| 费用 | `m7i.large` 与 `m7i.xlarge` 的小时价格不同 |\n| 容量 | 指定 AZ 可能发生 `InsufficientInstanceCapacity` |'
+const wideTable = '| A | B | C | D | E | F | G | H |\n| - | - | - | - | - | - | - | - |\n| `optimizing` | 一 | 二 | 三 | 四 | 五 | 六 | `InsufficientInstanceCapacity` |'
 
 describe('Markdown (model output)', () => {
   it('renders ordinary markdown, including GFM tables', () => {
@@ -10,6 +12,16 @@ describe('Markdown (model output)', () => {
     expect(html).toContain('<strong>粗体</strong>')
     expect(html).toContain('<code>code</code>')
     expect(html).toContain('<table>')
+  })
+
+  it('renders narrow and eight-column tables inside a contained table viewport without clipping cell text', () => {
+    for (const [text, cells] of [[volumeTable, 14], [wideTable, 16]] as const) {
+      const html = render(text)
+      expect(html).toContain('<div class="md-table">')
+      expect(html.match(/<(?:th|td)\b/g)).toHaveLength(cells)
+      expect(html).toContain('InsufficientInstanceCapacity')
+    }
+    expect(render(volumeTable)).toContain('<code>optimizing</code>')
   })
 
   it('drops raw HTML instead of rendering it', () => {

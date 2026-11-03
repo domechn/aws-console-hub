@@ -182,9 +182,10 @@ export function appStreamFn(models: Models, maxTokens?: number): StreamFn {
 }
 
 /** `maxTokens`: a cap on each reply's output (the impact analysis keeps its runs small). */
-export function createAppAgent(models: Models, options: Omit<AgentOptions, 'streamFn' | 'identity'> & { maxTokens?: number }): Agent {
-  const { maxTokens, ...rest } = options
-  return new Agent({ ...rest, streamFn: appStreamFn(models, maxTokens), identity: APP_IDENTITY })
+export function createAppAgent(models: Models, options: Omit<AgentOptions, 'streamFn' | 'identity'> & { maxTokens?: number; wrapStream?: (stream: StreamFn) => StreamFn }): Agent {
+  const { maxTokens, wrapStream, ...rest } = options
+  const stream = appStreamFn(models, maxTokens)
+  return new Agent({ ...rest, streamFn: wrapStream ? wrapStream(stream) : stream, identity: APP_IDENTITY })
 }
 
 /** Models with every built-in provider registered. */

@@ -95,4 +95,33 @@ describe('AI panel CSS (plan ai-ux-redesign §3.18)', () => {
     expect(css).toMatch(/\.ai-pop-ft \{[^}]*flex-wrap: wrap;/)
     expect(css).toMatch(/\.ai-pop-ft > span:not\(\.ai-spacer\) \{[^}]*flex: 1 0 100%;/)
   })
+
+  it('fits ordinary markdown tables at 320, 400 and 640px and contains wide tables at narrow widths', () => {
+    const table = css.match(/\.md table \{([^}]+)\}/)?.[1] ?? ''
+    const cell = css.match(/\.md th,\s*\.md td \{([^}]+)\}/)?.[1] ?? ''
+    const code = css.match(/\.md :not\(pre\) > code \{([^}]+)\}/)?.[1] ?? ''
+    expect(table).toMatch(/width: 100%;/)
+    expect(table).toMatch(/table-layout: fixed;/)
+    expect(table).not.toMatch(/display: block|overflow-x/)
+    expect(cell).toMatch(/white-space: normal;/)
+    expect(cell).toMatch(/overflow-wrap: anywhere;/)
+    expect(code).toMatch(/white-space: pre-wrap;/)
+    expect(code).toMatch(/overflow-wrap: anywhere;/)
+    expect(css).toMatch(/\.md tr:nth-child\(even\) \{[^}]*color-mix\(in srgb, var\(--bg-hover\) \d+%, var\(--bg\)\)/)
+    expect(css).toMatch(/@container ai-panel \(max-width: 420px\) \{[^]*?\.md-table:has\(tr > :nth-child\(4\)\) table \{[^}]*min-width: 560px;/)
+    expect(css).toMatch(/\.md-table \{[^}]*overflow-x: auto;[^}]*padding-right: 1px;/)
+    expect(css).not.toMatch(/\.md-table:has\(tr > :nth-child\(4\)\) \{[^}]*box-shadow:/)
+  })
+
+  it('does not reserve space for a hidden user action bar or an empty assistant item', () => {
+    expect(css).toMatch(/\.ai-user-turn \{[^}]*position: relative;/)
+    expect(css).toMatch(/\.ai-message-actions\.user \{[^}]*position: absolute;/)
+    expect(css).toMatch(/\.ai-assistant-turn:empty \{[^}]*display: none;/)
+  })
+
+  it('keeps the hidden user bar out of hit testing and clears the first message top edge', () => {
+    expect(css).toMatch(/\.ai-message-actions\.user \{[^}]*opacity: 0;[^}]*pointer-events: none;/)
+    expect(css).toMatch(/\.ai-user-turn:hover \.ai-message-actions,[^}]*\.ai-user-turn:focus-within \.ai-message-actions \{[^}]*opacity: 1;[^}]*pointer-events: auto;/)
+    expect(css).toMatch(/\.ai-messages > \.ai-user-turn:first-child \{[^}]*margin-top: 24px;/)
+  })
 })

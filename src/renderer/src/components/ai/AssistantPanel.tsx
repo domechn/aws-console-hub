@@ -29,7 +29,7 @@ import { canSendText, submitText, type LocalCommand } from './commands'
 import { EmptyState } from './EmptyState'
 import { Markdown } from './Markdown'
 import { editKey, fromUserIndex, isOlder, MessageActions, MessageFailure, panelEscapeStops, truncatesChanges, turnActionsAt } from './MessageActions'
-import { cardDisabledState, liveStatus, pendingDecisionCount, regenerationOrdinal, regenerationPreview, resultChange, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload, historyConversationDeleted } from './panelLogic'
+import { cardDisabledState, liveStatus, pendingDecisionCount, regenerationOrdinal, regenerationPreview, resultChange, restoreQueuedDraft, removeQueuedPreview, mergeQueuedResources, invalidatesHistoryReload, historyConversationDeleted, modelWaitingText } from './panelLogic'
 import type { Block } from '../../../../shared/cards'
 import { PageChip } from './PageChip'
 import { ProposalCard } from './ProposalCard'
@@ -68,6 +68,8 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const [month, setMonth] = useState<MonthUsage | null>(null)
   // Conversations with a run in flight; runs keep going when the panel switches away.
   const [running, setRunning] = useState<ReadonlySet<string>>(new Set())
+  const [modelStatus, setModelStatus] = useState<ReadonlyMap<string, { status: 'waiting' | 'retrying' | 'received'; startedAt: number }>>(new Map())
+  const [clock, setClock] = useState(() => ({ now: Date.now(), previous: Date.now() - 1000 }))
   const [notice, setNotice] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [resources, setResources] = useState<ResourceCandidate[]>([])
@@ -114,6 +116,11 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const lastByAccount = useRef(new Map<string, string | null>())
 
   const accountId = account?.id ?? null
+  useEffect(() => {
+    if (!running.size) return
+    const timer = setInterval(() => setClock((current) => ({ now: Date.now(), previous: current.now })), 1000)
+    return () => clearInterval(timer)
+  }, [running])
   const closeConversations = (): void => {
     setConversationsOpen(false)
     setEditTarget(null)
@@ -126,6 +133,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
   const visibleConversations = conversationsAccount === accountId ? conversations : []
   const ready = aiReady(config)
   const busy = conversationId !== null && running.has(conversationId)
+  const waitText = modelWaitingText(conversationId ? modelStatus.get(conversationId) : undefined, clock.now, clock.previous)
   const hasPendingDecision = visibleItems.some((item) =>
     item.kind === 'approval' && item.approval.state === 'pending' || item.kind === 'proposal' && item.proposal.state === 'pending'
   )
@@ -265,6 +273,7 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
       ai.onEvent(({ accountId: acc, conversationId: id, runId, event }) => {
         if (invalidatesHistoryReload(runId, event.type)) eventVersions.current.set(id, (eventVersions.current.get(id) ?? 0) + 1)
         if (event.type === 'done') {
+          setModelStatus((prev) => { const next = new Map(prev); next.delete(id); return next })
           const version = eventVersions.current.get(id) ?? 0
           setRunning((prev) => {
             const next = new Set(prev)
@@ -287,6 +296,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
             })
           }
           return
+        }
+        if (event.type === 'model-status') {
+          setModelStatus((prev) => new Map(prev).set(id, { status: event.status, startedAt: event.startedAt }))
         }
         if (event.type === 'queue') {
           if (draftKey(acc, id) === currentRef.current) setQueue(event.items)
@@ -801,7 +813,9 @@ export function AssistantPanel({ account, config, width, onResize, onOpenSetting
         {/* Not while paused on an approval: the Activity line and the status line already say the run waits for the user. */}
         {busy && pendingCalls.length === 0 && visibleItems[visibleItems.length - 1]?.kind !== 'assistant' && visibleItems[visibleItems.length - 1]?.kind !== 'replies' && (
           <div className="ai-thinking">
-            <span className="spinner" />
+            <span className="spinner" aria-hidden="true" />
+            <span aria-hidden="true">{waitText.visual}</span>
+            <span className="sr-only" aria-live="polite">{waitText.announcement}</span>
           </div>
         )}
         {notice && !(account && ready && config) && <div className="ai-notice">{notice}</div>}
@@ -961,7 +975,7 @@ export function Item({ item, resultChange: change, index, userIndex, retryable, 
   return (
     <div className="ai-assistant-turn">
       {item.text && <div className="ai-msg assistant"><Markdown text={item.text} onLink={onLink} /></div>}
-      <MessageFailure error={item.error} aborted={item.aborted} disabled={actionsDisabled} hideRetry={!retryable || item.retryable === false} onRetry={() => onRegenerate(userIndex)} onModel={onOpenModel} onCopy={onCopy} />
+      <MessageFailure error={item.error} diagnosticText={item.diagnosticText} aborted={item.aborted} disabled={actionsDisabled} hideRetry={!retryable || item.retryable === false} onRetry={() => onRegenerate(userIndex)} onModel={onOpenModel} onCopy={onCopy} />
     </div>
   )
 }

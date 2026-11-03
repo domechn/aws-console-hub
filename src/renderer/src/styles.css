@@ -1317,6 +1317,10 @@ button.primary:disabled {
   max-width: 100%;
 }
 
+.ai-messages > .ai-user-turn:first-child {
+  margin-top: 24px;
+}
+
 .ai-icon-btn:focus-visible,
 .ai-text-btn:focus-visible,
 .ai-conv-select:focus-visible,
@@ -1501,6 +1505,7 @@ button.primary:disabled {
 
 .ai-user-turn {
   display: flex;
+  position: relative;
   align-self: flex-end;
   align-items: flex-end;
   flex-direction: column;
@@ -1518,6 +1523,10 @@ button.primary:disabled {
   gap: 6px;
 }
 
+.ai-assistant-turn:empty {
+  display: none;
+}
+
 .ai-message-actions {
   display: flex;
   align-items: center;
@@ -1530,12 +1539,19 @@ button.primary:disabled {
 }
 
 .ai-message-actions.user {
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  z-index: 1;
+  background: var(--bg);
   opacity: 0;
+  pointer-events: none;
 }
 
 .ai-user-turn:hover .ai-message-actions,
 .ai-user-turn:focus-within .ai-message-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .ai-message-buttons {
@@ -2445,6 +2461,24 @@ button.ai-card-btn:focus-visible,
   margin-left: 0;
 }
 
+.ai-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .ai-notice {
   color: var(--danger);
   font-size: 12px;
@@ -2993,7 +3027,6 @@ button.ai-page-off:hover {
 .md ul,
 .md ol,
 .md pre,
-.md table,
 .md blockquote {
   margin: 0 0 8px;
 }
@@ -3019,6 +3052,11 @@ button.ai-page-off:hover {
   padding: 1px 4px;
 }
 
+.md :not(pre) > code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .md pre {
   background: var(--bg-sunken);
   border: 1px solid var(--border);
@@ -3032,10 +3070,19 @@ button.ai-page-off:hover {
   background: none;
 }
 
-.md table {
-  border-collapse: collapse;
-  display: block;
+.md-table {
+  max-width: 100%;
   overflow-x: auto;
+  padding-right: 1px;
+  margin-bottom: 8px;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.md table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
   font-size: 12px;
 }
 
@@ -3044,11 +3091,27 @@ button.ai-page-off:hover {
   border: 1px solid var(--border);
   padding: 3px 7px;
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .md th {
   background: var(--bg-sunken);
+}
+
+.md tr:nth-child(even) {
+  background: color-mix(in srgb, var(--bg-hover) 35%, var(--bg));
+}
+
+@container ai-panel (max-width: 420px) {
+  .md-table:has(tr > :nth-child(4)) table {
+    min-width: 560px;
+    font-size: 11px;
+  }
+
+  .md-table:has(tr > :nth-child(4)) :is(th, td) {
+    padding: 2px 4px;
+  }
 }
 
 .md a {

@@ -168,7 +168,7 @@ export interface UsageTotals {
 export type ChatItem =
   /** `page`: the page label it was asked on, when page context was on. */
   | { kind: 'user'; text: string; page?: string; cardAction?: boolean; ordinal?: number; resources?: ResourceCandidate[] }
-  | { kind: 'assistant'; text: string; error?: string; aborted?: boolean; retryable?: boolean; usage?: { input: number; output: number; costUsd?: number }; model?: string; ordinal?: number; feedback?: 'up' | 'down' | null }
+  | { kind: 'assistant'; text: string; error?: string; diagnosticText?: string; aborted?: boolean; retryable?: boolean; usage?: { input: number; output: number; costUsd?: number }; model?: string; ordinal?: number; feedback?: 'up' | 'down' | null }
   /** waiting: paused on an approval card (the approval item follows it). run_script: `code` and the `calls` it made (`ec2:DescribeInstances ×3`), shown on expand. */
   | { kind: 'tool'; id: string; label: string; status: 'running' | 'waiting' | 'ok' | 'error'; summary?: string; code?: string; calls?: string[]; ms?: number }
   /** A render_card call (`id` is the tool call's); `card` is null while it streams (skeleton). */
@@ -202,6 +202,7 @@ export interface ConversationView {
 
 /** main → renderer `ai:event`. Display data only. */
 export type AiEvent =
+  | { type: 'model-status'; status: 'waiting' | 'retrying' | 'received'; startedAt: number }
   | { type: 'text-delta'; text: string }
   /** `code`: run_script's script, shown read-only on the row. */
   | { type: 'tool-start'; id: string; label: string; code?: string; t?: number }

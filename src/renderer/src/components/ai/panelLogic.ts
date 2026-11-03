@@ -2,6 +2,15 @@ import type { AiEvent, ChatItem, ResourceCandidate, ResourceRef } from '../../..
 import type { Block } from '../../../../shared/cards'
 import { restoreFailedSend } from './Composer'
 
+export function modelWaitingText(state: { status: 'waiting' | 'retrying' | 'received'; startedAt: number } | undefined, now: number, previousNow = now - 1000): { visual: string; announcement: string } {
+  if (!state || state.status === 'received') return { visual: '', announcement: '' }
+  const elapsed = Math.max(0, Math.floor((now - state.startedAt) / 1000))
+  if (state?.status === 'retrying') return { visual: '模型响应较慢，正在重试…', announcement: '模型响应较慢，正在重试' }
+  const previous = Math.max(0, Math.floor((previousNow - state.startedAt) / 1000))
+  const threshold = [30, 10].find((seconds) => previous < seconds && elapsed >= seconds)
+  return { visual: `等待模型响应… ${elapsed} 秒`, announcement: threshold ? `等待模型响应 ${threshold} 秒` : '' }
+}
+
 export function historyConversationDeleted(message: string): boolean {
   return message.includes('对话不存在')
 }

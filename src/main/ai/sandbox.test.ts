@@ -151,6 +151,15 @@ describe('run_script sandbox', () => {
     expect(aws2).not.toHaveBeenCalled()
   })
 
+  it('stops when aborted during QuickJS loading', async () => {
+    const ac = new AbortController()
+    const aws = vi.fn(echo)
+    const pending = run(`await aws('ec2', 'DescribeVpcs', {})`, aws, {}, ac.signal)
+    ac.abort()
+    expect(await pending).toMatchObject({ ok: false, cause: 'stopped' })
+    expect(aws).not.toHaveBeenCalled()
+  })
+
   it('a syntax error is a script error, not a crash', async () => {
     expect(await run('return {')).toMatchObject({ ok: false, cause: 'error', error: expect.stringMatching(/SyntaxError/) })
   })

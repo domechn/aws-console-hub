@@ -133,7 +133,7 @@ describe('model selection and connection test', () => {
 })
 
 describe('pi stays behind its entry points', () => {
-  it('is imported only by providers/service/tools/analysis in main, and never by the renderer or shared code', () => {
+  it('is imported only by main AI entry points, and never by the renderer or shared code', () => {
     const root = path.resolve(__dirname, '../..')
     const files = (dir: string): string[] =>
       fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(path.join(dir, e.name)) : [path.join(dir, e.name)]))
@@ -142,7 +142,7 @@ describe('pi stays behind its entry points', () => {
       .filter((f) => /from '@earendil-works\//.test(fs.readFileSync(f, 'utf8')))
       .map((f) => path.relative(root, f).split(path.sep).join('/'))
       .sort()
-    expect(importers).toEqual(['main/ai/analysis.ts', 'main/ai/providers.ts', 'main/ai/service.ts', 'main/ai/tools.ts'])
+    expect(importers).toEqual(['main/ai/analysis.ts', 'main/ai/providers.ts', 'main/ai/service.ts', 'main/ai/tools.ts', 'main/ai/watchdog.ts'])
     // Only providers.ts may construct an Agent: everything else goes through createAppAgent.
     const agents = files(root).filter((f) => !/\.test\./.test(f) && /new Agent\(/.test(fs.readFileSync(f, 'utf8')))
     expect(agents.map((f) => path.basename(f))).toEqual(['providers.ts'])

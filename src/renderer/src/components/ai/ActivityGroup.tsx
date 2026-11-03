@@ -32,8 +32,9 @@ function StatusIcon({ status }: { status: ToolItem['status'] }): React.JSX.Eleme
  * One line per run of tool calls: 「✓ N 步 · 名称…」. What must not hide behind the fold is on that line: a failed
  * step, the step waiting for approval (and the group opens by itself while it waits), the step running now.
  */
-export function ActivityGroup({ tools }: { tools: ToolItem[] }): React.JSX.Element {
+export function ActivityGroup({ tools }: { tools: ToolItem[] }): React.JSX.Element | null {
   const [open, setOpen] = useState<boolean | null>(null)
+  if (tools.length === 0) return null
   const waiting = tools.findIndex((t) => t.status === 'waiting')
   const running = tools.findIndex((t) => t.status === 'running')
   const failed = tools.filter((t) => t.status === 'error').length
