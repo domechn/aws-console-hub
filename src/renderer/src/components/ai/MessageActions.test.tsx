@@ -55,8 +55,15 @@ it('assistant actions show supplied metadata and disable regeneration while pend
   expect(html).toContain('重新生成')
   expect(html).toContain('disabled=""')
   expect(html).toMatch(/<button type="button">复制<\/button>/)
-  expect(html).toContain('claude · 1.1k tokens · ≈$0.01')
+  expect(html.replace(/<[^>]*>/g, '')).toContain('claude · 1.1k tokens · ≈$0.01')
   expect(renderToStaticMarkup(<MessageActions kind="assistant" text="hi" onRegenerate={() => {}} />)).not.toContain('tokens')
+})
+
+it('keeps the complete model identifier in the tooltip beside visible usage', () => {
+  const model = 'global.anthropic.claude-sonnet-5-5-long-inference-profile'
+  const html = renderToStaticMarkup(<MessageActions kind="assistant" text="ok" model={model} usage={{ input: 1000, output: 0, costUsd: 0.05 }} onRegenerate={() => {}} />)
+  expect(html).toContain(`<span class="ai-message-model" title="${model}">${model}</span>`)
+  expect(html).toContain('<span class="ai-message-usage"> · 1.0k tokens · ≈$0.05</span>')
 })
 
 it('assistant feedback is a local toggle with accessible labels', () => {

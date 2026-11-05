@@ -142,4 +142,19 @@ describe('AI panel CSS (plan ai-ux-redesign §3.18)', () => {
     expect(css).toMatch(/\.ai-user-turn:hover \.ai-message-actions,[^}]*\.ai-user-turn:focus-within \.ai-message-actions \{[^}]*opacity: 1;[^}]*pointer-events: auto;/)
     expect(css).toMatch(/\.ai-messages > \.ai-user-turn:first-child \{[^}]*margin-top: 24px;/)
   })
+
+  it('reserves the user action bar height only for later turns with actions', () => {
+    // Measure getBoundingClientRect() for adjacent assistant actions, user turn and user bar
+    // in a 400px .ai-messages container: the 10px gap needs 16px more for the 24px bar.
+    expect(css).toMatch(/\.ai-messages \{[^}]*gap: 10px;/)
+    expect(css).toMatch(/\.ai-messages > \.ai-user-turn:not\(:first-child\):has\(> \.ai-message-actions\.user\) \{[^}]*margin-top: 16px;/)
+    expect(css).toMatch(/\.ai-message-actions\.user \{[^}]*position: absolute;/)
+    expect(css).toMatch(/\.ai-user-turn:hover \.ai-message-actions,[^}]*\.ai-user-turn:focus-within \.ai-message-actions \{[^}]*opacity: 1;/)
+  })
+
+  it('truncates only the model identifier while preserving usage and cost', () => {
+    expect(css).toMatch(/\.ai-message-meta \{[^}]*max-width: 100%;[^}]*min-width: 0;[^}]*white-space: nowrap;/)
+    expect(css).toMatch(/\.ai-message-model \{[^}]*min-width: 0;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/)
+    expect(css).toMatch(/\.ai-message-usage \{[^}]*flex-shrink: 0;/)
+  })
 })

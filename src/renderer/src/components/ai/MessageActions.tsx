@@ -55,7 +55,7 @@ interface ActionsProps {
 }
 
 export function MessageActions({ kind, text, model, usage, disabled, onRegenerate, onEdit, onCopy, feedback, onFeedback }: ActionsProps): React.JSX.Element {
-  const meta = usage ? [model, `${formatTokens(usage.input + usage.output)} tokens`, usage.costUsd === undefined ? undefined : `≈${formatUsd(usage.costUsd)}`].filter(Boolean).join(' · ') : null
+  const usageText = usage ? [`${formatTokens(usage.input + usage.output)} tokens`, usage.costUsd === undefined ? undefined : `≈${formatUsd(usage.costUsd)}`].filter(Boolean).join(' · ') : null
   return <div className={`ai-message-actions ${kind}`}>
     <div className="ai-message-buttons">
       {kind === 'user' && <button type="button" disabled={disabled} onClick={onEdit}>编辑并重发</button>}
@@ -63,7 +63,10 @@ export function MessageActions({ kind, text, model, usage, disabled, onRegenerat
       {kind === 'assistant' && <button type="button" disabled={disabled} onClick={onRegenerate}>重新生成</button>}
       {kind === 'assistant' && onFeedback && (['up', 'down'] as const).map((value) => <button key={value} type="button" disabled={disabled} aria-label={feedback === value ? `取消${value === 'up' ? '赞' : '踩'}` : value === 'up' ? '赞' : '踩'} aria-pressed={feedback === value} title="反馈只保存在本机，不发送给模型" onClick={() => onFeedback(feedback === value ? null : value)}>{value === 'up' ? '赞' : '踩'}</button>)}
     </div>
-    {meta && <span className="ai-message-meta">{meta}</span>}
+    {usageText && <span className="ai-message-meta">
+      {model && <span className="ai-message-model" title={model}>{model}</span>}
+      <span className="ai-message-usage">{model && ' · '}{usageText}</span>
+    </span>}
   </div>
 }
 

@@ -1513,6 +1513,10 @@ button.primary:disabled {
   max-width: 88%;
 }
 
+.ai-messages > .ai-user-turn:not(:first-child):has(> .ai-message-actions.user) {
+  margin-top: 16px;
+}
+
 .ai-user-turn .ai-msg.user {
   max-width: 100%;
 }
@@ -1593,6 +1597,23 @@ button.primary:disabled {
 .ai-msg-resources button { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 0 0 5px; }
 .ai-msg-resources button:hover { color: var(--danger); }
 .ai-msg-resources button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.ai-message-meta {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.ai-message-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-message-usage {
+  flex-shrink: 0;
+}
 
 .ai-message-meta,
 .ai-act-duration {
