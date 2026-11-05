@@ -450,7 +450,7 @@ function AnalysisView({ block: b }: { block: AnalysisBlock }): React.JSX.Element
   if (b.status === 'failed' || !b.result) {
     return (
       <div className="ai-analysis failed" role="note">
-        未能完成影响分析：{b.error ?? '未知原因'}，请自行核对参数
+        影响分析：未分析（{b.error ?? '未知原因'}），请自行核对参数
       </div>
     )
   }

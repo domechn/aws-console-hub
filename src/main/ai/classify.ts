@@ -7,6 +7,9 @@
  * red banner, never "always allow"): the danger table below. Only malformed names are refused outright.
  */
 
+import { cliOperation } from './awsCli'
+import { serviceNameProblem } from './serviceNames'
+
 export type ActionClass = 'read' | 'sensitive' | 'unknown' | 'write' | 'invalid'
 export type Tier = 'A' | 'B' | 'C'
 
@@ -66,13 +69,27 @@ const SENSITIVE: Record<string, string> = {
   'apigateway:GetApiKey': '可能返回 API key 明文（includeValue）',
   'ssm:GetCommandInvocation': '会返回命令在实例上的输出',
   'states:GetExecutionHistory': '会返回执行的输入和输出数据',
-  'ec2:GetVpnConnectionDeviceSampleConfiguration': '会返回 VPN 预共享密钥'
+  'ec2:GetVpnConnectionDeviceSampleConfiguration': '会返回 VPN 预共享密钥',
+  's3control:GetDataAccess': '会返回临时访问凭证',
+  'lightsail:GetInstanceAccessDetails': '会返回实例登录凭证',
+  'lightsail:GetRelationalDatabaseMasterUserPassword': '会返回数据库密码',
+  'lightsail:GetKeyPair': '会返回密钥材料',
+  'lightsail:GetKeyPairs': '会返回密钥材料',
+  'lightsail:DownloadDefaultKeyPair': '会返回私钥',
+  'glue:GetConnection': '可能返回连接密码',
+  'glue:GetConnections': '可能返回连接密码',
+  'appsync:ListApiKeys': '可能返回 API key',
+  'dynamodbstreams:GetRecords': '会读取流里的数据',
+  'codecommit:GetFile': '会读取文件内容',
+  'codecommit:GetBlob': '会读取文件内容',
+  'redshift:GetClusterCredentials': '会返回数据库凭证',
+  'redshift:GetClusterCredentialsWithIAM': '会返回数据库凭证'
 }
 
-const READ_PREFIXES = /^(?:Describe|List|Get|Head|Lookup|Search|BatchGet)[A-Z]/
+const READ_PREFIXES = /^(?:describe|list|get|head|lookup|search|batch-get)-/
 /** Verbs that change something. A name with neither a read prefix nor one of these is "unknown". */
 const WRITE_VERBS =
-  /^(?:Create|Delete|Put|Update|Modify|Set|Add|Remove|Attach|Detach|Associate|Disassociate|Enable|Disable|Authorize|Revoke|Tag|Untag|Register|Deregister|Import|Export|Copy|Restore|Reset|Replace|Release|Allocate|Accept|Reject|Cancel|Purge|Change|Schedule|Rotate|Start|Stop|Reboot|Terminate|Run|Send|Publish|Invoke|Execute|Upload|Apply|Initiate|Complete|Abort|Upgrade|Promote|Failover|Invite|Leave|Close|Move|Merge|Confirm|Request|Issue|Renew|Retry|Resume|Suspend|Pause|Subscribe|Unsubscribe|Encrypt|ReEncrypt|Sign|Generate|Assume|Archive|Unarchive|Assign|Unassign|Activate|Deactivate|Provision|Deprovision|Recover|Resync|Reload|Refresh|Rebuild|Resize|Increase|Decrease|Grant|Retire|Batch|Notify|Signal|Respond|Submit|Transfer|Purchase|Lock|Unlock|Share|Unshare|Mark|Test|Install|Uninstall|Deploy|Rollback|Swap|Unmonitor|Monitor|Opt|Detect|Commit|Flush|Poll|Wipe|Clear|Backtrack|Write|Rerun|Redrive|Rescind|Restart|Revert|Undo|Override|Force|Scale|Halt|Kill|Shutdown|Evict|Expire|Hibernate|Disconnect|Connect|Link|Unlink|Join|Reserve|Ingest|Transact|Withdraw|Advertise|Rename|Enter|Exit|Split|Switchover|Continue|Label|Deprecate|Unlabel|Rotate)(?:[A-Z]|$)/
+  /^(?:Create|Delete|Put|Update|Modify|Set|Add|Remove|Attach|Detach|Associate|Disassociate|Enable|Disable|Authorize|Revoke|Tag|Untag|Register|Deregister|Import|Export|Copy|Restore|Reset|Replace|Release|Allocate|Accept|Reject|Cancel|Purge|Change|Schedule|Rotate|Start|Stop|Reboot|Terminate|Run|Send|Publish|Invoke|Execute|Upload|Apply|Initiate|Complete|Abort|Upgrade|Promote|Failover|Invite|Leave|Close|Move|Merge|Confirm|Request|Issue|Renew|Retry|Resume|Suspend|Pause|Subscribe|Unsubscribe|Encrypt|ReEncrypt|Sign|Generate|Assume|Archive|Unarchive|Assign|Unassign|Activate|Deactivate|Provision|Deprovision|Recover|Resync|Reload|Refresh|Rebuild|Resize|Increase|Decrease|Grant|Retire|Batch|Notify|Signal|Respond|Submit|Transfer|Purchase|Lock|Unlock|Share|Unshare|Mark|Test|Install|Uninstall|Deploy|Rollback|Swap|Unmonitor|Monitor|Opt|Detect|Commit|Flush|Poll|Wipe|Clear|Backtrack|Write|Rerun|Redrive|Rescind|Restart|Revert|Undo|Override|Force|Scale|Halt|Kill|Shutdown|Evict|Expire|Hibernate|Disconnect|Connect|Link|Unlink|Join|Reserve|Ingest|Transact|Withdraw|Advertise|Rename|Enter|Exit|Split|Switchover|Continue|Label|Deprecate|Unlabel|Rotate)(?:[A-Z]|$)/i
 
 /**
  * Tier C (strong approval): what M3/M4 refused outright. Whole services, then single actions. The text is the
@@ -97,7 +114,18 @@ const DANGER_SERVICES: Record<string, string> = {
   kms: 'KMS 密钥操作',
   secretsmanager: 'Secrets Manager 写操作',
   'ec2-instance-connect': '实例登录密钥推送',
-  'ssm-guiconnect': '远程桌面会话'
+  'ssm-guiconnect': '远程桌面会话',
+  s3control: 'S3 账号级访问控制',
+  backup: '备份与恢复点配置',
+  ram: '资源共享配置',
+  waf: 'Web 应用防火墙配置',
+  wafv2: 'Web 应用防火墙配置',
+  'waf-regional': 'Web 应用防火墙配置',
+  shield: 'Shield 防护配置',
+  route53domains: '域名注册与转移',
+  ses: '邮件身份配置',
+  sesv2: '邮件身份配置',
+  directconnect: 'Direct Connect 网络配置'
 }
 
 const POLICY = '资源策略类变更'
@@ -134,6 +162,12 @@ const DANGER_ACTIONS: Record<string, string> = {
   'ec2:ExportImage': '镜像导出',
   'ec2:CreateVpcPeeringConnection': 'VPC 对等连接',
   'ec2:AcceptVpcPeeringConnection': 'VPC 对等连接',
+  'ec2:DeleteVpc': 'VPC 网络删除',
+  'ec2:DeleteSubnet': '子网删除',
+  'ec2:DeleteRouteTable': '路由表删除',
+  'ec2:DeleteInternetGateway': '互联网网关删除',
+  'ec2:DeleteNatGateway': 'NAT 网关删除',
+  'ec2:DeleteNetworkInterface': '网络接口删除',
   'rds:ModifyDBSnapshotAttribute': SHARING,
   'rds:ModifyDBClusterSnapshotAttribute': SHARING,
   'cloudformation:ExecuteChangeSet': '执行 change set（卡片上看不到它的内容；可改用 CreateChangeSet 提案，应用会先展示变更内容）',
@@ -143,11 +177,11 @@ const DANGER_ACTIONS: Record<string, string> = {
 }
 
 /** Resource-policy grants on any service (sqs / sns AddPermission, events PutPermission…). */
-const PERMISSION_GRANT = /^(?:AddPermission|PutPermission|PutResourcePolicy|PutPolicy|SetRepositoryPolicy|PutRepositoryPolicy|PutRegistryPolicy)$/
+const PERMISSION_GRANT = /^(?:AddPermission|PutPermission|PutResourcePolicy|PutPolicy|SetRepositoryPolicy|PutRepositoryPolicy|PutRegistryPolicy)$/i
 
 /** IAM writes that grant or move privileges. Other IAM writes (tags, descriptions…) are tier B. */
 const IAM_ESCALATION =
-  /^(?:(?:Put|Attach|Detach|Delete)\w*Policy|\w*PermissionsBoundary|(?:Create|Update)AccessKey|\w*LoginProfile|UpdateAssumeRolePolicy|CreatePolicyVersion|SetDefaultPolicyVersion|AddUserToGroup|AddRoleToInstanceProfile|CreateRole|CreateUser|DeleteRole|DeleteUser|PassRole|CreateInstanceProfile|CreateServiceSpecificCredential|ResetServiceSpecificCredential|Upload(?:SSHPublicKey|SigningCertificate|ServerCertificate)|\w*MFADevice|\w*SAMLProvider|\w*OpenIDConnectProvider\w*|UpdateRole)$/
+  /^(?:(?:Put|Attach|Detach|Delete)\w*Policy|\w*PermissionsBoundary|(?:Create|Update)AccessKey|\w*LoginProfile|UpdateAssumeRolePolicy|CreatePolicyVersion|SetDefaultPolicyVersion|AddUserToGroup|AddRoleToInstanceProfile|CreateRole|CreateUser|DeleteRole|DeleteUser|PassRole|CreateInstanceProfile|CreateServiceSpecificCredential|ResetServiceSpecificCredential|Upload(?:SSHPublicKey|SigningCertificate|ServerCertificate)|\w*MFADevice|\w*SAMLProvider|\w*OpenIDConnectProvider\w*|UpdateRole)$/i
 
 export interface Classification {
   class: ActionClass
@@ -159,26 +193,53 @@ export interface Classification {
   danger?: string
 }
 
-const NAME = { service: /^[a-z0-9-]{1,40}$/, action: /^[A-Z][A-Za-z0-9]{1,100}$/ }
+const NAME = { service: /^[a-z0-9][a-z0-9-]{1,39}$/, action: /^[A-Z][A-Za-z0-9]{2,80}$/ }
 export const validNames = (service: unknown, action: unknown): boolean =>
-  typeof service === 'string' && typeof action === 'string' && NAME.service.test(service) && NAME.action.test(action) && action !== 'Command'
+  typeof service === 'string' && typeof action === 'string' && NAME.service.test(service) && !serviceNameProblem(service) && NAME.action.test(action) && action !== 'Command'
+
+export const nameProblem = (service: unknown, action: unknown): string | null => {
+  if (typeof service === 'string') {
+    const alias = serviceNameProblem(service)
+    if (alias) return alias
+  }
+  if (!validNames(service, action)) return '无效的 service 或 action 名称：action 必须以大写字母开头（PascalCase）'
+  const canonical = CANONICAL_ACTIONS[`${service as string}:${(action as string).toLowerCase()}`]
+  return canonical && action !== canonical ? `操作名称 ${action as string} 不受支持；请使用 ${canonical}` : null
+}
+
+// CLI operation identity is kebab case. Acronym capitalization may vary; lower-case first letters are invalid.
+const kebabTable = (table: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(Object.entries(table).map(([key, value]) => {
+    const [service, action] = key.split(':')
+    return [`${service}:${cliOperation(action)}`, value]
+  }))
+const SENSITIVE_CLI = kebabTable(SENSITIVE)
+const DANGER_ACTIONS_CLI = kebabTable(DANGER_ACTIONS)
+const CANONICAL_ACTIONS = Object.fromEntries(
+  [...Object.keys(SENSITIVE), ...Object.keys(DANGER_ACTIONS)].map((key) => {
+    const [service, action] = key.split(':')
+    return [`${service}:${action.toLowerCase()}`, action]
+  })
+)
 
 /** Tier C danger of a write, or null. */
 export function dangerOf(service: string, action: string): string | null {
   if (service === 'iam' && IAM_ESCALATION.test(action)) return 'IAM 权限类变更（策略、访问密钥、登录配置、信任关系、角色）'
-  const named = DANGER_SERVICES[service] ?? DANGER_ACTIONS[`${service}:${action}`]
+  const named = DANGER_SERVICES[service] ?? DANGER_ACTIONS_CLI[`${service}:${cliOperation(action)}`]
   if (named) return named
   return PERMISSION_GRANT.test(action) ? POLICY : null
 }
 
 /** `action` is the API name as in the SDK (`DescribeInstances`), `service` the app's SDK key / IAM prefix (`ec2`). */
 export function classifyAction(service: string, action: string): Classification {
-  if (!validNames(service, action)) return { class: 'invalid', tier: null, reason: '无效的 service 或 action 名称' }
-  const sensitive = SENSITIVE[`${service}:${action}`]
+  const invalid = nameProblem(service, action)
+  if (invalid) return { class: 'invalid', tier: null, reason: invalid }
+  const operation = cliOperation(action)
+  const sensitive = SENSITIVE_CLI[`${service}:${operation}`] ?? (/^(?:get|batch-get)-.*(?:secret|password|credential|token|private-key|key-material|log-events|object-content)/.test(operation) ? '可能返回敏感内容' : undefined)
   if (sensitive) return { class: 'sensitive', tier: 'B', reason: `敏感读取：${sensitive}` }
   const listed = (READ_SERVICES as readonly string[]).includes(service)
-  if (READ_PREFIXES.test(action) || (service === 'logs' && /^Filter[A-Z]/.test(action))) {
-    if (listed && (service !== 'sts' || action === 'GetCallerIdentity')) return { class: 'read', tier: 'A', reason: '' }
+  if (READ_PREFIXES.test(operation) || (service === 'logs' && /^filter-/.test(operation))) {
+    if (listed && (service !== 'sts' || operation === 'get-caller-identity')) return { class: 'read', tier: 'A', reason: '' }
     return {
       class: 'read',
       tier: 'B',
@@ -228,6 +289,6 @@ export function writeTier(service: string, action: string, params: Record<string
   const caps = JSON.stringify(params.Capabilities ?? '')
   if (/CAPABILITY_(?:NAMED_)?IAM/.test(caps)) dangers.push('CloudFormation 授予 CAPABILITY_IAM（模板可含 IAM 资源）')
   if (ownRole && service === 'iam' && (params.RoleName === ownRole || params.RoleName === ownRole.split('/').pop())) dangers.push(`修改本应用登录用的角色（${ownRole}）`)
-  const destructive = /^(?:Delete|Terminate|Remove|Purge|Destroy|Deregister|Disable|Revoke|Detach|Disassociate|Cancel|Stop|Reset|Leave|Close)[A-Z]|^Put\w*Policy$/.test(action)
+  const destructive = /^(?:Delete|Terminate|Remove|Purge|Destroy|Deregister|Disable|Revoke|Detach|Disassociate|Cancel|Stop|Reset|Leave|Close)[A-Z]|^Put\w*Policy$/i.test(action)
   return { tier: dangers.length ? 'C' : 'B', dangers: [...new Set(dangers)], destructive }
 }

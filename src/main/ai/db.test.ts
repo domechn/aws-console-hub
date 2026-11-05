@@ -68,6 +68,33 @@ describe('ai.sqlite', () => {
     store.deleteAll({ audit: true, now: Date.now() })
     expect(store.auditEntries()).toEqual([])
   })
+  it('redacts secret-looking tool arguments in stored history', () => {
+    const db = new DatabaseSync(':memory:')
+    migrate(db)
+    const store = new AiStore(db)
+    const id = store.createConversation('a1')
+    store.addMessage(id, { role: 'assistant', content: { role: 'assistant', content: [{ type: 'toolCall', id: 't1', name: 'aws_read', arguments: { service: 'sqs', action: 'ListQueues', params: { Password: 'chosen-secret', Nested: { SessionToken: 'another-secret' } } } }] } })
+    expect(JSON.stringify(store.messages(id))).not.toContain('chosen-secret')
+    expect(JSON.stringify(store.messages(id))).not.toContain('another-secret')
+    db.close()
+  })
+  it('redacts proposal row values and raw JSON in messages and audit rows', () => {
+    const db = new DatabaseSync(':memory:')
+    db.exec('pragma foreign_keys = on')
+    migrate(db)
+    const store = new AiStore(db)
+    const id = store.createConversation('a1')
+    const proposal = { card: { blocks: [{ type: 'change', fields: [{ label: 'Budget › X › Password', value: 'row-secret' }], raw: JSON.stringify({ Budget: { X: { Password: 'raw-secret' } }, TemplateBody: JSON.stringify({ AuthToken: 'nested-secret' }), NextToken: 'next' }) }] } }
+    store.addMessage(id, { role: 'toolResult', content: { details: { proposal } } })
+    store.audit('proposal_created', 'a1', { proposal })
+    for (const output of [JSON.stringify(store.messages(id)), JSON.stringify(store.auditEntries()), JSON.stringify(db.prepare('select content_json from messages').all()), JSON.stringify(db.prepare('select data_json from audit').all())]) {
+      expect(output).not.toContain('row-secret')
+      expect(output).not.toContain('raw-secret')
+      expect(output).not.toContain('nested-secret')
+      expect(output).toContain('next')
+    }
+    db.close()
+  })
 
   const fresh = () => {
     const db = new DatabaseSync(':memory:')

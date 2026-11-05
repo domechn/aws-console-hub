@@ -72,7 +72,7 @@ export function ProposalCard({ proposal: p, disabled, older = false, accountColo
       .finally(() => setBusy(false))
   }
   const confirm = (): void => {
-    if (live && armed && typedOk && !busy && !disabled && !analyzing) run(() => onConfirm(p.confirmText ? typed.trim() : undefined))
+    if (live && armed && typedOk && !busy && !disabled && !analyzing && !p.cliUnavailable) run(() => onConfirm(p.confirmText ? typed.trim() : undefined))
   }
 
   const danger = p.risk === 'high' || p.risk === 'destructive'
@@ -129,12 +129,12 @@ export function ProposalCard({ proposal: p, disabled, older = false, accountColo
               <li key={i}>{d}</li>
             ))}
           </ul>
-          <span>没有专用适配器，应用无法预知影响。{p.analysis ? '请结合下面的 AI 分析（可能有误）' : '请'}逐项核对将发送的参数。</span>
+          <span>没有专用适配器，应用无法预知影响。{p.analysis ? '请结合下面的 AI 分析（可能有误）' : '影响分析：未分析。请'}逐项核对将发送的参数。</span>
         </div>
       )}
       {p.generic && p.tier !== 'C' && (
         <div className="ai-generic-note" role="note">
-          通用请求：没有专用适配器，应用无法预知影响。下面是将原样发送的请求，没有变更前快照，也不做漂移检查。
+          通用请求：没有专用适配器，应用无法预知影响。{!p.analysis && '影响分析：未分析。'}下面是将原样发送的请求，没有变更前快照，也不做漂移检查。
         </div>
       )}
 
@@ -155,7 +155,7 @@ export function ProposalCard({ proposal: p, disabled, older = false, accountColo
           <button
             type="button"
             className={`ai-card-btn ${danger ? 'danger' : 'primary'}`}
-            disabled={busy || disabled || analyzing}
+            disabled={busy || disabled || analyzing || p.cliUnavailable}
             title={analyzing ? '影响分析完成后才能确认' : undefined}
             onClick={() => setStep('final')}
           >
@@ -205,7 +205,7 @@ export function ProposalCard({ proposal: p, disabled, older = false, accountColo
             </label>
           )}
           <div className="ai-proposal-actions">
-            <button type="button" className={`ai-card-btn ${danger ? 'danger' : 'primary'}`} disabled={!armed || !typedOk || busy || disabled || analyzing} onClick={confirm}>
+            <button type="button" className={`ai-card-btn ${danger ? 'danger' : 'primary'}`} disabled={!armed || !typedOk || busy || disabled || analyzing || p.cliUnavailable} onClick={confirm}>
               {busy ? '正在执行…' : '我确认，立即执行'}
             </button>
             <button ref={backRef} type="button" className="ai-card-btn" disabled={busy || disabled} onClick={() => setStep('review')}>

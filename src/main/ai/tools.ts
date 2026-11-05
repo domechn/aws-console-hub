@@ -3,7 +3,6 @@ import type { AgentTool } from '@earendil-works/pi-agent-core'
 import { Type, type Static, type TSchema } from '@earendil-works/pi-ai'
 import type { ApprovalView, ProposalView, QuickReply } from '../../shared/ai'
 import { ModelCardInput, type Card } from '../../shared/cards'
-import { REGIONS } from '../../shared/catalog'
 import { allowKey, type ApprovalRequest, type Verdict } from './approvals'
 import { classifyAction, READ_SERVICES, validNames } from './classify'
 import { redactSecrets } from './redact'
@@ -11,7 +10,9 @@ import { runScript, SCRIPT_LIMITS, ScriptClock, type ScriptAws } from './sandbox
 import { fence, scrub, shapeData, shapeResult } from './shape'
 import type { PageRead } from './page'
 import { checkReplies, REPLY_LIMITS } from './replies'
-import { AWS_SERVICES, type AwsCall, type AwsSupports } from './aws'
+import { exactAwsAction, inputMembers, unknownAwsParams, usesAwsCli, type AwsCall, type AwsSupports } from './aws'
+import { nonApiCliReason } from './awsCli'
+import { serviceNameProblem } from './serviceNames'
 
 /**
  * The assistant's tools. None of them writes to AWS on the model's say-so: the read tools read (aws_read asks the
@@ -61,13 +62,13 @@ interface ToolDef<P extends TSchema> {
 
 export const MAX_COST_CALLS = 10
 const QUERY_LOGS_TIMEOUT_MS = 30_000
-const REGION_IDS = new Set(REGIONS.map((r) => r.id))
+const REGION_ID = /^[a-z]{2}(?:-[a-z0-9]+)+-\d{1,2}$/
 
 const regionParam = Type.Optional(Type.String({ description: '区域 id，如 ap-northeast-1；省略则用当前 region' }))
 
 function regionOf(requested: string | undefined, ctx: ToolContext): string {
   const region = requested?.trim() || ctx.region
-  if (!REGION_IDS.has(region)) throw new Error(`不支持的 region：${region}（可用：${[...REGION_IDS].join(' ')}）`)
+  if (!REGION_ID.test(region)) throw new Error(`不支持的 region：${region}`)
   return region
 }
 
@@ -496,8 +497,7 @@ const awsRead = defineTool({
   name: 'aws_read',
   label: '通用查询',
   description:
-    `通用的 AWS API 查询，覆盖上面专用工具没有的情况。service 是 IAM 前缀（可用：${AWS_SERVICES.filter((s) => s !== 'ce').join(' ')}），` +
-    'action 是 API 名（如 DescribeSecurityGroups、ListClusters、DescribeStacks），params 是该 API 的参数（SDK v3 写法，PascalCase）。' +
+    '通用 AWS API 查询，可查询任意服务。service 是 AWS CLI 服务名；action 是 API 名（如 DescribeSecurityGroups），params 使用 API 的 PascalCase JSON 成员。没有内置 SDK 命令时会通过 AWS CLI 执行，并先请用户审批。' +
     `${READ_SERVICES.join(' ')} 的 Describe*/List*/Get* 等普通读取直接执行；其他服务的读取、敏感读取（密钥、对象内容、表数据、日志正文、签发凭证）、` +
     '参数里有 URL 或其他账号的资源时，会暂停并请用户在卡片上审批，所以要在 reason 里用一句话说明为什么需要（会显示给用户）。' +
     '用户拒绝后不要换个参数或 action 重试。写操作和名称看不出是否只读的操作不能用这个工具，请用 propose_change；成本请用 cost_summary。',
@@ -545,10 +545,14 @@ async function readCall(tool: string, p: ReadRequest, ctx: ToolContext, signal: 
   const select = statements !== null && statements.length > 0 && statements.every((s) => typeof s === 'string' && /^\s*SELECT\s/i.test(s))
   const verdict = select ? { class: 'sensitive' as const, tier: 'B' as const, reason: '敏感读取：会读取表数据（PartiQL SELECT）' } : classifyAction(service, action)
   const refuse = (cls: string, message: string): never => {
-    ctx.audit('tool_refused', { tool, service, action, class: cls })
+    ctx.audit('tool_refused', { tool, ...(serviceNameProblem(service) ? {} : { service }), action, class: cls })
     throw new Error(message)
   }
   if (verdict.tier === null) refuse('invalid', `已拒绝：${verdict.reason}`)
+  const nonApi = nonApiCliReason(service, action)
+  if (nonApi) refuse('invalid', nonApi)
+  const casing = await exactAwsAction(service, action)
+  if (casing) refuse('invalid', casing)
   if (verdict.class === 'write') refuse('write', `${service}:${action} 是写操作，${tool} 只能查询。需要改动请用 propose_change 提出（用户确认后才执行）`)
   // A name that doesn't say what it does may well write: not on the one-click read approval, but as a proposal
   // (typed confirmation, account policy).
@@ -561,9 +565,15 @@ async function readCall(tool: string, p: ReadRequest, ctx: ToolContext, signal: 
   if (text.length > 4000) throw new Error('params 太大（上限 4000 字符）')
   const region = regionOf(p.region, ctx)
   const why = verdict.tier === 'B' ? [verdict.reason] : []
+  const cli = await usesAwsCli(service, action, params)
+  if (!cli) {
+    const unknown = unknownAwsParams(params, await inputMembers(service, action))
+    if (unknown) refuse('invalid', unknown)
+  }
+  if (cli) why.push('应用没有内置这个服务的预览，将通过 AWS CLI 直接执行')
   // Plain reads may be allowed for the rest of the conversation; anything that returns secrets or may not be a read
   // asks every time.
-  let sessionAllowed = verdict.class === 'read'
+  let sessionAllowed = verdict.class === 'read' && !cli
   // A read naming another account's resource (full or partial ARN, queue URL: any other 12-digit id), a URL AWS
   // would fetch, or an S3 bucket this account doesn't own, sends what it carries (keys, prefixes: whatever an
   // injected instruction put there) to logs the other side can read. The user decides each time.
@@ -584,9 +594,6 @@ async function readCall(tool: string, p: ReadRequest, ctx: ToolContext, signal: 
   let run = { params, region }
   let approval: ApprovalView | undefined
   if (why.length) {
-    // No card for a call that could never run.
-    const unsupported = (await ctx.supports?.(service, action)) ?? null
-    if (unsupported) refuse('unsupported', unsupported)
     if (!approve) refuse('approval', `${service}:${action} 需要用户审批，但当前无法发起审批`)
     const v = await (approve as Approve)({ toolCallId, service, action, region, params, reason: p.reason, why, sessionAllowed }, signal)
     approval = v.view
@@ -610,7 +617,7 @@ const L = SCRIPT_LIMITS
 const scriptDescription = (wallMs: number): string =>
   '在沙箱里运行一段 JavaScript，一次完成批量查询。凡是要连续调用超过约 2 次的任务都用它：逐个资源查询（循环）、跨 API 关联、过滤和汇总、翻页。' +
   '整段脚本只算 1 次工具调用，不要改成一个一个地调用工具。code 是 async 函数的函数体，可以直接 await。\n' +
-  '可用：await aws(service, action, params?, { region? })：和 aws_read 一样（同样的服务、参数写法、审批和脱敏），返回解析好的结果对象；' +
+  '可用：await aws(service, action, params?, { region? })：和 aws_read 一样，可查任意服务（未内置 SDK 命令时审批后走 AWS CLI）；参数名用 API 的 PascalCase JSON 成员，返回解析好的结果对象；' +
   '默认放行之外的调用会暂停等用户审批，被拒绝时抛出「用户拒绝…」，不要换参数或 action 重试。只能读：写操作和名称看不出是否只读的操作一律拒绝，变更请用 propose_change。' +
   'await parallel(函数数组, 并发数?) 并发执行（或 Promise.all，最多同时 8 个调用）；log(...)；JSON 和标准 ES 内置对象。没有 fs、网络、require、import、定时器。\n' +
   `用 return 返回结果：只返回回答需要的精简汇总（计数、关键字段、异常项），不要返回原始响应；返回值超过约 12KB 会被截断。aws() 出错会抛异常，可以 try/catch 后记下继续。` +
@@ -710,7 +717,7 @@ function buildScriptTool(ctx: ToolContext): AgentTool<TSchema, { summary: string
 
 /** Short, secret-free description of the arguments for the audit log. */
 const argsSummary = (args: unknown): string => {
-  const s = JSON.stringify(args) ?? ''
+  const s = redactSecrets(JSON.stringify(scrub(args)) ?? '')
   return s.length > 300 ? `${s.slice(0, 300)}…` : s
 }
 
@@ -767,7 +774,7 @@ export function buildCardTool(build: (input: unknown) => Card, audit: ToolContex
 const PROPOSE_DESCRIPTION =
   '提出一个 AWS 变更提案。它不会执行任何操作：应用读取资源当前状态，按规则生成变更前后对比、风险等级和影响，作为确认卡片展示给用户；' +
   '只有用户在界面上两步确认后，应用才会用存下的参数执行。你不能执行、批准或修改提案；要改参数就重新提案。一次只提一件事。' +
-  '只读账号会被拒绝。service 是 IAM 前缀，action 是 API 名，params 用 SDK v3 写法；reason 用一句话说明为什么要改（会显示给用户）。' +
+  '只读账号会被拒绝。可用任意 AWS 服务；service 是 AWS CLI 服务名，action 是 API 名，params 使用 API 的 PascalCase JSON 成员。没有内置 SDK 命令时，经用户确认后通过 AWS CLI 直接执行；reason 用一句话说明为什么要改（会显示给用户）。' +
   '下面列表里的操作有专门的适配器（变更前后对比、风险和影响）；列表外的写操作也可以提，应用会生成「通用请求」确认卡：原样展示参数，风险至少为「高」，' +
   'IAM 提权、关闭审计、KMS 等危险操作会显示红色强确认，用户都要手动输入操作名才会执行，所以 reason 要写清楚为什么必须这样做。' +
   '用户取消后不要换个 action 或参数绕过。有适配器的操作：\n'

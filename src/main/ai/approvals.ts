@@ -12,7 +12,7 @@ import type { ApprovalDecision, ApprovalState, ApprovalView } from '../../shared
 import type { AwsAccount } from '../../shared/types'
 import { canonical } from './changes/common'
 import { loginIdentity } from './changes/engine'
-import { displayParams, scrub } from './shape'
+import { displayParams, scrubParams } from './shape'
 
 export const APPROVAL_LIMITS = {
   ttlMs: 5 * 60_000,
@@ -179,7 +179,7 @@ export class ApprovalStore {
         region: req.region,
         accountName: account.name,
         awsAccountId: account.accountId,
-        params: displayParams(params),
+        params: displayParams(params, true),
         reason: clean(req.reason),
         // Rule text, but it quotes params (a bucket name): cleaned the same way.
         why: req.why.map(clean).slice(0, 10),
@@ -191,7 +191,7 @@ export class ApprovalStore {
     }
     record.view.hash = hashOf(record)
     this.records.set(record.view.id, record)
-    const auditParams = JSON.stringify(scrub(params)) ?? ''
+    const auditParams = JSON.stringify(scrubParams(req.service, req.action, params)) ?? ''
     this.audit(req, 'approval_requested', {
       approvalId: record.view.id,
       hash: record.view.hash,
@@ -227,7 +227,9 @@ export class ApprovalStore {
       expired: `用户 ${APPROVAL_LIMITS.ttlMs / 60_000} 分钟内没有审批 ${service}:${action}，视为拒绝。不要自动重试；需要时请向用户说明原因。`,
       aborted: '已停止'
     }[state]
-    r.resolve?.(state === 'allowed' ? { ok: true, params: structuredClone(r.params) as Record<string, unknown>, region: r.view.region, view: r.view } : { ok: false, message, view: r.view })
+    // The live local card shows exact values; the tool result is persisted in history and uses a redacted copy.
+    const storedView = { ...r.view, params: displayParams(scrubParams(r.view.service, r.view.action, r.params), true) }
+    r.resolve?.(state === 'allowed' ? { ok: true, params: structuredClone(r.params) as Record<string, unknown>, region: r.view.region, view: storedView } : { ok: false, message, view: storedView })
   }
 
   /**

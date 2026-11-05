@@ -34,6 +34,10 @@ const render = (p: ProposalView): string =>
   renderToStaticMarkup(<ProposalCard proposal={p} accountColor="#123456" onLink={() => {}} onConfirm={async () => ({ ok: true })} onCancel={async () => ({ ok: true })} />)
 
 describe('ProposalCard', () => {
+  it('disables confirmation on a card whose AWS CLI is missing', () => {
+    const html = render(view({ cliUnavailable: true }))
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>确认执行…<\/button>/)
+  })
   it('keeps pending parameters, risk and outcome visible and collapses only settled cards after a later turn', () => {
     const pending = render(view({ card: { ...view().card, blocks: [
       { type: 'request', action: 'ec2:TerminateInstances', region: 'ap-northeast-1', params: '{"InstanceIds":["i-0abc"]}' },
@@ -101,7 +105,7 @@ describe('ProposalCard', () => {
     expect(running).toContain('正在分析影响…（用到的查询：1）')
     expect(running).toMatch(/<button type="button" class="ai-card-btn danger" disabled="" title="影响分析完成后才能确认">确认执行…/)
     const failed = generic({ status: 'failed', calls: 0 }, { type: 'analysis', status: 'failed', calls: 0, error: '模型请求失败' })
-    expect(failed).toContain('未能完成影响分析：模型请求失败，请自行核对参数')
+    expect(failed).toContain('影响分析：未分析（模型请求失败），请自行核对参数')
     expect(failed).toContain('<button type="button" class="ai-card-btn danger">确认执行…')
     const raised = generic({ status: 'done', calls: 2 }, { type: 'analysis', status: 'done', calls: 2, raised: { from: 'high', to: 'destructive' } })
     expect(raised).toContain('title="AI 影响分析把风险从「高风险」提高到了「破坏性」，原因见卡片"')

@@ -16,15 +16,17 @@ import { createHash, randomBytes } from 'node:crypto'
 import { Value } from 'typebox/value'
 import { AI_CHANGE_SERVICES, OTHER_SERVICES, RISK_LABEL, type ProposalState, type ProposalView, type Risk } from '../../../shared/ai'
 import type { AnalysisBlockData, AnalysisResult } from '../../../shared/cards'
-import { REGIONS } from '../../../shared/catalog'
 import type { AwsAccount } from '../../../shared/types'
 import type { AwsInputMembers, AwsSupports } from '../aws'
 import { classifyAction } from '../classify'
-import { fence, scrub } from '../shape'
+import { fence, redactStructured, scrubParams } from '../shape'
 import { proposalCard, type ProposalCardInput } from './card'
 import { awsError, bump, canonical, fieldDiff, isProdTagged, needsTyped, requestIdOf, RISKS, type ChangeAdapter, type ChangeCtx, type Plan } from './common'
 import { genericAdapter } from './generic'
+import { exactAwsAction, inputMembers, unknownAwsParams, usesAwsCli } from '../aws'
+import { nonApiCliReason } from '../awsCli'
 import { lookupChange } from './registry'
+import { serviceNameProblem } from '../serviceNames'
 
 export const PROPOSAL_LIMITS = {
   ttlMs: 10 * 60_000,
@@ -53,7 +55,8 @@ export function precheckCause(err: unknown): string {
   return '服务响应异常'
 }
 
-const REGION_IDS = new Set(REGIONS.map((r) => r.id))
+/** Format check only; AWS may still reject a syntactically valid but nonexistent region. */
+const REGION_ID = /^[a-z]{2}(?:-[a-z0-9]+)+-\d{1,2}$/
 /** Writes allowed before confirmation: they create or delete a plan, not a resource. EC2 DryRun requests also pass. */
 const PLAN_CALLS = new Set(['cloudformation:CreateChangeSet', 'cloudformation:DeleteChangeSet'])
 /**
@@ -110,6 +113,7 @@ export interface ProposalRecord {
   outcome?: string
   finishedAt?: number
   view: ProposalView
+  cliUnavailable?: boolean
   /** What the card is built from: the analysis rebuilds it with its block and the risk it may have raised. */
   cardInput: ProposalCardInput
   /** The AI impact analysis (generic proposals, when on). Advisory: it never touches params or hash. `stop` ends it with the proposal. */
@@ -131,14 +135,17 @@ const analysisBlock = (a: ProposalRecord['analysis']): AnalysisBlockData | undef
 
 export interface EngineDeps {
   aws: (accountId: string, service: string, action: string, params: Record<string, unknown>, region: string) => Promise<unknown>
+  awsCli?: (accountId: string, service: string, action: string, params: Record<string, unknown>, region: string) => Promise<unknown>
   account: (id: string) => AwsAccount | undefined
   audit: (type: string, accountId: string, data: Record<string, unknown>) => void
   /** A proposal changed state (not on creation: the tool result carries that). */
   onState: (p: ProposalRecord) => void
   /** Generic changes: whether the app can make the call at all (no card for one that could never run). */
   supports?: AwsSupports
-  /** Generic EC2 changes: the operation's input members (DryRun only when it has one). Absent: no DryRun. */
+  /** Optional input member override; generic EC2 uses these to allow DryRun only when the command accepts it. */
   inputMembers?: AwsInputMembers
+  /** Checks the configured CLI path without using credentials or making a network call. */
+  cliAvailable?: () => string
   now?: () => number
 }
 
@@ -150,6 +157,8 @@ export const loginIdentity = (a: AwsAccount): string => [a.accountId, a.role, a.
  * proposal is made, when it is confirmed and right before it runs, against the account as it is at that moment.
  */
 export function policyProblem(a: AwsAccount | undefined, service: string, risk?: Risk): string | null {
+  const alias = serviceNameProblem(service)
+  if (alias) return alias
   if (a?.aiAllowWrite !== true) return '这个账号现在是只读模式'
   // A service without an adapter is governed by the "其他服务" entry; one with an adapter by its own, generic or not.
   const entry = AI_CHANGE_SERVICES.some((s) => s.id === service && s.id !== OTHER_SERVICES) ? service : OTHER_SERVICES
@@ -275,43 +284,55 @@ export class ProposalEngine {
     const action = String(input.action ?? '')
     const base = { appAccountId: account.id, conversationId: c.conversationId }
     const refuse = (type: string, reason: string, extra: Record<string, unknown> = {}): never => {
-      this.audit(base, type, { service, action, actor: 'model', reason: reason.slice(0, 300), ...extra })
+      this.audit(base, type, { ...(serviceNameProblem(service) ? {} : { service }), action, actor: 'model', reason: reason.slice(0, 300), ...extra })
       throw new Refused(reason)
     }
+    const alias = serviceNameProblem(service)
+    if (alias) refuse('proposal_refused', alias, { cause: 'invalid' })
+    const casing = await exactAwsAction(service, action)
+    if (casing) refuse('proposal_refused', casing, { cause: 'invalid' })
     if (account.aiAllowWrite !== true) refuse('proposal_refused', READ_ONLY_MESSAGE, { cause: 'policy' })
     const found = lookupChange(service, action)
     if ('refused' in found) return refuse('proposal_refused', found.reason, { cause: found.refused })
+    const nonApi = nonApiCliReason(service, action)
+    if (nonApi) refuse('proposal_refused', nonApi, { cause: 'invalid' })
     const notAllowed = policyProblem(account, service)
     if (notAllowed) refuse('proposal_refused', `${notAllowed}。请告诉用户，需要时在 Console 里操作。`, { cause: 'policy' })
     const params = input.params ?? {}
     if (!isPlainObject(params)) return refuse('proposal_refused', 'params 必须是对象', { cause: 'invalid' })
     if (canonical(params).length > 60_000) refuse('proposal_refused', 'params 太大', { cause: 'invalid' })
+    // Bundled commands keep nested params on the SDK. Its serializer would silently drop unknown top-level names.
+    const cliFallback = await usesAwsCli(service, action)
+    const members = cliFallback ? null : await (this.d.inputMembers ?? inputMembers)(service, action)
     // An adapter's forbidden param (a privilege-escalation or code-execution path it won't model) is not refused: the
     // change goes to the generic card as a strong approval, which shows every param as it will be sent.
     // On the banner as a neutral fact (the adapter's own wording is a refusal for the model, not a prediction).
     const forbidden = 'adapter' in found ? Object.keys(params).flatMap((k) => (found.adapter.forbiddenParams?.[k] ? [`参数 ${k}：专用适配器不处理这个参数`] : [])) : []
-    let a: ChangeAdapter = 'adapter' in found && !forbidden.length ? found.adapter : genericAdapter(service, action, params, { ownRole: account.role, extra: forbidden })
-    if (a.generic && service === 'ec2') a = { ...a, dryRun: (await this.d.inputMembers?.(service, action))?.includes('DryRun') === true }
-    if (a.generic) {
-      // Pretty-printed on the card in full: kept well inside the card's size limit.
-      if (canonical(params).length > 20_000) refuse('proposal_refused', '通用请求的 params 太大（上限 20000 字符）', { cause: 'invalid' })
-      const unsupported = (await this.d.supports?.(service, action)) ?? null
-      if (unsupported) refuse('proposal_refused', unsupported, { cause: 'unsupported' })
-    }
+    let a: ChangeAdapter = 'adapter' in found && !forbidden.length ? found.adapter : genericAdapter(service, action, params, { ownRole: account.role, extra: forbidden, cliFallback })
+    if (a.generic && service === 'ec2') a = { ...a, dryRun: members?.includes('DryRun') === true }
     if (!Value.Check(a.schema, params)) {
+      // Adapter schema errors are model-fixable; only explicit coverage blockers may become generic.
       const errors = [...Value.Errors(a.schema, params)].slice(0, 8).map((e: any) => `${e.instancePath || '/'}: ${e.message}`)
       refuse('proposal_refused', `参数无效（${service}:${action} 的参数：${a.doc}）：\n- ${errors.join('\n- ')}`, { cause: 'invalid' })
     }
+    if (a.generic && !cliFallback) {
+      const unknown = unknownAwsParams(params, members)
+      if (unknown) refuse('proposal_refused', unknown, { cause: 'invalid' })
+    }
+    if (a.generic) {
+      // Pretty-printed on the card in full: kept well inside the card's size limit.
+      if (canonical(params).length > 20_000) refuse('proposal_refused', '通用请求的 params 太大（上限 20000 字符）', { cause: 'invalid' })
+    }
     const reason = typeof input.reason === 'string' ? input.reason.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 300) : ''
     const requested = typeof input.region === 'string' && input.region.trim() ? input.region.trim() : null
-    if (requested && !REGION_IDS.has(requested)) refuse('proposal_refused', `不支持的 region：${requested}`, { cause: 'invalid' })
+    if (requested && !REGION_ID.test(requested)) refuse('proposal_refused', `不支持的 region：${requested}`, { cause: 'invalid' })
 
     this.sweep()
     const now = this.now()
     const mine = [...this.proposals.values()].filter((p) => p.conversationId === c.conversationId && p.state === 'pending')
     const inputKey = canonical({ service, action, params, region: requested })
     const same = mine.find((p) => p.inputKey === inputKey)
-    if (same) return { view: same.view, reused: true }
+    if (same) return { view: redactStructured(same.view, '', service, action) as ProposalView, reused: true }
     if (mine.length >= PROPOSAL_LIMITS.maxPending) {
       refuse('proposal_refused', `这个对话已有 ${mine.length} 个提案等待确认（上限 ${PROPOSAL_LIMITS.maxPending}）。请等用户确认或取消后再提。`, { cause: 'rate' })
     }
@@ -325,14 +346,25 @@ export class ProposalEngine {
     let prepared = false
     try {
       if (a.locate) ctx = this.ctx(account.id, await a.locate(p, ctx.call), id, true)
-      if (!REGION_IDS.has(ctx.region)) throw new Refused(`不支持的 region：${ctx.region}`)
+      if (!REGION_ID.test(ctx.region)) throw new Refused(`不支持的 region：${ctx.region}`)
       p = a.normalize ? a.normalize(p, ctx) : p
       if (a.prepare) {
         prepared = true
         await a.prepare(p, ctx)
       }
-      const snapshot = await a.snapshot(p, ctx)
-      const plan = a.plan(p, snapshot)
+      let snapshot = await a.snapshot(p, ctx)
+      let plan = a.plan(p, snapshot)
+      const coverage = plan.blockers?.filter((b) => plan.coverageBlockers?.includes(b)) ?? []
+      if (!prepared && !a.generic && coverage.length && coverage.length === plan.blockers?.length) {
+        a = genericAdapter(service, action, p, { ownRole: account.role, extra: coverage.map(() => '专用适配器不处理此请求；请核对完整参数'), cliFallback })
+        if (service === 'ec2') a = { ...a, dryRun: members?.includes('DryRun') === true }
+        if (!cliFallback) {
+          const unknown = unknownAwsParams(p, members)
+          if (unknown) throw new Refused(unknown, 'invalid')
+        }
+        snapshot = null
+        plan = a.plan(p, snapshot)
+      }
       // Blockers quote AWS data (Name tags…): fenced like any tool result, so it reads as data, not instructions.
       if (plan.blockers?.length) throw new Refused(`现在不能提出这个变更，原因如下：\n${fence(`${service}:${action}`, ctx.region, JSON.stringify(plan.blockers))}`)
       const dryRun = a.dryRun ? await this.dryRun(a, p, snapshot, ctx) : a.prepare ? 'change set 已创建（只是计划，还没执行）' : await this.simulate(a, p, ctx, account.accountId)
@@ -383,6 +415,9 @@ export class ProposalEngine {
         cardInput: undefined as unknown as ProposalCardInput,
         ...(opts.analyze && a.generic && { analysis: { status: 'running' as const, calls: 0, startedAt: now, stop: new AbortController() } })
       }
+      if (a.generic?.cliFallback && this.d.cliAvailable) {
+        try { this.d.cliAvailable() } catch { record.cliUnavailable = true }
+      }
       record.hash = hashOf(record)
       record.cardInput = {
         id,
@@ -396,6 +431,8 @@ export class ProposalEngine {
           { label: '账号', value: `${account.name}（${account.accountId}）${production ? ' · 生产' : ''}` },
           { label: 'Region', value: ctx.region },
           { label: '操作', value: `${service}:${action}` },
+          ...(a.generic?.cliFallback ? [{ label: 'AWS 服务操作', value: `${service}:${action}` }] : []),
+          ...(record.cliUnavailable ? [{ label: 'AWS CLI', value: '需要 AWS CLI：未找到，请安装或在设置里指定路径' }] : []),
           { label: '预检', value: dryRun },
           ...(a.generic ? [{ label: '漂移检查', value: '不适用：通用请求没有变更前快照，确认时不会核对资源状态' }] : []),
           ...(reason ? [{ label: '助手给出的理由', value: reason }] : []),
@@ -421,7 +458,7 @@ export class ProposalEngine {
         ...(record.analysis && { analysis: true }),
         actor: 'model'
       })
-      return { view: record.view, reused: false }
+      return { view: redactStructured(record.view, '', service, action) as ProposalView, reused: false }
     } catch (err) {
       if (prepared && a.discard) await a.discard(p, ctx).catch(() => {})
       const message = err instanceof Refused ? err.message : `预检失败，没有生成提案：${precheckCause(err)}`
@@ -477,7 +514,7 @@ export class ProposalEngine {
   }
 
   private auditParams(a: ChangeAdapter, p: Record<string, unknown>): string {
-    const s = JSON.stringify(scrub(a.redact ? a.redact(p) : p)) ?? ''
+    const s = JSON.stringify(scrubParams(a.service, a.action, a.redact ? a.redact(p) : p)) ?? ''
     return s.length > 2000 ? `${s.slice(0, 2000)}…` : s
   }
 
@@ -497,6 +534,7 @@ export class ProposalEngine {
       card,
       ...(p.outcome && { outcome: p.outcome }),
       ...(p.adapter.generic && { generic: true, tier: p.adapter.generic.tier, dangers: p.adapter.generic.dangers }),
+      ...(p.cliUnavailable && { cliUnavailable: true }),
       ...(p.analysis && { analysis: { status: p.analysis.status, calls: p.analysis.calls } })
     }
   }
@@ -606,6 +644,7 @@ export class ProposalEngine {
       throw new Error('提案内容校验失败，已作废。请让助手重新生成')
     }
     if (p.analysis?.status === 'running') reject('analysis', '影响分析还没完成，请稍等（最多 90 秒）')
+    if (p.cliUnavailable) reject('cli', '需要 AWS CLI：未找到，请安装或在设置里指定路径')
     if (p.confirmText !== undefined && (typed ?? '').trim() !== p.confirmText) reject('typed', `输入的内容和「${p.confirmText}」不一致`)
     const account = this.d.account(accountId)
     const problem = policyProblem(account, p.service, p.risk)
@@ -637,6 +676,7 @@ export class ProposalEngine {
       this.discard(p)
       return { status: 'drifted', changes }
     }
+    const executionStarted = this.now()
     try {
       const who = (await this.d.aws(accountId, 'sts', 'GetCallerIdentity', {}, 'us-east-1')) as { Account?: string }
       if (who?.Account !== p.awsAccountId) return drifted([`当前凭证属于账号 ${who?.Account ?? '?'}，不是提案的 ${p.awsAccountId}`], 'identity')
@@ -652,7 +692,11 @@ export class ProposalEngine {
       }
       const started = this.now()
       const exec = this.ctx(accountId, p.region, id, false)
-      const response = a.execute ? await a.execute(p.params, fresh, exec) : await exec.call(a.service, a.action, a.request ? a.request(p.params, fresh) : { ...p.params })
+      const response = a.execute
+        ? await a.execute(p.params, fresh, exec)
+        : a.generic?.cliFallback && this.d.awsCli
+          ? await this.d.awsCli(accountId, a.service, a.action, a.request ? a.request(p.params, fresh) : { ...p.params }, p.region)
+          : await exec.call(a.service, a.action, a.request ? a.request(p.params, fresh) : { ...p.params })
       const requestId = requestIdOf(response)
       let summary = ''
       try {
@@ -662,12 +706,12 @@ export class ProposalEngine {
       }
       summary = summary || '已提交'
       this.finish(p, 'succeeded', summary)
-      this.audit(p, 'proposal_executed', { proposalId: id, hash: p.hash, service: p.service, action: p.action, status: 'succeeded', requestId, ms: this.now() - started, summary: summary.slice(0, 300), actor: 'user' })
+      this.audit(p, 'proposal_executed', { proposalId: id, hash: p.hash, service: p.service, action: p.action, region: p.region, ok: true, status: 'succeeded', requestId, ms: this.now() - started, ...(!a.generic && { summary: summary.slice(0, 300) }), actor: 'user' })
       return { status: 'succeeded', summary, ...(requestId && { requestId }) }
     } catch (err) {
       const error = awsError(err)
       this.finish(p, 'failed', error)
-      this.audit(p, 'proposal_failed', { proposalId: id, hash: p.hash, service: p.service, action: p.action, status: 'failed', error: error.slice(0, 300), actor: 'user' })
+      this.audit(p, 'proposal_failed', { proposalId: id, hash: p.hash, service: p.service, action: p.action, region: p.region, ok: false, status: 'failed', ms: this.now() - executionStarted, error: error.slice(0, 300), actor: 'user' })
       this.discard(p)
       return { status: 'failed', error }
     }

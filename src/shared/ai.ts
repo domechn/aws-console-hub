@@ -60,6 +60,8 @@ export interface AiConfig {
   bedrockAccountId: string | null
   /** Bedrock runtime region, independent of the console's. */
   bedrockRegion: string
+  /** Optional AWS CLI v2 executable for services or operations without a bundled SDK command. */
+  awsCliPath: string | null
   /** Audit rows older than this are pruned (at start and daily); younger ones never are. */
   auditRetentionDays: number
   conversationRetention: ConversationRetention
@@ -349,6 +351,8 @@ export interface ProposalView {
   tier?: 'B' | 'C'
   /** Tier C: the operation's categories (neutral labels, not predicted effects), for the red banner. */
   dangers?: string[]
+  /** The card needs AWS CLI, but no executable was found when it was built. */
+  cliUnavailable?: boolean
   /** The AI impact analysis (generic proposals, when on): confirm waits while it runs. Its content is on the card. */
   analysis?: { status: 'running' | 'done' | 'failed'; calls: number }
 }
@@ -374,7 +378,7 @@ export interface ApprovalView {
   region: string
   accountName: string
   awsAccountId: string
-  /** The params exactly as they will be sent (pretty JSON); values under secret-looking keys show only their length. */
+  /** The complete params exactly as they will be sent (pretty JSON). */
   params: string
   /** The model's one-line reason, labelled as such on the card. */
   reason: string

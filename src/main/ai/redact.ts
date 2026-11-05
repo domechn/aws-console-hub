@@ -14,6 +14,7 @@ const RULES: [RegExp, string][] = [
   // Bare STS session tokens: base64 of the protobuf header they all start with.
   [/(?:IQoJb3JpZ2lu|FwoGZXIvYXdz|FQoGZXIvYXdz)[A-Za-z0-9/+=%]{40,}/g, '[redacted:aws-session-token]'],
   [/\bsk-[A-Za-z0-9_-]{20,}/g, '[redacted:api-key]'],
+  [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted:jwt]'],
   // Google (Gemini) AIza…, Groq gsk_, xAI xai-, GitHub ghp_ / github_pat_, Hugging Face hf_.
   [/\b(?:AIza[0-9A-Za-z_-]{35}|gsk_[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|hf_[A-Za-z0-9]{30,})/g, '[redacted:api-key]'],
   // Password-like fields inside JSON that arrives as a string (CloudFormation ResourceProperties, templates), escaped or not.
@@ -31,6 +32,5 @@ export function redactAttachmentSecrets(text: string): string {
   const assigned = text.replace(/(^[ \t]*["']?(?:pass(?:word)?|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)s?["']?[ \t]*[:=][ \t]*["']?)([^\r\n"']+)/gim,
     (_whole, key: string, value: string) => value.trim() ? `${key}[redacted]` : `${key}${value}`)
   return redactSecrets(assigned)
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted:jwt]')
     .replace(/\b(?:xox[abprs]-[A-Za-z0-9-]+|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+)\b/g, '[redacted:api-key]')
 }

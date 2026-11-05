@@ -61,6 +61,20 @@ describe('mergeAiConfig', () => {
     expect(mergeAiConfig(custom, { provider: 'openai' }).baseUrl).toBeNull()
   })
 
+  it('accepts an optional AWS CLI path and rejects control characters', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-cli-path-'))
+    const cli = path.join(dir, 'aws')
+    fs.writeFileSync(cli, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+    expect(mergeAiConfig(DEFAULT_AI_CONFIG, { awsCliPath: ` ${cli} ` }).awsCliPath).toBe(cli)
+    expect(mergeAiConfig(DEFAULT_AI_CONFIG, { awsCliPath: '' }).awsCliPath).toBeNull()
+    expect(() => mergeAiConfig(DEFAULT_AI_CONFIG, { awsCliPath: '/tmp/aws\nbad' })).toThrow('AWS CLI 路径')
+    expect(() => mergeAiConfig(DEFAULT_AI_CONFIG, { awsCliPath: `${cli}\n` })).toThrow('AWS CLI 路径')
+    for (const invalid of ['relative/aws', '/missing/aws', dir]) expect(() => mergeAiConfig(DEFAULT_AI_CONFIG, { awsCliPath: invalid })).toThrow('AWS CLI 路径')
+    fs.chmodSync(cli, 0o600)
+    expect(() => mergeAiConfig(DEFAULT_AI_CONFIG, { awsCliPath: cli })).toThrow('AWS CLI 路径')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
   it('takes a Bedrock account only if it exists, and a region only from the catalog', () => {
     const exists = (id: string) => id === 'acc-1'
     const next = mergeAiConfig(DEFAULT_AI_CONFIG, { provider: 'amazon-bedrock', bedrockAccountId: 'acc-1', bedrockRegion: 'eu-west-1' }, exists)
@@ -130,6 +144,7 @@ describe('AiConfigStore', () => {
     const store = new AiConfigStore(file)
     expect(store.get()).toEqual({
       ...v1,
+      awsCliPath: null,
       version: 8,
       bedrockAuth: 'account',
       bedrockAccountId: null,

@@ -580,6 +580,68 @@ describe('approvals through the service (tier B reads pause the run)', () => {
     await s.waitDone(2)
     expect(s.fake.writes().map((w) => `${w.service}:${w.action}`)).toEqual(['sns:Publish'])
   })
+  it('keeps generic request secrets on the live card and out of history, audit, tool results, and analysis', async () => {
+    const secret = 'generic-chosen-secret'
+    const params = { Budget: { X: { Password: secret } }, AccessToken: 'access-chosen-secret', NextToken: 'next' }
+    const seen: string[] = []
+    const s = setup(
+      [
+        fauxAssistantMessage([fauxToolCall('propose_change', { service: 'budgets', action: 'CreateBudget', params, reason: 'test' })], { stopReason: 'toolUse' }),
+        (ctx) => (seen.push(lastToolResult(ctx)), fauxAssistantMessage('请确认。'))
+      ],
+      {},
+      {},
+      [fauxAssistantMessage('', { stopReason: 'error', errorMessage: 'done' })]
+    )
+    const { conversationId } = await s.service.send('acc-1', null, '创建预算')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    expect(JSON.stringify(s.service.engine.view(id)?.card)).toContain(secret)
+    expect(JSON.stringify(s.events.find((e) => e.event.type === 'proposal'))).toContain(secret)
+    for (const output of [JSON.stringify(s.store.messages(conversationId)), JSON.stringify(s.store.auditEntries()), seen.join(''), JSON.stringify(s.analystSeen)]) {
+      expect(output).not.toContain(secret)
+      expect(output).not.toContain('access-chosen-secret')
+    }
+  })
+  it.each([
+    ['ec2', 'RunInstances', { ImageId: 'ami-0ddddddddddddddd1', InstanceType: 't3.micro', UserData: 'secret-user-data-123' }, 'secret-user-data-123'],
+    ['ec2', 'RequestSpotInstances', { LaunchSpecification: { UserData: 'secret-spot-userdata-123' } }, 'secret-spot-userdata-123'],
+    ['ec2', 'CreateLaunchTemplate', { LaunchTemplateName: 't', LaunchTemplateData: { UserData: 'secret-template-userdata-123' } }, 'secret-template-userdata-123'],
+    ['ec2', 'ModifyInstanceAttribute', { InstanceId: 'i-0aaaaaaaaaaaaaaa1', UserData: { Value: 'secret-attribute-userdata-123' } }, 'secret-attribute-userdata-123'],
+    ['lambda', 'UpdateFunctionConfiguration', { FunctionName: 'f', Environment: { Variables: { MODE: 'secret-lambda-env-123' } } }, 'secret-lambda-env-123'],
+    ['ecs', 'RegisterTaskDefinition', { family: 'f', containerDefinitions: [{ name: 'c', image: 'img', environment: [{ name: 'MODE', value: 'secret-ecs-env-123' }], secrets: [{ name: 'REF', valueFrom: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:keep-ref' }] }] }, 'secret-ecs-env-123'],
+    ['ssm', 'PutParameter', { Name: '/test', Type: 'SecureString', Value: 'secret-ssm-value-123', Overwrite: true }, 'secret-ssm-value-123'],
+    ['ssm', 'PutParameter', { Name: '/test', Value: 'secret-ssm-default-123', Overwrite: true }, 'secret-ssm-default-123'],
+    ['kms', 'Encrypt', { KeyId: 'k', Plaintext: 'secret-kms-plaintext-123' }, 'secret-kms-plaintext-123'],
+    ['cloudformation', 'CreateStack', { StackName: 's', TemplateBody: '{}', Parameters: [{ ParameterKey: 'Ordinary', ParameterValue: 'secret-cfn-parameter-123' }] }, 'secret-cfn-parameter-123'],
+    ['iam', 'CreateLoginProfile', { UserName: 'u', Password: 765432198 }, '765432198'],
+    ['iam', 'UpdateLoginProfile', { UserName: 'u', Password: 'secret-iam-update-password-123' }, 'secret-iam-update-password-123'],
+    ['cognito-idp', 'AdminCreateUser', { UserPoolId: 'p', Username: 'u', TemporaryPassword: 123456788 }, '123456788'],
+    ['cognito-idp', 'AdminSetUserPassword', { UserPoolId: 'p', Username: 'u', Password: 'secret-cognito-password-123' }, 'secret-cognito-password-123'],
+    ['rds', 'CreateDBInstance', { DBInstanceIdentifier: 'db', MasterUserPassword: 123456787 }, '123456787'],
+    ['redshift', 'CreateCluster', { ClusterIdentifier: 'c', MasterUserPassword: 'secret-redshift-master-123' }, 'secret-redshift-master-123'],
+    ['opensearch', 'CreateDomain', { DomainName: 'd', AdvancedSecurityOptions: { MasterUserOptions: { MasterUserPassword: 123456786 } } }, '123456786'],
+    ['glue', 'CreateConnection', { ConnectionInput: { Name: 'c', ConnectionProperties: { PASSWORD: 'secret-glue-password-123' } } }, 'secret-glue-password-123'],
+    ['elasticache', 'CreateReplicationGroup', { ReplicationGroupId: 'r', AuthToken: 'secret-cache-token-123' }, 'secret-cache-token-123'],
+    ['secretsmanager', 'CreateSecret', { Name: 'x', SecretString: 'secret-string-value-123' }, 'secret-string-value-123'],
+    ['secretsmanager', 'PutSecretValue', { SecretId: 'x', SecretBinary: 'secret-binary-value-123' }, 'secret-binary-value-123'],
+    ['secretsmanager', 'UpdateSecret', { SecretId: 'x', SecretString: 'secret-update-value-123' }, 'secret-update-value-123']
+  ])('redacts %s:%s generic values from every persisted and model sink', async (service, action, params, secret) => {
+    const seen: string[] = []
+    const s = setup([
+      fauxAssistantMessage([fauxToolCall('propose_change', { service, action, params, reason: 'test' })], { stopReason: 'toolUse' }),
+      (ctx) => (seen.push(lastToolResult(ctx)), fauxAssistantMessage('请确认。'))
+    ], {}, {}, [fauxAssistantMessage('', { stopReason: 'error', errorMessage: 'done' })])
+    const { conversationId } = await s.service.send('acc-1', null, '提案')
+    await s.waitDone(1)
+    const id = s.proposalId()
+    expect(JSON.stringify(s.service.engine.view(id)?.card)).toContain(secret)
+    const stored = JSON.stringify(s.store.messages(conversationId))
+    for (const output of [stored, JSON.stringify(s.store.auditEntries()), seen.join(''), JSON.stringify(s.analystSeen)]) {
+      expect(output).not.toContain(secret)
+    }
+    expect(stored).toContain('[redacted]')
+  })
 })
 
 describe('AI impact analysis through the service', () => {

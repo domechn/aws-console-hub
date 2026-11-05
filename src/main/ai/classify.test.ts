@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { classifyAction, READ_SERVICES, writeTier } from './classify'
+import { CLI_TO_CANONICAL } from './serviceNames'
 
 /** Everything M3 / M4 refused outright as a change (registry.test.ts's old FORBIDDEN list), with its new tier. */
 const OLD_FORBIDDEN: [string, 'B' | 'C'][] = [
@@ -45,6 +46,34 @@ const OLD_SENSITIVE = [
 const split = (key: string): [string, string] => key.split(':') as [string, string]
 
 describe('classifyAction: tiers', () => {
+  it('refuses noncanonical spellings of sensitive and danger actions', () => {
+    expect(classifyAction('ec2', 'GetpasswordData')).toMatchObject({ class: 'invalid', reason: expect.stringContaining('请使用 GetPasswordData') })
+    expect(classifyAction('rds', 'ModifyDbSnapshotAttribute')).toMatchObject({ class: 'invalid', reason: expect.stringContaining('请使用 ModifyDBSnapshotAttribute') })
+  })
+  it('classifies credential-returning reads and waf-regional writes', () => {
+    for (const key of ['s3control:GetDataAccess', 'lightsail:GetInstanceAccessDetails', 'glue:GetConnection', 'appsync:ListApiKeys', 'dynamodbstreams:GetRecords', 'codecommit:GetBlob', 'redshift:GetClusterCredentials']) {
+      expect(classifyAction(...split(key)).class, key).toBe('sensitive')
+    }
+    expect(classifyAction('waf-regional', 'DeleteWebACL').tier).toBe('C')
+  })
+  it('rejects every CLI spelling before classification', () => {
+    for (const [alias, canonical] of Object.entries(CLI_TO_CANONICAL)) {
+      expect(classifyAction(alias, 'ListThings')).toMatchObject({ class: 'invalid', tier: null, reason: expect.stringContaining(`请使用 ${canonical}`) })
+    }
+  })
+
+  it.each([
+    's3:PutBucketAcl', 's3:DeleteBucketPolicy', 's3:DeletePublicAccessBlock',
+    'config:DeleteConfigRule', 'access-analyzer:DeleteAnalyzer', 's3control:DeleteAccessPoint',
+    'wafv2:DeleteWebACL', 'backup:DeleteRecoveryPoint', 'ram:DeleteResourceShare',
+    'shield:DeleteProtection', 'route53domains:TransferDomain'
+  ])('%s requires tier C', (key) => {
+    expect(classifyAction(...split(key))).toMatchObject({ class: 'write', tier: 'C' })
+  })
+
+  it.each(['config:DescribeConfigRules', 'access-analyzer:ListAnalyzers', 'wafv2:GetWebACL', 'backup:ListBackupVaults'])('%s stays a read', (key) => {
+    expect(classifyAction(...split(key)).class).toBe('read')
+  })
   it.each([
     ['ec2', 'DescribeInstances'],
     ['ec2', 'DescribeSecurityGroups'],
@@ -133,14 +162,28 @@ describe('classifyAction: tiers', () => {
 
   it.each([
     ['EC2', 'DescribeInstances'],
-    ['ec2', 'describeInstances'],
     ['ec2', 'Describe Instances'],
     ['ec2', 'DescribeInstances;rm'],
     ['', ''],
     ['ec2', 'Command'],
-    ['ec2/../iam', 'X']
+    ['ec2/../iam', 'X'],
+    ['ec2', 'describeInstances'],
+    ['ec2', 'stopInstances']
   ])('only malformed names are refused outright: %s:%s', (service, action) => {
     expect(classifyAction(service, action)).toMatchObject({ class: 'invalid', tier: null })
+  })
+
+  it('refuses noncanonical spellings of classified actions', () => {
+    for (const action of ['StopLogging', 'STOPLOGGING']) expect(classifyAction('cloudtrail', action)).toMatchObject({ class: 'write', tier: 'C' })
+    expect(classifyAction('cloudtrail', 'stopLogging')).toMatchObject({ class: 'invalid', tier: null, reason: expect.stringContaining('PascalCase') })
+    expect(classifyAction('secretsmanager', 'GetSecretValue').class).toBe('sensitive')
+    expect(classifyAction('secretsmanager', 'GetSecretVALUE').class).toBe('invalid')
+    expect(classifyAction('apigateway', 'GetAPIKeys').class).toBe('invalid')
+    expect(classifyAction('apigateway', 'GetApiKEYS').class).toBe('invalid')
+    expect(classifyAction('ec2', 'CreateKEYPair').tier).toBeNull()
+    expect(classifyAction('s3', 'PutBucketACL').tier).toBeNull()
+    expect(classifyAction('iam', 'CreateAccessKEY').tier).toBe('C')
+    expect(classifyAction('ec2', 'GETInstances').tier).toBe(classifyAction('ec2', 'GetInstances').tier)
   })
 
   it.each([
@@ -164,6 +207,11 @@ describe('classifyAction: tiers', () => {
 
   it('keeps Cost Explorer (billed per request) out of tier A', () => {
     expect(READ_SERVICES).not.toContain('ce')
+  })
+
+  it('asks every time for sensitive reads on new services', () => {
+    expect(classifyAction('newservice', 'GetSecretValue')).toMatchObject({ class: 'sensitive', tier: 'B' })
+    expect(classifyAction('newservice', 'GetCredentials')).toMatchObject({ class: 'sensitive', tier: 'B' })
   })
 })
 

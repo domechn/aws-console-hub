@@ -62,7 +62,7 @@ describe('CardView', () => {
   it('analysis blocks (card v3): skeleton with the query count, the failure notice, and a done analysis labelled as AI, facts with evidence, inferences, uncertainties, plain text', () => {
     const system = (b: Block): string => render(card({ v: 3, origin: 'system', blocks: [b] }))
     expect(system({ type: 'analysis', status: 'running', calls: 3 })).toContain('正在分析影响…（用到的查询：3）')
-    expect(system({ type: 'analysis', status: 'failed', calls: 1, error: '超过 90 秒' })).toContain('未能完成影响分析：超过 90 秒，请自行核对参数')
+    expect(system({ type: 'analysis', status: 'failed', calls: 1, error: '超过 90 秒' })).toContain('影响分析：未分析（超过 90 秒），请自行核对参数')
     const done = system({
       type: 'analysis',
       status: 'done',

@@ -7,7 +7,7 @@
 
 代码完成，没有提交。`npm run typecheck`、`npm test`（42 个文件，779 个测试；M4 报告时是 37 / 590）、`npm run build`、`npm run ai-smoke` 全部通过。构建产物里 20 个新 SDK client 都是懒 `require`（在 `import().then` 里），渲染进程 bundle 没有 TypeBox 校验、engine、`getApiKey`、`safeStorage`（已 grep）。
 
-最重要的变化：M3 / M4 的安全保证「不认识就拒绝（fail closed），禁止清单策略也打不开」换成了「**不认识就问你（fail to ask）**」。只有名称不合法、服务不在应用的 SDK 注册表里这两种情况还会直接拒绝（另外 `aws_read` 会把写操作和名称不明的操作指给 `propose_change`）。审批卡和强确认卡因此成了最后一道防线，见「威胁模型」。
+最重要的变化：M3 / M4 的安全保证「不认识就拒绝（fail closed），禁止清单策略也打不开」换成了「**不认识就问你（fail to ask）**」。名称不合法仍会直接拒绝；没有内置 SDK 命令的服务在审批后通过 AWS CLI 执行（另外 `aws_read` 会把写操作和名称不明的操作指给 `propose_change`）。审批卡和强确认卡因此成了最后一道防线，见「威胁模型」。
 
 ## 设计
 
@@ -19,7 +19,7 @@
 | B：审批 | ① 其他服务的读；② 敏感读取（密钥、SecureString、对象内容、表数据（PartiQL 只限 SELECT）、日志正文、实例密码 / userData、签发凭证、命令输出、API key 值……）；③ 名称看不出是不是只读的操作；④ 没有 adapter 的写操作（如 `ssm:SendCommand`、`sns:Publish`、不提权的 IAM 写）；⑤ tier A 的读但参数里有 URL、别的账号的资源、别人的桶 | ①②⑤：审批卡（允许一次 / 本对话内一直允许 / 拒绝）；③④：「通用请求」提案卡（风险至少「高」，输入操作名） |
 | C：强确认 | 原来的禁止清单：IAM 提权、关闭 / 修改 CloudTrail · GuardDuty · Config · Security Hub 等、组织和账号级、SSO、KMS、Secrets Manager 写、公开数据（桶策略、ACL、公开快照 / AMI、函数 URL）、`iam:PassRole` 类（参数里交出 IAM 角色）、资源策略参数、`CAPABILITY_IAM`、修改本应用登录用的角色、替换 Lambda 代码、`ExecuteChangeSet` / `DeleteStack`…… | 红色横幅写明危险在哪、风险「破坏性」、必须输入操作名，生产账号要输入 `service:action@账号id`；没有「一直允许」 |
 
-直接拒绝的只剩：名称不合法（`invalid`）；服务不在 `aws.ts` 注册表里或命令不存在（「暂不支持执行 xxx」，不出卡片）；账号策略（只读、服务列表、风险上限）；adapter 的参数 schema 不对（模型改了再提）。
+直接拒绝：名称不合法（action 必须以大写字母开头，使用 PascalCase）；AWS CLI 的非 API 命令（如 `configure`、`sso`、`emr ssh`、`ecs execute-command`、`ssm start-session`、`eks update-kubeconfig`、`cloudformation package/deploy`、`logs tail`、`rds generate-db-auth-token`）；账号策略（只读、服务列表、风险上限）；adapter 的参数 schema 不符；内置 SDK 命令的未知顶层参数。没有内置 SDK 客户端或命令的 API 经审批后走 AWS CLI；适配器明确标记的覆盖缺口才转通用卡。嵌套参数不改变 SDK 路由；CLI 缺失时提案卡提示安装并禁用确认。提案 region 只按正则检查格式，真实可用性由 AWS 校验。
 
 决定上的取舍（和任务描述的差异，供确认）：
 
@@ -35,7 +35,7 @@
 
 `aws_read` 判为 tier B 的读（或 tier A 的读但参数里有 URL、别的账号的 12 位 id、桶不是本账号的）时：
 
-1. 先问 `AwsClients.supports`：不支持的服务 / 命令直接回「暂不支持执行 xxx」，不出卡片（只加载模块，不调 AWS、不取凭证）。
+1. 格式正确的服务 / 命令可以进入审批；没有内置 SDK 命令时经审批后由 AWS CLI 执行。
 2. `ApprovalStore.request`：依次检查「一直允许」（有就直接执行，审计 `approval_auto`）、10 分钟内拒绝过同一个 `service:action`（直接拒绝，不再问）、限额（每账号同时 ≤ 3 张、每对话每分钟 ≤ 6 次、每条消息 ≤ 3 张）。都没命中才建记录：参数冻结，`hash` 绑定账号、对话、AWS 账号、登录身份、service、action、region、params、到期时间；推 `approval` 事件。
 3. 工具调用在这里**暂停**（运行的 5 分钟超时也暂停）。5 分钟没决定 → `expired`（视为拒绝）；点「停止」/ 删除对话 → `aborted`。
 4. `ai:approval-decide(accountId, conversationId, approvalId, decision)`：只有 id 和 `once | session | deny`，**没有参数**。主进程检查归属、状态、到期、hash、`session` 是否允许、登录身份，然后一次性消耗 nonce。
@@ -58,7 +58,7 @@
 
 1. **自己写 SigV4 + 协议**：这些服务横跨 Query/XML、JSON 1.0/1.1、REST-JSON、REST-XML 四种协议，要写 XML 解析、各协议的序列化和错误解析。工作量大、容易出错，而且出错的方式（参数被悄悄丢掉、序列化错位）正好会让「卡片上的参数」和「实际发送的请求」不一致。不做。
 2. **用 smithy 的底层件加服务模型动态调用**：要打包每个服务的 JSON 模型（几百 KB 到几 MB），非官方用法，升级 SDK 时容易坏。不做。
-3. **精选一组官方 client，懒加载**（采用）：20 个常用服务（ssm、secretsmanager、kms、sns、sqs、route53、cloudfront、elasticloadbalancing（ELBv2）、acm、eks、ecr、apigateway、apigatewayv2、events、states、cloudtrail、elasticache、kinesis、guardduty、organizations），版本钉成 3.1116.0，和已有的一样只在第一次用到时 `require`，主进程 bundle 不变大（externalize）。按 `${action}Command` 查导出的类。代价：`node_modules` 多约 50 MB。列表外的服务回「暂不支持」，加一个服务是注册表一行 + 一个依赖。
+3. **精选一组官方 client，懒加载**（采用）：20 个常用服务（ssm、secretsmanager、kms、sns、sqs、route53、cloudfront、elasticloadbalancing（ELBv2）、acm、eks、ecr、apigateway、apigatewayv2、events、states、cloudtrail、elasticache、kinesis、guardduty、organizations），版本钉成 3.1116.0，和已有的一样只在第一次用到时 `require`，主进程 bundle 不变大（externalize）。按 `${action}Command` 查导出的类。代价：`node_modules` 多约 50 MB。列表外的服务走 AWS CLI；给服务增加内置 SDK 是注册表一行 + 一个依赖。
 
 所有 client 只用账号的凭证 provider（SigV4，`federation.ts` 的管线），不读 `~/.aws`、环境变量或实例角色。
 
@@ -93,7 +93,7 @@
 | A3 | 「一直允许」被滥用：用户允许了一次无害的查询，之后同一 action 带上恶意参数 | 一直允许只给普通读（`class: read`）；参数里出现别的账号的 ARN 或别人的桶时，这次调用强制要问（`sessionAllowed: false`，旧的允许不覆盖它）；写操作、敏感读、名称不明的操作没有一直允许；只在内存、只在这个对话，可撤销，每次放行都审计 | `approvals.test.ts`、`tools.test.ts` |
 | A4 | 名称看不出是写操作的 API 走一键审批 | 写动词表（Create / Delete / Put / Send / Publish / Invoke / Transact / Withdraw / Switchover……）判为写；剩下的「名称不明」`aws_read` 也不执行，只能走通用请求（输入操作名、账号策略） | `classify.test.ts`、`tools.test.ts` |
 | A5 | 卡片显示的和实际执行的不一样（TOCTOU） | 请求时冻结参数、region；`hash` 在决定时重算；执行的是记录里冻结参数的副本，不是模型的对象；渲染进程只传 id 和决定；登录身份变了就作废 | `approvals.test.ts`（换参数 → 作废）、`tools.test.ts`（执行的是 verdict 的参数）、`engine.test.ts`（卡片 JSON == 写调用参数） |
-| A6 | 卡片上看不清：隐藏、截断、bidi 字符、超长参数 | 参数显示**不截断、不限高度**（读 ≤ 4000 字、通用请求 ≤ 20 000 字，超了直接拒绝）；读的审批卡只有密码 / 密钥这类**值**显示长度，标识符（`SecretId`、`AccessKeyId`、`*Arn`、`*Name`）照常显示；通用请求显示全部值；格式字符显示成 `<U+202E>`；`reason` 和规则文字里引用的参数去掉控制和格式字符；模型的理由标明「助手给出的理由」 | `shape.test.ts`、`approvals.test.ts`、`m4adapters.test.ts` |
+| A6 | 卡片上看不清：隐藏、截断、bidi 字符、超长参数 | 本机实时审批卡和通用请求卡显示全部参数值，历史工具结果与审计脱敏（读 ≤ 4000 字、通用请求 ≤ 20 000 字，超了直接拒绝）；格式字符显示成 `<U+202E>`；`reason` 和规则文字里引用的参数去掉控制和格式字符；模型的理由标明「助手给出的理由」 | `shape.test.ts`、`approvals.test.ts`、`m4adapters.test.ts` |
 | A7 | 模型伪造审批卡 / 提案卡 | 审批卡只来自主进程的 `approval` 事件和工具结果的 `details`（模型写不进 `details`）；`render_card` 不能用 `request` 等 system 块；模型卡片上的按钮只会把点击作为消息发回模型，任何消息都不能批准；用户打字「同意」也不算（运行等待时根本发不出去） | `cards.test.ts`、`history.test.ts`（伪造 id 不显示）、`proposals.service.test.ts` |
 | A8 | 借通用请求绕过账号策略 | 只读账号不出任何变更卡；`aiServices` 列表和风险上限（升级之后）照样适用；生产账号升一级；三次策略检查不变 | `engine.test.ts` |
 | A9 | 强确认被轻视 | tier C 风险「破坏性」，红色横幅列出每个危险项，必须输入操作名，生产账号加账号 id；没有一直允许 | `engine.test.ts`、`ApprovalCard.test.tsx` |
@@ -101,7 +101,7 @@
 | A11 | 新 SDK client 用了宿主机凭证 | 所有 client 都传账号的凭证 provider，没有默认凭证链；`supports` 不取凭证 | `aws.test.ts` |
 | A12 | 审计记录泄密 | `approval_requested` 只记脱敏参数（≤ 2000 字）；其他审批行没有参数；查看器和 CLI 的摘要不含参数 | `auditDigest.test.ts` |
 | L1 | 渲染进程被攻破 | **接受**（同 M4 L1）：1 秒延迟、esc 拒绝、输入确认文字都在界面里；被攻破的界面能点你能点的一切 | — |
-| L2 | 读的审批卡上被隐藏的值无法核对 | **接受**：读请求里密码 / 密钥类的值只显示长度（hash 保证执行的就是那个值）；读请求一般没有这类参数，写请求（通用请求）显示全部值 | — |
+| L2 | 读的审批卡上被隐藏的值无法核对 | 已调整：本机实时审批卡显示完整值；审计和历史仍脱敏 | `approvals.test.ts`、`db.test.ts` |
 | L3 | 「一直允许」不看参数 | **接受**：按任务的设计键是 `service:action:region`。会返回秘密值、命令输出、执行数据的读（`apigateway:GetApiKeys`、`ssm:GetCommandInvocation`、`states:GetExecutionHistory`……）列为敏感读取，没有一直允许；带 URL / 别的账号 / 别人的桶的调用强制再问。一直允许之后的调用不再受审批限额约束，只受每条消息 15 次工具调用的限制 | `classify.test.ts` |
 | S1 | 注入让模型写的 `run_script` 脚本逃出沙箱（拿宿主的 `process` / `require` / 文件 / 网络） | QuickJS 编成 WebAssembly，宿主对象不在 wasm 内存里；只装了 `aws` / `parallel` / `log`；参数和结果只以 JSON 文本过边界；没有模块加载器和定时器；每个脚本一个新实例（[ai-run-script.md](ai-run-script.md)） | `sandbox.test.ts`（构造器链、`eval` / `Function`、`import()`、`globalThis`、原型污染、getter、Proxy） |
 | S2 | 脚本用来做批量写、或绕过审批 | `aws()` 走 `aws_read` 的同一个 `readCall`：写、名称不明、`ce` 一律拒绝；tier B 照常出卡，限额（每条消息 3 张、每账号同时 3 张、每分钟 6 次、拒绝冷却）不变；卡片写明「来自脚本」 | `script.test.ts` |
@@ -139,7 +139,7 @@
 | --- | --- |
 | `classify.test.ts`（重写） | 每个旧的禁止项 → 新等级（IAM 提权、审计检测、组织 / 账号、KMS / Secrets、公开暴露、CloudFormation → C；SSM、`lambda:Invoke` → B）；每个旧的敏感读取 → B；白名单外的读、名称不明、无 adapter 的写 → B；只有名称不合法是 `invalid`；`writeTier` 的 PassRole（含 camelCase）、资源策略、`CAPABILITY_IAM`、本应用角色 |
 | `approvals.test.ts`（新） | 允许一次（参数 == 卡片）、拒绝（冷却、不出新卡）、超时（假定时器）、过期后点击、中止（signal / 对话 / 已中止的 signal 不出卡）、错账号 / 错对话、双击、篡改参数、登录变化、文字清洗、一直允许（键、跨 region / 对话、撤销、敏感读取不行）、限额 |
-| `tools.test.ts` | A 直接执行、B 走审批（why、sessionAllowed、reason）、写操作指向 propose_change、不支持的服务不出卡、执行冻结参数、密钥 / SecureString 脱敏、S3 body 只读 16 KB、外部 ARN / 桶强制审批 |
+| `tools.test.ts` | A 直接执行、B 走审批（why、sessionAllowed、reason）、写操作指向 propose_change、未内置 SDK 的服务出审批卡、执行冻结参数、密钥 / SecureString 脱敏、S3 body 只读 16 KB、外部 ARN / 桶强制审批 |
 | `changes/engine.test.ts` | 旧禁止项 → tier C 通用请求（无写）；无 adapter 的写 → B / 破坏性；不支持 → 无卡；forbiddenParams → tier C；确认要输入操作名、正好一次写、参数 == 卡片；篡改作废；生产 tier C 要账号 id；只读 / 服务列表 / 风险上限 / 生产升级；EC2 通用请求 DryRun |
 | `proposals.service.test.ts` | faux 模型端到端：审批暂停与 history 里的「等待」、允许 / 拒绝 / 停止、一直允许与撤销、注入要密钥（只有点卡片才执行、结果不进记录）、每条消息 3 张卡、通用写一次；IAM 提权强确认，聊天里打字不算确认 |
 | `registry.test.ts`、`m4adapters.test.ts`、`service.test.ts`、`cards.test.ts`、`validate.test.ts`、`history.test.ts`、`shape.test.ts`、`prompt.test.ts`、`auditDigest.test.ts`、`aws.test.ts`、`ApprovalCard.test.tsx` | 断言拒绝的旧测试改成新行为；IPC 参数校验；history 的审批条目；`displayParams`；prompt 的审批规则；审批审计行；注册表每个 client 能加载；卡片渲染（审批卡、强确认横幅、通用请求说明、`approval` 事件合并） |
@@ -166,5 +166,5 @@
 9. 要求「给 <测试角色> 挂 AdministratorAccess」：红色「强确认 · 危险操作」横幅写着 IAM 提权；输入 `iam:AttachRolePolicy` 才能执行（**不要真的执行**，点取消）。把账号标成生产账号后再要求一次：要输入 `iam:AttachRolePolicy@<账号id>`。
 10. 账号改回只读，再要求第 8 条：没有卡片，助手说账号是只读。AI 策略取消「其他服务」：第 8 条被拒（sqs 归「其他服务」）。风险上限设「高」：第 9 条被拒。
 10a. 要求「用 PartiQL 删掉 <表> 里 pk=1 的那条」：不出审批卡，助手改用 propose_change（通用请求，要输入 `dynamodb:ExecuteStatement`）；`SELECT` 语句则是敏感读取的审批卡。
-11. 要求查一个应用不支持的服务（如 `glue:GetJobs`）：助手说暂不支持，不出卡片。
+11. 要求查没有内置 SDK 的服务（如 `glue:GetJobs`）：助手展示完整参数并请用户审批，通过后使用 AWS CLI。
 12. `npm run ai-audit -- --days 1 --json`：能看到 `approval_requested` / `approval_allowed` / `approval_denied` / `approval_auto` / `approval_revoked` / `approval_expired` / `approval_aborted` 行；AI 设置 →「AI 审计…」范围「变更与策略」里也有，没有参数。

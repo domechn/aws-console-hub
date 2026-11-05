@@ -65,7 +65,7 @@ const UNSUPPORTED = [
   'ec2:DeleteVpc', 'ec2:CreateVolume', 'ec2:DeleteSnapshot', 'ec2:DeleteVolume', 'ec2:AllocateAddress', 'ec2:ModifyVpcAttribute', 'rds:ModifyDBCluster', 'rds:DeleteDBCluster',
   'dynamodb:DeleteTable', 'dynamodb:DeleteBackup', 'sqs:DeleteQueue', 'sns:Publish', 'route53:ChangeResourceRecordSets', 'eks:DeleteCluster',
   'ecs:DeleteService', 'ecs:RunTask', 'autoscaling:UpdateAutoScalingGroup', 'autoscaling:DeleteAutoScalingGroup', 's3:PutBucketEncryption',
-  'lambda:DeleteFunction', 'tag:TagResource', 'tag:GetResources', 'cloudformation:UpdateStack', 'cloudformation:CreateStack', 'elbv2:DeleteLoadBalancer', 'made-up:Anything'
+  'lambda:DeleteFunction', 'tag:TagResource', 'tag:GetResources', 'cloudformation:UpdateStack', 'cloudformation:CreateStack', 'elasticloadbalancing:DeleteLoadBalancer', 'made-up:Anything'
 ]
 
 describe('account policy services', () => {
@@ -76,6 +76,11 @@ describe('account policy services', () => {
 })
 
 describe('write lookup (adapter, generic, or a read)', () => {
+  it.each(['ModifyDbInstance', 'DeleteDbInstance'])('refuses noncanonical RDS adapter spelling %s', (action) => {
+    expect(lookupChange('rds', action)).toEqual({
+      refused: 'invalid', reason: expect.stringContaining(`请使用 ${action.replace('Db', 'DB')}`)
+    })
+  })
   it('knows exactly the write table', () => {
     expect(ADAPTERS.map((a) => `${a.service}:${a.action}`).sort()).toEqual([...WRITE_TABLE].sort())
     for (const key of WRITE_TABLE) {
@@ -103,7 +108,7 @@ describe('write lookup (adapter, generic, or a read)', () => {
   })
 
   it('refuses malformed names and non-strings', () => {
-    for (const [s, a] of [['', 'StopInstances'], ['ec2', ''], ['EC2', 'StopInstances'], ['ec2', 'stopInstances'], ['ec2', 'Stop Instances'], ['ec2', 'Stop;Instances'], [1, 2], [null, undefined], ['ec2/../iam', 'X']]) {
+    for (const [s, a] of [['', 'StopInstances'], ['ec2', ''], ['EC2', 'StopInstances'], ['ec2', 'Stop Instances'], ['ec2', 'Stop;Instances'], [1, 2], [null, undefined], ['ec2/../iam', 'X']]) {
       expect(lookupChange(s, a)).toMatchObject({ refused: 'invalid' })
     }
   })

@@ -114,6 +114,7 @@ describe('aiReady', () => {
     bedrockAuth: 'account',
     bedrockAccountId: null,
     bedrockRegion: 'us-east-1',
+    awsCliPath: null,
     auditRetentionDays: 180,
     conversationRetention: null,
     budget: { monthlyTokens: null, monthlyUsd: null, block: false },

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApprovalView } from '../../shared/ai'
 import type { AwsAccount } from '../../shared/types'
 import { APPROVAL_LIMITS, ApprovalStore, type ApprovalRequest } from './approvals'
+import { toChatItems } from './history'
 
 const ACCOUNT: AwsAccount = { id: 'acc-1', kind: 'assume', name: 'Sandbox', accountId: '123456789012', role: 'Admin', viaId: 'base', defaultRegion: 'us-east-1', color: '#000' }
 
@@ -59,6 +60,21 @@ describe('ApprovalStore lifecycle', () => {
     expect(s.types()).toEqual(['approval_requested', 'approval_allowed'])
     expect(s.audits[0].data).toMatchObject({ approvalId: view.id, hash: view.hash, service: 'sqs', action: 'ListQueues', actor: 'model' })
     expect(s.audits[1].data).toMatchObject({ decision: 'once', actor: 'user' })
+  })
+
+  it('shows complete secret-looking parameter values before read approval', async () => {
+    const s = setup()
+    const params = { Password: 'chosen-by-model', Nested: { SessionToken: 'also-chosen-by-model', AccessToken: 'access-chosen-by-model' }, NextToken: 'next' }
+    const { verdict, view } = await s.ask({ params })
+    expect(JSON.parse(view.params)).toEqual(params)
+    s.store.decide('acc-1', 'conv-1', view.id, 'deny')
+    const result = await verdict
+    expect(JSON.stringify(s.audits)).not.toContain('chosen-by-model')
+    expect(JSON.stringify(result.view)).not.toContain('chosen-by-model')
+    expect(JSON.parse(result.view?.params ?? '{}').NextToken).toBe('next')
+    expect(result.view?.params).toContain('[redacted]')
+    const history = toChatItems([{ role: 'toolResult', toolCallId: 'call-1', details: { approval: result.view } }])
+    expect(JSON.stringify(history)).not.toContain('chosen-by-model')
   })
 
   it('deny: the model is told not to retry, and the same action is not asked again for 10 minutes', async () => {

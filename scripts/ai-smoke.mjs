@@ -4,7 +4,10 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync, chmodSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { build } from 'esbuild'
 import dgram from 'node:dgram'
 import dns from 'node:dns'
 import net from 'node:net'
@@ -35,6 +38,19 @@ dgram.createSocket = () => block('udp', '*')
 const { Type, calculateCost, fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } = await import('@earendil-works/pi-ai')
 const { APP_IDENTITY, createAppAgent, createAppModels, testModel } = await import('../src/main/ai/providers.ts')
 const { runScript } = await import('../src/main/ai/sandbox.ts')
+const smokeModules = mkdtempSync(join(fileURLToPath(new URL('../', import.meta.url)), '.ai-smoke-modules-'))
+await build({
+  entryPoints: [fileURLToPath(new URL('../src/main/ai/aws.ts', import.meta.url)), fileURLToPath(new URL('../src/main/ai/changes/engine.ts', import.meta.url))],
+  outdir: smokeModules,
+  outbase: fileURLToPath(new URL('../src/main/ai/', import.meta.url)),
+  bundle: true,
+  packages: 'external',
+  platform: 'node',
+  format: 'cjs',
+  logLevel: 'silent'
+})
+const { AwsClients } = createRequire(import.meta.url)(join(smokeModules, 'aws.js'))
+const { ProposalEngine } = createRequire(import.meta.url)(join(smokeModules, 'changes/engine.js'))
 
 const faux = fauxProvider({ provider: 'faux', models: [{ id: 'faux-1', cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } }] })
 const models = createAppModels()
@@ -185,6 +201,68 @@ assert.equal(mediaSeen.content[0].type, 'text')
 assert.match(mediaSeen.content[0].text, /<attachment kind="file" name="note.txt" untrusted="true">\nfile contents\n<\/attachment>/)
 assert.deepEqual(mediaSeen.content[1], { type: 'image', data: tinyImage, mimeType: 'image/jpeg' })
 assert.equal(attempts.length, 0, 'smoke test must stay offline')
+
+console.log('run 7: faux provider proposes budgets:CreateBudget; user confirmation runs fake CLI')
+const cliDir = mkdtempSync(join(tmpdir(), 'hub-smoke-cli-'))
+const cliNetworkEnv = Object.keys(process.env).filter((k) => /(?:^|_)proxy$|^aws_endpoint_url/i.test(k))
+const savedCliNetworkEnv = Object.fromEntries(cliNetworkEnv.map((k) => [k, process.env[k]]))
+for (const k of cliNetworkEnv) delete process.env[k]
+try {
+  const cli = join(cliDir, 'aws')
+  const cliRecord = join(cliDir, 'record.json')
+  writeFileSync(cli, `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(cliRecord)}, JSON.stringify({argv:process.argv.slice(2), env:process.env, input:JSON.parse(require('fs').readFileSync(process.argv[process.argv.indexOf('--cli-input-json')+1].slice(7),'utf8'))})); console.log('{"Budget":{"BudgetName":"smoke"}}')`)
+  chmodSync(cli, 0o700)
+  const creds = { AccessKeyId: 'FAKEACCESS', SecretAccessKey: 'FAKESECRET', SessionToken: 'FAKETOKEN', Expiration: '2999-01-01T00:00:00Z' }
+  const clients = new AwsClients(async () => creds, () => cli)
+  const account = { id: 'smoke', kind: 'assume', name: 'Smoke', accountId: '123456789012', role: 'Dev', viaId: 'base', defaultRegion: 'us-east-1', color: '#123456', aiAllowWrite: true }
+  const audits = []
+  const engine = new ProposalEngine({
+    aws: (id, service, action, params, region) => service === 'sts' && action === 'GetCallerIdentity'
+      ? Promise.resolve({ Account: account.accountId, Arn: `arn:aws:sts::${account.accountId}:assumed-role/Dev/me` })
+      : service === 'iam' && action === 'SimulatePrincipalPolicy'
+        ? Promise.resolve({ EvaluationResults: [{ EvalActionName: 'budgets:CreateBudget', EvalDecision: 'allowed' }] })
+        : clients.call(id, service, action, params, region),
+    account: () => account,
+    audit: (type, _id, data) => audits.push({ type, data }),
+    onState: () => {},
+    supports: (service, action) => clients.supports(service, action)
+  })
+  let proposed
+  const proposalTool = {
+    name: 'propose_change', label: '变更提案', description: '提案',
+    parameters: Type.Object({ service: Type.String(), action: Type.String(), params: Type.Record(Type.String(), Type.Unknown()), reason: Type.String() }),
+    execute: async (_id, input) => {
+      proposed = (await engine.propose({ accountId: account.id, conversationId: 'smoke', region: 'us-east-1' }, input)).view
+      return { content: [{ type: 'text', text: '提案已生成' }], details: { proposal: proposed } }
+    }
+  }
+  const budgetProvider = fauxProvider({ provider: 'faux-budget', models: [{ id: 'budget' }] })
+  models.setProvider(budgetProvider.provider)
+  budgetProvider.setResponses([
+    fauxAssistantMessage([fauxToolCall('propose_change', { service: 'budgets', action: 'CreateBudget', params: { AccountId: account.accountId, Budget: { BudgetName: 'smoke' } }, reason: 'smoke' })], { stopReason: 'toolUse' }),
+    fauxAssistantMessage('提案已生成')
+  ])
+  const budgetAgent = createAppAgent(models, { initialState: { systemPrompt: 'test', model: budgetProvider.getModel(), tools: [proposalTool] }, getApiKey: () => 'sk-faux', toolExecution: 'sequential' })
+  await budgetAgent.prompt('create a budget')
+  assert.equal(proposed?.generic, true)
+  assert.match(JSON.stringify(proposed.card), /通过 AWS CLI 直接执行/)
+  assert.equal(existsSync(cliRecord), false)
+  assert.equal((await engine.confirm(account.id, 'smoke', proposed.id, proposed.confirmText)).status, 'succeeded')
+  const called = JSON.parse(readFileSync(cliRecord, 'utf8'))
+  assert.deepEqual(called.argv.slice(0, 2), ['budgets', 'create-budget'])
+  assert.equal(called.argv.includes('--endpoint-url'), false)
+  assert.equal(Object.keys(called.env).some((k) => /(?:^|_)proxy$|^aws_endpoint_url/i.test(k)), false, 'fake CLI must have no proxy or endpoint variables')
+  assert.deepEqual(called.input, { AccountId: account.accountId, Budget: { BudgetName: 'smoke' } })
+  const executed = audits.find((a) => a.type === 'proposal_executed')
+  assert.deepEqual([executed?.data.service, executed?.data.action, executed?.data.region, executed?.data.ok], ['budgets', 'CreateBudget', 'us-east-1', true])
+  assert.equal(typeof executed.data.ms, 'number')
+  assert.doesNotMatch(JSON.stringify(executed), /FAKESECRET|FAKETOKEN|BudgetName/)
+  assert.equal(attempts.length, 0)
+} finally {
+  for (const [k, value] of Object.entries(savedCliNetworkEnv)) process.env[k] = value
+  rmSync(cliDir, { recursive: true, force: true })
+  rmSync(smokeModules, { recursive: true, force: true })
+}
 
 console.log('network attempts by pi: 0')
 console.log('OK')

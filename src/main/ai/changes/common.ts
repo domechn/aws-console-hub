@@ -89,6 +89,8 @@ export interface Plan {
   consequences: Consequence[]
   /** Why this change can't be proposed in the current state; the model gets them, no card is made. */
   blockers?: string[]
+  /** Adapter scope limits eligible for a generic request; all other blockers remain safety stops. */
+  coverageBlockers?: string[]
   /** The targets' tags: env=prod on any of them raises the risk (§9.5). */
   tags?: Record<string, string>[]
 }
@@ -133,7 +135,7 @@ export interface ChangeAdapter<P = any, S = any> {
   /** IAM actions the change needs, when not just `${service}:${action}` (e.g. CreateBucket + PutPublicAccessBlock). */
   iamActions?: string[]
   /** The generic adapter (generic.ts): a request card instead of a diff; tier C is a strong approval. */
-  generic?: { tier: 'B' | 'C'; dangers: string[] }
+  generic?: { tier: 'B' | 'C'; dangers: string[]; cliFallback?: boolean }
 }
 
 export const RISKS: Risk[] = ['low', 'medium', 'high', 'destructive']

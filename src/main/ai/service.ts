@@ -48,7 +48,7 @@ import { createAppAgent, listModels, resolveModel, supportsImageInput, testModel
 import { redactSecrets } from './redact'
 import { resourceCandidates, resolveResources, resourcePromptSection } from './resources'
 import { checkReplies } from './replies'
-import { displayParams } from './shape'
+import { displayParams, scrubParams } from './shape'
 import { buildCardTool, buildPageTool, buildProposeTool, buildReadTools, buildRepliesTool, MAX_COST_CALLS } from './tools'
 import { checkPrompt, checkUserIndex, checkResourceContext, checkSearchQuery } from './validate'
 import { watchedStream, type WatchEvent, type WatchLimits } from './watchdog'
@@ -85,10 +85,12 @@ export interface AiServiceDeps {
   account: (id: string) => AwsAccount | undefined
   /** One AWS call with the account's credentials (main's credential pipeline; never seen by the model or renderer). */
   aws: (accountId: string, ...call: Parameters<AwsCall>) => ReturnType<AwsCall>
+  awsCli?: (accountId: string, service: string, action: string, params: Record<string, unknown>, region: string) => Promise<unknown>
   /** Whether a call can be made at all (aws.ts); asked before an approval or generic change card. Absent: always. */
   awsSupports?: AwsSupports
   /** An operation's input members (aws.ts): generic EC2 changes DryRun only when there is a DryRun member. */
   awsInputMembers?: AwsInputMembers
+  awsCliAvailable?: () => string
   /** The same pipeline's credentials, for Bedrock in account mode: handed to pi per request, never stored or sent out. */
   credentials: (accountId: string) => Promise<AwsCredentials>
   /** Region the account's console tab is in, or its default. */
@@ -183,11 +185,13 @@ export class AiService {
     this.attachments = new AttachmentPreparer(d.imageCodec ?? nativeImageCodec, () => this.now())
     this.engine = new ProposalEngine({
       aws: (accountId, service, action, params, region) => d.aws(accountId, service, action, params, region),
+      awsCli: d.awsCli,
       account: (id) => d.account(id),
       audit: (type, accountId, data) => d.store.audit(type, accountId, data),
       onState: (p) => d.emit({ accountId: p.appAccountId, conversationId: p.conversationId, runId: 0, event: { type: 'proposal-state', proposal: p.view } }),
       supports: d.awsSupports,
       inputMembers: d.awsInputMembers,
+      cliAvailable: d.awsCliAvailable,
       now: () => this.now()
     })
     this.approvals = new ApprovalStore({
@@ -747,8 +751,8 @@ export class AiService {
           service: p.service,
           action: p.action,
           region: p.region,
-          params: p.params,
-          shown: displayParams(p.params, true),
+          params: scrubParams(p.service, p.action, p.params) as Record<string, unknown>,
+          shown: displayParams(scrubParams(p.service, p.action, p.params), true),
           account: { name: p.accountName, accountId: p.awsAccountId, production: p.production },
           risk: p.risk,
           categories: g?.tier === 'C' ? g.dangers : []
@@ -1400,7 +1404,7 @@ export class AiService {
             return
           }
           const proposal = e.isError ? undefined : (e.result?.details?.proposal as ProposalView | undefined)
-          if (proposal) return emit({ type: 'proposal', id: e.toolCallId, proposal })
+          if (proposal) return emit({ type: 'proposal', id: e.toolCallId, proposal: this.engine.view(proposal.id) ?? proposal })
           const summary = e.isError ? this.clean(String(e.result?.content?.[0]?.text ?? '失败')).slice(0, 200) : e.result?.details?.summary
           const calls = e.toolName === 'run_script' ? scriptCalls(e.result?.details) : undefined
           emit({ type: 'tool-end', id: e.toolCallId, ok: !e.isError && e.result?.details?.denied !== true, summary, ...(calls && { calls }), t: Date.now() - (started ? elapsedApprovalWait() - started.wait : 0) })

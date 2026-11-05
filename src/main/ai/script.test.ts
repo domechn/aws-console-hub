@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ApprovalView } from '../../shared/ai'
 import type { Verdict } from './approvals'
 import { leaks, SCRIPT_LIMITS } from './sandbox'
 import { buildReadTools, MAX_COST_CALLS, type ToolContext } from './tools'
+import { AwsClients } from './aws'
 
 /** run_script as the model calls it: through the real tool, a fake AWS and a fake approval store. */
 function context(call: ToolContext['call']) {
@@ -50,6 +54,29 @@ const view = (id: string, service: string, action: string): ApprovalView => ({
 afterEach(() => expect(leaks.count).toBe(0))
 
 describe('run_script', { timeout: 15_000 }, () => {
+  it('asks for approval before reading an unbundled service through a fake CLI', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hub-script-cli-'))
+    try {
+      const cli = join(dir, 'aws')
+      const record = join(dir, 'record.json')
+      writeFileSync(cli, `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(record)},JSON.stringify(process.argv.slice(2)));console.log('{"Budgets":[{"BudgetName":"sample"}]}')`)
+      chmodSync(cli, 0o700)
+      const clients = new AwsClients(async () => ({ AccessKeyId: 'FAKE', SecretAccessKey: 'FAKE', SessionToken: 'FAKE', Expiration: '2999-01-01' }), () => cli)
+      const { ctx, run, audit } = context((service, action, params, region, signal) => clients.call('acc', service, action, params, region, signal))
+      const asked: string[] = []
+      ctx.approve = async (req) => {
+        asked.push(...req.why)
+        return { ok: true, params: req.params, region: req.region, view: view('approval-1', req.service, req.action) }
+      }
+      const result = await run(`return (await aws('budgets', 'ListBudgets', {AccountId:'123456789012'})).Budgets`)
+      expect(result.content[0].text).toContain('sample')
+      expect(asked).toContain('应用没有内置这个服务的预览，将通过 AWS CLI 直接执行')
+      expect(readFileSync(record, 'utf8')).toContain('list-budgets')
+      expect(audit).toHaveBeenCalledWith('tool_call', expect.objectContaining({ ok: true }))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
   it('describes the configured deadline and parallel batches to the model', () => {
     const { ctx } = context(fakeS3)
     ctx.scriptWallMs = 12 * 60_000

@@ -5,6 +5,9 @@ const SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
 const TOKEN = 'IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJHMEUCIQDexample+example/example=='
 
 describe('redactSecrets', () => {
+  it('removes a JWT in ordinary stored text', () => {
+    expect(redactSecrets('token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature')).toBe('token [redacted:jwt]')
+  })
   it('removes access key ids, secret keys and session tokens in every shape', () => {
     const cases = [
       'my key is AKIAIOSFODNN7EXAMPLE ok',

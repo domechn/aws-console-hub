@@ -93,6 +93,7 @@ describe('runImpactAnalysis', () => {
     expect(out).toEqual({ ok: true, result: analysisResult(), calls: 2 })
     // The analyst's own prompt, the request fenced as untrusted data, and the app's parse of the new policy.
     expect(seen[0]).toContain('AWS 变更影响分析员')
+    expect(seen[0]).toContain('显示为 [redacted] 的是占位符')
     expect(seen[0]).toContain('<aws_data source=\\"request\\"')
     expect(seen[0]).toContain('Principal 是 *（任何主体），没有 Condition')
     // What it read came back fenced; the comparison is the app's, deterministic.

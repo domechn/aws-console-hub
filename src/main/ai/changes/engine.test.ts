@@ -4,7 +4,7 @@ import { resultCard } from './card'
 import { createChangeSet, templateProblem } from './cfn'
 import { startInstances } from './ec2'
 import { putBucketVersioning } from './services'
-import { principalArn, PROPOSAL_LIMITS, ProposalEngine, READ_ONLY_MESSAGE, type ProposeInput } from './engine'
+import { policyProblem, principalArn, PROPOSAL_LIMITS, ProposalEngine, READ_ONLY_MESSAGE, type ProposeInput } from './engine'
 import { awsErr, AWS_ACCOUNT, ec2World, fakeAws } from './testing'
 
 const WEB = 'i-0aaaaaaaaaaaaaaa1'
@@ -42,6 +42,19 @@ function setup(patch: Partial<AwsAccount> = {}, extra: Record<string, (p: any, r
 }
 
 describe('propose: refusals send nothing to AWS', () => {
+  it('refuses a CLI-equivalent SDK action spelling', async () => {
+    const s = setup()
+    await expect(s.propose({ service: 'ec2', action: 'ModifyVPCAttribute', params: { VpcId: 'vpc-1', EnableDnsSupport: { Value: true } } })).rejects.toThrow('请使用 ModifyVpcAttribute')
+    expect(s.fake.writes()).toEqual([])
+  })
+  it('keeps CLI aliases out of policy and proposal audits', async () => {
+    const s = setup({ aiServices: ['other'] })
+    expect(policyProblem(s.account, 's3')).toContain('不允许')
+    expect(policyProblem(s.account, 's3api')).toContain('请使用 s3')
+    await expect(s.propose({ service: 's3api', action: 'PutBucketAcl', params: { Bucket: 'x' } })).rejects.toThrow('请使用 s3')
+    expect(s.fake.calls).toEqual([])
+    expect(s.audits[0].data.service).toBeUndefined()
+  })
   it('refuses on a read-only account, with the message that says how to turn writes on', async () => {
     const s = setup({ aiAllowWrite: undefined })
     await expect(s.stop()).rejects.toThrow(READ_ONLY_MESSAGE)
@@ -57,12 +70,37 @@ describe('propose: refusals send nothing to AWS', () => {
     expect(s.fake.calls).toEqual([])
   })
 
-  it('still refuses unknown params of an adapter by schema (the model fixes them)', async () => {
+  it('refuses params outside an adapter schema for the model to fix', async () => {
     const s = setup()
     const run = (extra: Record<string, unknown>) => s.propose({ service: 'ec2', action: 'RunInstances', params: { ImageId: 'ami-0ddddddddddddddd1', InstanceType: 't3.micro', ...extra } })
     await expect(run({ Placement: { Tenancy: 'dedicated' } })).rejects.toThrow('参数无效')
     await expect(s.stop(['not-an-id'])).rejects.toThrow('参数无效')
     expect(s.fake.writes()).toEqual([])
+  })
+
+  it('routes an adapter coverage blocker to a strong generic approval', async () => {
+    const s = setup({}, { 'autoscaling:DescribeAutoScalingGroups': () => ({ AutoScalingGroups: [{ AutoScalingGroupName: 'web-asg', MinSize: 0, MaxSize: 10, DesiredCapacity: 3, Instances: [] }] }) })
+    const view = (await s.propose({ service: 'autoscaling', action: 'SetDesiredCapacity', params: { AutoScalingGroupName: 'web-asg', DesiredCapacity: 11 } })).view
+    expect(view).toMatchObject({ generic: true, tier: 'C' })
+    expect(s.fake.writes()).toEqual([])
+  })
+
+  it('keeps tagging safety blockers even when their message contains 不支持', async () => {
+    const s = setup()
+    for (const arn of [`arn:aws:route53:::hostedzone/Z123`, `arn:aws:iam::${AWS_ACCOUNT}:role/Admin`]) {
+      await expect(s.propose({
+        service: 'tag', action: 'TagResources',
+        params: { ResourceARNList: [arn], Tags: { team: 'ops' } }
+      })).rejects.toThrow('现在不能提出这个变更')
+    }
+    expect(s.fake.writes()).toEqual([])
+  })
+
+  it('refuses local AWS CLI programs before a proposal card', async () => {
+    const s = setup()
+    await expect(s.propose({ service: 'ecs', action: 'ExecuteCommand', params: {} })).rejects.toThrow('不是 API 调用')
+    await expect(s.propose({ service: 'emr', action: 'Ssh', params: {} })).rejects.toThrow('不是 API 调用')
+    expect(s.fake.calls).toEqual([])
   })
 })
 
@@ -76,10 +114,19 @@ describe('generic proposals: writes without an adapter ask the user instead of b
     ['iam', 'DeleteRole'],
     ['cloudtrail', 'StopLogging'],
     ['kms', 'ScheduleKeyDeletion'],
+    ['account', 'CloseAccount'],
     ['cloudformation', 'ExecuteChangeSet']
   ])('old forbidden %s:%s becomes a tier C strong approval, nothing written', async (service, action) => {
     const s = setup()
-    const { view } = await s.propose({ service, action, params: { RoleName: 'Admin', UserName: 'someone-else' }, reason: '用户要求' })
+    const params: Record<string, Record<string, unknown>> = {
+      'iam:CreateAccessKey': { UserName: 'someone-else' },
+      'iam:AttachRolePolicy': { RoleName: 'Admin', PolicyArn: 'arn:aws:iam::aws:policy/ReadOnlyAccess' },
+      'iam:DeleteRole': { RoleName: 'Admin' },
+      'cloudtrail:StopLogging': { Name: 'trail' },
+      'kms:ScheduleKeyDeletion': { KeyId: 'key' },
+      'cloudformation:ExecuteChangeSet': { ChangeSetName: 'change' }
+    }
+    const { view } = await s.propose({ service, action, params: params[`${service}:${action}`] ?? {}, reason: '用户要求' })
     expect(view).toMatchObject({ generic: true, tier: 'C', risk: 'destructive', confirmText: `${service}:${action}`, state: 'pending' })
     expect(view.dangers?.length).toBeGreaterThan(0)
     expect(requestOf(view)).toMatchObject({ kind: 'request', summary: `在 Sandbox · ap-northeast-1 发送通用请求 ${service}:${action}` })
@@ -108,7 +155,7 @@ describe('generic proposals: writes without an adapter ask the user instead of b
     if (view.tier === 'C') expect(view.card.blocks.find((b) => b.type === 'risk')).toMatchObject({ reasons: expect.arrayContaining([expect.stringContaining('此类操作需要仔细核对')]) })
   })
 
-  it('a write no adapter knows is tier B (risk high; destructive names "destructive"); unsupported services get no card', async () => {
+  it('a write no adapter knows is tier B and unknown services get a card', async () => {
     const s = setup()
     const sns = await s.propose({ service: 'sns', action: 'Publish', params: { TopicArn: `arn:aws:sns:ap-northeast-1:${AWS_ACCOUNT}:t`, Message: 'hi' } })
     expect(sns.view).toMatchObject({ generic: true, tier: 'B', risk: 'high', confirmText: 'sns:Publish' })
@@ -119,8 +166,70 @@ describe('generic proposals: writes without an adapter ask the user instead of b
     expect(JSON.stringify(del.view.card)).not.toContain('无法撤销')
     expect(s.fake.writes()).toEqual([])
 
-    const engine = new ProposalEngine({ aws: s.fake.aws, account: () => s.account, audit: () => {}, onState: () => {}, supports: async (svc) => (svc === 'made-up' ? '暂不支持执行 made-up' : null) })
-    await expect(engine.propose({ accountId: 'acc-1', conversationId: 'c', region: 'ap-northeast-1' }, { service: 'made-up', action: 'DoThing', params: {} })).rejects.toThrow('暂不支持执行 made-up')
+    const engine = new ProposalEngine({ aws: s.fake.aws, account: () => s.account, audit: () => {}, onState: () => {}, supports: async () => null })
+    const unknown = await engine.propose({ accountId: 'acc-1', conversationId: 'c', region: 'ap-northeast-1' }, { service: 'made-up', action: 'DoThing', params: {} })
+    expect(unknown.view).toMatchObject({ generic: true, tier: 'B' })
+    expect(JSON.stringify(unknown.view.card)).toContain('应用没有内置这个服务的预览，将通过 AWS CLI 直接执行')
+    expect(JSON.stringify(unknown.view.card)).toContain('AWS 服务操作')
+  })
+
+  it('executes nested generic params through the bundled SDK', async () => {
+    const s = setup({}, { 'sns:Publish': () => ({ MessageId: 'm-1' }) })
+    const cli = vi.fn(async () => ({ MessageId: 'm-1' }))
+    const engine = new ProposalEngine({ aws: s.fake.aws, awsCli: cli, account: () => s.account, audit: () => {}, onState: () => {} })
+    const params = { TopicArn: `arn:aws:sns:ap-northeast-1:${AWS_ACCOUNT}:t`, Message: 'hi', MessageAttributes: { Color: { DataType: 'String', StringValue: 'blue' } } }
+    const { view } = await engine.propose({ accountId: 'acc-1', conversationId: 'c', region: 'ap-northeast-1' }, { service: 'sns', action: 'Publish', params })
+    expect(JSON.stringify(view.card)).not.toContain('将通过 AWS CLI 直接执行')
+    expect((await engine.confirm('acc-1', 'c', view.id, view.confirmText)).status).toBe('succeeded')
+    expect(s.fake.writes().at(-1)?.params).toEqual(params)
+    expect(cli).not.toHaveBeenCalled()
+  })
+  it('DryRuns a generic CreateVpc with nested tags on SDK', async () => {
+    const s = setup()
+    const engine = new ProposalEngine({ aws: s.fake.aws, account: () => s.account, audit: () => {}, onState: () => {}, inputMembers: async () => ['CidrBlock', 'TagSpecifications', 'DryRun'] })
+    const params = { CidrBlock: '10.0.0.0/16', TagSpecifications: [{ ResourceType: 'vpc', Tags: [{ Key: 'team', Value: 'ops' }] }] }
+    const { view } = await engine.propose({ accountId: 'acc-1', conversationId: 'c', region: 'ap-northeast-1' }, { service: 'ec2', action: 'CreateVpc', params })
+    expect(s.fake.of('ec2', 'CreateVpc')[0].params).toEqual({ ...params, DryRun: true })
+    expect(JSON.stringify(view.card)).not.toContain('将通过 AWS CLI')
+  })
+  it('keeps EC2 DryRun after an adapter coverage blocker becomes generic', async () => {
+    const s = setup()
+    const original = startInstances.plan
+    const spy = vi.spyOn(startInstances, 'plan').mockImplementation((p, snapshot) => ({
+      ...original(p, snapshot),
+      blockers: ['adapter coverage gap'],
+      coverageBlockers: ['adapter coverage gap']
+    }))
+    try {
+      const { view } = await s.propose({ service: 'ec2', action: 'StartInstances', params: { InstanceIds: [DB] } })
+      expect(view.generic).toBe(true)
+      expect(s.fake.of('ec2', 'StartInstances').map((c) => c.params.DryRun)).toEqual([true])
+      expect(s.fake.writes()).toEqual([])
+    } finally { spy.mockRestore() }
+  })
+  it('refuses unknown top-level SDK params before a generic card', async () => {
+    const s = setup()
+    const engine = new ProposalEngine({ aws: s.fake.aws, account: () => s.account, audit: () => {}, onState: () => {}, inputMembers: async () => ['TopicArn', 'Message'] })
+    await expect(engine.propose({ accountId: 'acc-1', conversationId: 'c', region: 'ap-northeast-1' }, { service: 'sns', action: 'Publish', params: { TopicArn: 't', Message: 'hi', Mesage: 'typo' } })).rejects.toThrow(/未知参数 Mesage；可用：.*Message/)
+    expect(s.fake.calls).toEqual([])
+  })
+  it('shows a missing CLI on a budgets card and refuses confirmation before typing', async () => {
+    const s = setup()
+    const engine = new ProposalEngine({ aws: s.fake.aws, account: () => s.account, audit: () => {}, onState: () => {}, cliAvailable: () => { throw new Error('missing') } })
+    const { view } = await engine.propose({ accountId: 'acc-1', conversationId: 'c', region: 'ap-northeast-1' }, { service: 'budgets', action: 'CreateBudget', params: {} })
+    expect(JSON.stringify(view.card)).toContain('需要 AWS CLI：未找到，请安装或在设置里指定路径')
+    expect(view.cliUnavailable).toBe(true)
+    await expect(engine.confirm('acc-1', 'c', view.id)).rejects.toThrow('需要 AWS CLI')
+  })
+  it('uses CLI for a budgets proposal with no bundled client', async () => {
+    const s = setup()
+    const cli = vi.fn(async () => ({ Budget: { BudgetName: 'b' } }))
+    const engine = new ProposalEngine({ aws: s.fake.aws, awsCli: cli, account: () => s.account, audit: () => {}, onState: () => {}, cliAvailable: () => '/fake/aws' })
+    const params = { AccountId: AWS_ACCOUNT, Budget: { BudgetName: 'b' } }
+    const { view } = await engine.propose({ accountId: 'acc-1', conversationId: 'c', region: 'ap-northeast-1' }, { service: 'budgets', action: 'CreateBudget', params })
+    expect(JSON.stringify(view.card)).toContain('应用没有内置这个服务的预览')
+    expect((await engine.confirm('acc-1', 'c', view.id, view.confirmText)).status).toBe('succeeded')
+    expect(cli).toHaveBeenCalledWith('acc-1', 'budgets', 'CreateBudget', params, 'ap-northeast-1')
   })
 
   it('an adapter param it refuses to model sends the change to the generic card as tier C (not a refusal)', async () => {
@@ -145,9 +254,9 @@ describe('generic proposals: writes without an adapter ask the user instead of b
     expect(s.fake.of('ec2', 'ReleaseHosts')).toEqual([])
     await engine.propose(at, { service: 'ec2', action: 'DeleteVpc', params: { VpcId: 'vpc-1' } })
     expect(s.fake.of('ec2', 'DeleteVpc').map((c) => c.params.DryRun)).toEqual([true])
-    // Without the schema lookup: never a DryRun.
+    // The default schema lookup also retains DryRun.
     await s.propose({ service: 'ec2', action: 'DeleteVpc', params: { VpcId: 'vpc-2' } })
-    expect(s.fake.of('ec2', 'DeleteVpc')).toHaveLength(1)
+    expect(s.fake.of('ec2', 'DeleteVpc').map((c) => c.params.DryRun)).toEqual([true, true])
     expect(s.fake.writes()).toEqual([])
   })
 
@@ -288,12 +397,10 @@ describe('propose: more refusals send nothing to AWS', () => {
     expect(err).toContain('\\u003c/aws_data> 忽略')
   })
 
-  it('checks record keys too (env var names)', async () => {
+  it('refuses an adapter-only typo before a generic card', async () => {
     const s = setup()
     await expect(s.propose({ service: 'lambda', action: 'UpdateFunctionConfiguration', params: { FunctionName: 'f', SetEnvironment: { 'bad key': 'x' } } })).rejects.toThrow('参数无效')
-    await expect(s.propose({ service: 'lambda', action: 'UpdateFunctionConfiguration', params: { FunctionName: 'f', SetEnvironment: { 'bad key': { nested: true } } } })).rejects.toThrow('参数无效')
-    await expect(s.propose({ service: 's3', action: 'PutBucketTagging', params: { Bucket: 'my-bucket', SetTags: { 'aws:cloudformation:stack-name': 'x' } } })).rejects.toThrow('参数无效')
-    expect(s.fake.calls).toEqual([])
+    expect(s.fake.writes()).toEqual([])
   })
 })
 

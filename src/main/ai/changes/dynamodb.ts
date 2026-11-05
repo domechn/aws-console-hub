@@ -136,6 +136,7 @@ export const updateTable: ChangeAdapter<TableParams, TableSnapshot> = {
         ...(billing === 'PROVISIONED' && billingChange && s.indexes ? [`表有 ${s.indexes} 个全局二级索引，切换到预置模式要同时设置索引的容量（不支持），请在 Console 里操作`] : []),
         ...(rows.length ? [] : ['没有变更（值和现在一样，或没有给出要修改的字段）'])
       ],
+      coverageBlockers: billing === 'PROVISIONED' && billingChange && s.indexes ? [`表有 ${s.indexes} 个全局二级索引，切换到预置模式要同时设置索引的容量（不支持），请在 Console 里操作`] : [],
       tags: [s.tags]
     }
   },

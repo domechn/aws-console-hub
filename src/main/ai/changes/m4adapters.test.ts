@@ -368,7 +368,7 @@ describe('through the engine: nothing written before confirm, exactly the change
     const engine = new ProposalEngine({ aws: w.aws, account: () => account, audit: (type, _a, data) => audits.push({ type, data }), onState: () => {} })
     const propose = (service: string, action: string, params: unknown) => engine.propose({ accountId: 'acc-1', conversationId: 'c1', region: REGION }, { service, action, params })
     const confirm = (id: string, typed?: string) => engine.confirm('acc-1', 'c1', id, typed)
-    return { w, audits, propose, confirm }
+    return { w, audits, engine, propose, confirm }
   }
 
   it('CreateBucket: zero writes at proposal, three after confirm', async () => {
@@ -399,14 +399,15 @@ describe('through the engine: nothing written before confirm, exactly the change
     expect(e.w.writes().map((c) => [c.action, c.params])).toEqual([['ModifyDBInstance', { DBInstanceIdentifier: 'app-db', DBInstanceClass: 'db.m6g.large', ApplyImmediately: true }]])
   })
 
-  it("refuses the missing ApplyImmediately (no default); a param the adapter won't model goes to a tier C generic card that shows the value, the audit row doesn't", async () => {
+  it("refuses missing ApplyImmediately but asks strongly for a forbidden param; audit omits values", async () => {
     const e = engineWith()
     await expect(e.propose('rds', 'ModifyDBInstance', { DBInstanceIdentifier: 'app-db', DBInstanceClass: 'db.m6g.large' })).rejects.toThrow('参数无效')
     const { view } = await e.propose('rds', 'ModifyDBInstance', { DBInstanceIdentifier: 'app-db', MasterUserPassword: 'hunter2-secret', ApplyImmediately: true })
     expect(view).toMatchObject({ generic: true, tier: 'C' })
     expect(view.dangers?.join()).toContain('MasterUserPassword')
-    // The model chose this value: the user must see what the password is being set to.
-    expect(JSON.stringify(view.card)).toContain('hunter2-secret')
+    expect(JSON.stringify(view.card)).not.toContain('hunter2-secret')
+    // The model chose this value: the local approval card must show it.
+    expect(JSON.stringify(e.engine.view(view.id)?.card)).toContain('hunter2-secret')
     expect(JSON.stringify(e.audits)).not.toContain('hunter2-secret')
     expect(e.w.calls.filter((c) => !['sts', 'iam'].includes(c.service))).toEqual([])
   })

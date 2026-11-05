@@ -103,6 +103,7 @@ export const stopDb: ChangeAdapter<DbParams, Db> = {
       ...(d.cluster ? [`${d.id} 属于 Aurora 集群 ${d.cluster}，要停止整个集群（不支持）`] : []),
       ...(d.replicas.length || d.replicaOf ? [`${d.id} 有只读副本关系，RDS 不允许停止`] : [])
     ],
+    coverageBlockers: d.cluster ? [`${d.id} 属于 Aurora 集群 ${d.cluster}，要停止整个集群（不支持）`] : [],
     tags: [d.tags]
   }),
   verify: verifyDb
@@ -354,6 +355,7 @@ export const modifyDb: ChangeAdapter<ModifyDbParams, Db> = {
         ...(p.AllocatedStorage !== undefined && p.AllocatedStorage < d.storage ? [`RDS 存储只能增大：当前 ${d.storage} GiB，不能改成 ${p.AllocatedStorage} GiB`] : []),
         ...(changed ? [] : ['没有变更（值和现在一样，或没有给出要修改的字段）'])
       ],
+      coverageBlockers: d.cluster && (p.AllocatedStorage !== undefined || retention !== undefined) ? [`${d.id} 属于 Aurora 集群 ${d.cluster}，存储和备份保留期在集群级别设置（不支持）`] : [],
       tags: [d.tags]
     }
   },
@@ -824,6 +826,7 @@ export const setDesiredCapacity: ChangeAdapter<AsgParams, AsgSnapshot> = {
       ...(p.DesiredCapacity < s.min || p.DesiredCapacity > s.max ? [`期望容量必须在 ${s.min}..${s.max} 之间（修改 min / max 不支持）`] : []),
       ...(p.DesiredCapacity === s.desired ? [`期望容量已经是 ${s.desired}`] : [])
     ],
+    coverageBlockers: p.DesiredCapacity < s.min || p.DesiredCapacity > s.max ? [`期望容量必须在 ${s.min}..${s.max} 之间（修改 min / max 不支持）`] : [],
     tags: [s.tags]
   }),
   verify: async (p, ctx) => {

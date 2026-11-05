@@ -1,5 +1,7 @@
 import type { AwsCredentials } from '../credentialCommand'
 import { classifyAction } from './classify'
+import { nameProblem } from './classify'
+import { cliCall, cliOperation, findAwsCli, nonApiCliReason, stopAccountCli } from './awsCli'
 
 /**
  * SDK v3 clients for the assistant's read tools, approved calls and changes the user confirmed (changes/engine.ts is
@@ -54,8 +56,51 @@ export const SDK: Record<string, { load: () => Promise<SdkModule>; client: strin
   organizations: { load: () => import('@aws-sdk/client-organizations'), client: 'OrganizationsClient', global: true }
 }
 
-/** The services a call can go to at all (tool descriptions; "暂不支持" for the rest). */
+/** Bundled SDK services; other service names use AWS CLI. */
 export const AWS_SERVICES = Object.keys(SDK)
+/** Prevent a differently cased SDK action from escaping to the equivalent CLI operation. */
+export async function exactAwsAction(service: string, action: string): Promise<string | null> {
+  const def = Object.hasOwn(SDK, service) ? SDK[service] : undefined
+  if (!def) return null
+  const mod = await def.load()
+  if (typeof mod[`${action}Command`] === 'function') return null
+  const operation = cliOperation(action)
+  const exact = Object.keys(mod).find((key) =>
+    key.endsWith('Command') && typeof mod[key] === 'function' &&
+    cliOperation(key.slice(0, -'Command'.length)) === operation
+  )
+  return exact ? `操作名称 ${action} 不受支持；请使用 ${exact.slice(0, -'Command'.length)}` : null
+}
+/** Smithy operation schemas carry input members even when the input shape has no Request suffix. */
+function commandMembers(mod: SdkModule, action: string): string[] | null {
+  const op = mod[`${action}$`]
+  const schema = typeof op?.[4] === 'function' ? op[4]() : null
+  if (schema === 'unit') return []
+  if (Array.isArray(schema?.[4])) return schema[4]
+  for (const suffix of ['Request$', 'Input$', 'Message$']) {
+    const shape = mod[`${action}${suffix}`]
+    if (Array.isArray(shape?.[4])) return shape[4]
+  }
+  return null
+}
+export async function usesAwsCli(service: string, action: string, _params: Record<string, unknown> = {}): Promise<boolean> {
+  const def = Object.hasOwn(SDK, service) ? SDK[service] : undefined
+  if (!def) return true
+  const mod = await def.load()
+  if (typeof mod[`${action}Command`] !== 'function') {
+    const casing = await exactAwsAction(service, action)
+    if (casing) throw new Error(casing)
+    return true
+  }
+  return false
+}
+
+/** SDK serializers discard unknown top-level members; refuse them before any call. Nested values are valid. */
+export function unknownAwsParams(params: Record<string, unknown>, members: string[] | null): string | null {
+  if (!members) return Object.keys(params).length ? '无法校验操作参数：缺少 SDK 输入结构' : null
+  const unknown = Object.keys(params).filter((key) => !members.includes(key))
+  return unknown.length ? `未知参数 ${unknown.join('、')}；可用：${members.join('、') || '无'}` : null
+}
 
 export const AWS_CALL_TIMEOUT_MS = 20_000
 /** Confirmed changes (anything not a plain read): RDS / volume modifications and CloudFormation can take a while to answer. */
@@ -64,47 +109,55 @@ export const AWS_WRITE_TIMEOUT_MS = 60_000
 /** One AWS API call for an account. Tools get this, bound to their conversation's account. */
 export type AwsCall = (service: string, action: string, params: Record<string, unknown>, region: string, signal?: AbortSignal) => Promise<unknown>
 
-/** Why `service:action` can't be called (no client, no such command), or null. Loads the module, never calls AWS. */
+/** Whether the names can be passed to an AWS executor. */
 export type AwsSupports = (service: string, action: string) => Promise<string | null>
 export type AwsInputMembers = (service: string, action: string) => Promise<string[] | null>
+export const inputMembers: AwsInputMembers = async (service, action) => {
+  const def = Object.hasOwn(SDK, service) ? SDK[service] : undefined
+  return def ? commandMembers(await def.load(), action) : null
+}
 
 export class AwsClients {
   private clients = new Map<string, { send(command: unknown, options?: unknown): Promise<unknown> }>()
 
-  constructor(private credentials: (accountId: string) => Promise<AwsCredentials>) {}
+  constructor(private credentials: (accountId: string) => Promise<AwsCredentials>, private cliPath: () => string | null = () => null) {}
 
-  /** Asked before an approval card is shown: no card for a call that could never run. */
+  /** Well-formed names can reach SDK or CLI; the CLI reports unavailable commands after approval. */
   async supports(service: string, action: string): Promise<string | null> {
-    const def = Object.hasOwn(SDK, service) ? SDK[service] : undefined
-    if (!def) return `暂不支持执行 ${service}（应用支持的服务：${AWS_SERVICES.join(' ')}）`
-    const mod = await def.load()
-    return typeof mod[`${action}Command`] === 'function' ? null : `${service} 没有 ${action} 这个操作`
+    return nameProblem(service, action) ?? nonApiCliReason(service, action) ?? await exactAwsAction(service, action)
   }
 
   /**
-   * The input member names of `service:action` from the SDK's schema (`<Action>Request$`), or null when unknown.
+   * The input member names of `service:action` from the SDK's operation schema, or null when unknown.
    * Generic EC2 changes DryRun only when the operation has a DryRun member: the serializer drops unknown members,
    * so a "DryRun" of ReleaseHosts would release the hosts.
    */
   async inputMembers(service: string, action: string): Promise<string[] | null> {
-    const def = Object.hasOwn(SDK, service) ? SDK[service] : undefined
-    if (!def) return null
-    const schema = (await def.load())[`${action}Request$`]
-    return Array.isArray(schema) && Array.isArray(schema[4]) ? (schema[4] as string[]) : null
+    return inputMembers(service, action)
   }
 
   async call(accountId: string, service: string, action: string, params: Record<string, unknown>, region: string, signal?: AbortSignal): Promise<unknown> {
+    const invalid = nameProblem(service, action)
+    if (invalid) throw new Error(invalid)
+    const refused = nonApiCliReason(service, action)
+    if (refused) throw new Error(refused)
+    const casing = await exactAwsAction(service, action)
+    if (casing) throw new Error(casing)
     const def = Object.hasOwn(SDK, service) ? SDK[service] : undefined
-    if (!def) throw new Error(`暂不支持执行 ${service}`)
-    const mod = await def.load()
-    const Command = mod[`${action}Command`]
-    if (typeof Command !== 'function') throw new Error(`${service} 没有 ${action} 这个操作`)
+    const mod = def ? await def.load() : null
+    const Command = mod?.[`${action}Command`]
+    const members = mod ? commandMembers(mod, action) : null
+    if (typeof Command !== 'function') {
+      return this.callCli(accountId, service, action, params, region, signal)
+    }
+    const unknown = unknownAwsParams(params, members)
+    if (unknown) throw new Error(unknown)
     // Global services: their endpoints live in us-east-1, whatever region the user is in.
-    const at = def.global ? 'us-east-1' : region
+    const at = def!.global ? 'us-east-1' : region
     const key = `${accountId}|${service}|${at}`
     let client = this.clients.get(key)
     if (!client) {
-      client = new mod[def.client]({
+      client = new mod![def!.client]({
         region: at,
         maxAttempts: 2,
         credentials: async () => {
@@ -119,8 +172,20 @@ export class AwsClients {
     return client.send(new Command(params), { abortSignal: signal ? AbortSignal.any([signal, timeout]) : timeout })
   }
 
+  async callCli(accountId: string, service: string, action: string, params: Record<string, unknown>, region: string, signal?: AbortSignal): Promise<unknown> {
+    const invalid = nameProblem(service, action)
+    if (invalid) throw new Error(invalid)
+    const refused = nonApiCliReason(service, action)
+    if (refused) throw new Error(refused)
+    const casing = await exactAwsAction(service, action)
+    if (casing) throw new Error(casing)
+    const read = ['read', 'sensitive'].includes(classifyAction(service, action).class)
+    return cliCall(findAwsCli(this.cliPath()), await this.credentials(accountId), service, action, params, region, read ? AWS_CALL_TIMEOUT_MS : AWS_WRITE_TIMEOUT_MS, signal, undefined, accountId)
+  }
+
   /** The account's login changed or it was removed: its clients (and the credentials they hold) go. */
   forget(accountId: string): void {
+    stopAccountCli(accountId)
     for (const key of this.clients.keys()) if (key.startsWith(`${accountId}|`)) this.clients.delete(key)
   }
 }

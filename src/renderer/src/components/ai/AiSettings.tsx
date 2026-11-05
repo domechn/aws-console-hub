@@ -38,6 +38,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
   const [bedrockAuth, setBedrockAuth] = useState<BedrockAuth>('account')
   const [bedrockAccountId, setBedrockAccountId] = useState('')
   const [bedrockRegion, setBedrockRegion] = useState('us-east-1')
+  const [awsCliPath, setAwsCliPath] = useState('')
   const [key, setKey] = useState('')
   const [models, setModels] = useState<AiModelInfo[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -62,6 +63,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
       setBedrockAuth(c.bedrockAuth)
       setBedrockAccountId(c.bedrockAccountId ?? '')
       setBedrockRegion(c.bedrockRegion)
+      setAwsCliPath(c.awsCliPath ?? '')
     })
   }, [])
 
@@ -100,6 +102,7 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
         customImageInput: custom && customImageInput,
         keyMode,
         keyCommand: keyMode === 'command' ? keyCommand : null,
+        awsCliPath: awsCliPath.trim() || null,
         ...(bedrock && { bedrockAuth, bedrockAccountId: bedrockAccountId || null, bedrockRegion })
       }
       let saved = await ai.saveConfig(input)
@@ -150,6 +153,10 @@ export function AiSettings({ accounts, onClose, onDataDeleted, initialView = 'se
           <>
         <h2>AI 设置</h2>
         <ThemeSetting value={theme} onChange={(value) => { setTheme(value); setThemePreference(value) }} />
+        <label>
+          AWS CLI 路径（可选）
+          <input className="mono" value={awsCliPath} placeholder="自动查找 AWS CLI v2" spellCheck={false} onChange={(e) => setAwsCliPath(e.target.value)} />
+        </label>
 
         <label>
           服务商

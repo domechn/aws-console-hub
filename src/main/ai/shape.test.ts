@@ -1,9 +1,53 @@
 import { describe, expect, it } from 'vitest'
-import { displayParams, fence, MAX_RESULT_CHARS, scrub, shapeData, shapeResult } from './shape'
+import { redactSecrets } from './redact'
+import { displayParams, fence, MAX_RESULT_CHARS, redactStructured, scrub, scrubParams, shapeData, shapeResult } from './shape'
 
 const body = (text: string): unknown => JSON.parse(text.split('\n').slice(2, -1).join('\n'))
 
 describe('scrub', () => {
+  it('keeps secret identifiers in stored requests while masking actual secret values', () => {
+    const arn = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/db-AbCdEf'
+    const params = {
+      SecretId: 'prod/db', SecretArn: arn, SecretName: 'prod/db', SecretString: 'hidden-value',
+      AccessKeyId: 'AKIAIOSFODNN7EXAMPLE', SecretAccessKey: 'hidden-access-key',
+      SessionToken: 'hidden-session-token', ParameterName: '/prod/db'
+    }
+    const want = {
+      SecretId: 'prod/db', SecretArn: arn, SecretName: 'prod/db', SecretString: '[redacted]',
+      AccessKeyId: '[redacted:aws-key-id]', SecretAccessKey: '[redacted]',
+      SessionToken: '[redacted]', ParameterName: '/prod/db'
+    }
+    expect(JSON.parse(redactSecrets(JSON.stringify(redactStructured({ service: 'secretsmanager', action: 'PutResourcePolicy', params }))))).toEqual({
+      service: 'secretsmanager', action: 'PutResourcePolicy', params: want
+    })
+    expect(JSON.parse(shapeData({ service: 'secretsmanager', action: 'PutResourcePolicy', params }).json)).toEqual({
+      service: 'secretsmanager', action: 'PutResourcePolicy', params: want
+    })
+  })
+  it('applies nested parameter rules through arrays', () => {
+    expect(scrubParams('cloudformation', 'CreateStack', { Parameters: [{ ParameterKey: 'p', ParameterValue: true }] })).toEqual({
+      Parameters: [{ ParameterKey: 'p', ParameterValue: '[redacted]' }]
+    })
+    expect(scrubParams('ecs', 'RegisterTaskDefinition', { containerDefinitions: [{ environment: [{ name: 'p', value: 'hidden' }] }] })).toEqual({
+      containerDefinitions: [{ environment: [{ name: 'p', value: '[redacted]' }] }]
+    })
+  })
+  it('redacts contextual AWS parameter values while preserving ordinary and reference values', () => {
+    expect(scrubParams('ssm', 'PutParameter', { Name: '/x', Type: 'String', Value: 'ordinary-value' })).toEqual({ Name: '/x', Type: 'String', Value: 'ordinary-value' })
+    expect(scrubParams('ssm', 'PutParameter', { Name: '/x', Type: 'StringList', Value: 'one,two' })).toEqual({ Name: '/x', Type: 'StringList', Value: 'one,two' })
+    expect(scrubParams('ssm', 'PutParameter', { Name: '/x', Value: 'hidden-value' })).toEqual({ Name: '/x', Value: '[redacted]' })
+    expect(scrubParams('ecs', 'RegisterTaskDefinition', { containerDefinitions: [{ secrets: [{ name: 'x', valueFrom: 'arn:ref' }], environment: [{ name: 'x', value: 'hidden-value' }] }] })).toEqual({
+      containerDefinitions: [{ secrets: [{ name: 'x', valueFrom: 'arn:ref' }], environment: [{ name: 'x', value: '[redacted]' }] }]
+    })
+    expect(scrubParams('cloudformation', 'CreateStack', { Parameters: [{ ParameterKey: 'Ordinary', ParameterValue: 'hidden-value', UsePreviousValue: true }] })).toEqual({
+      Parameters: [{ ParameterKey: 'Ordinary', ParameterValue: '[redacted]', UsePreviousValue: true }]
+    })
+    for (const action of ['ReEncrypt', 'GenerateDataKeyPair']) {
+      expect(scrubParams('kms', action, { Plaintext: 'hidden-value' })).toEqual({ Plaintext: '[redacted]' })
+    }
+    expect(scrubParams('docdb', 'CreateDBCluster', { MasterUserPassword: 'hidden-value' })).toEqual({ MasterUserPassword: '[redacted]' })
+    expect(scrubParams('sts', 'AssumeRole', { Credentials: { AccessKeyId: 'hidden-value' } })).toEqual({ Credentials: '[redacted]' })
+  })
   it('masks secret-looking keys, env values and user data, and drops $metadata', () => {
     const out = scrub({
       $metadata: { httpStatusCode: 200 },
@@ -70,6 +114,15 @@ describe('shapeData', () => {
 })
 
 describe('displayParams (approval and request cards)', () => {
+  it('hides credential tokens but preserves pagination and idempotency tokens', () => {
+    const input: Record<string, string | number> = { AccessToken: 'access-secret', RefreshToken: 'refresh-secret', IdToken: 'id-secret', AuthToken: 'auth-secret', OAuthToken: 'oauth-secret', BearerToken: 'bearer-secret', ApiToken: 'api-secret', SecretToken: 'secret-secret', ApiKey: 'api-key-secret', 'api-key': 'hyphen-secret', NextToken: 'next', ClientToken: 'client', ContinuationToken: 'continuation', PageToken: 'page', MaxResults: 20 }
+    const shown = JSON.parse(displayParams(input))
+    for (const key of ['AccessToken', 'RefreshToken', 'IdToken', 'AuthToken', 'OAuthToken', 'BearerToken', 'ApiToken', 'SecretToken', 'ApiKey', 'api-key']) expect(shown[key]).not.toBe(input[key])
+    for (const key of ['NextToken', 'ClientToken', 'ContinuationToken', 'PageToken', 'MaxResults']) expect(shown[key]).toBe(input[key])
+    const cleaned = scrub(input) as Record<string, unknown>
+    for (const key of ['AccessToken', 'RefreshToken', 'IdToken', 'AuthToken', 'OAuthToken', 'BearerToken', 'ApiToken', 'SecretToken', 'ApiKey', 'api-key']) expect(cleaned[key]).toBe('[redacted]')
+    for (const key of ['NextToken', 'ClientToken', 'ContinuationToken', 'PageToken', 'MaxResults']) expect(cleaned[key]).toBe(input[key])
+  })
   it('shows exactly what is sent, identifiers included; hides only secret values (by length); escapes format characters', () => {
     const shown = displayParams({ SecretId: 'prod/db', SecretString: 'hunter2', AccessKeyId: 'AKIAEXAMPLE', MasterUserPassword: 'pw', UserData: 'IyEvYmlu', Tags: [{ Key: 'n', Value: 'a‮b' }] })
     expect(JSON.parse(shown)).toEqual({

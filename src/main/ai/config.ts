@@ -1,6 +1,7 @@
 import { readJson, writeJson } from '../store'
 import { checkCommand } from '../credentialCommand'
 import { REGIONS } from '../../shared/catalog'
+import { validateAwsCliPath } from './awsCli'
 import { AI_PROVIDERS, AUDIT_RETENTION_LIMITS, CUSTOM_PROVIDER_ID, type AiBudget, type AiConfig, type AiKeyMode, type BedrockAuth, type ConversationRetention } from '../../shared/ai'
 
 export const DEFAULT_AI_CONFIG: AiConfig = {
@@ -14,6 +15,7 @@ export const DEFAULT_AI_CONFIG: AiConfig = {
   bedrockAuth: 'account',
   bedrockAccountId: null,
   bedrockRegion: 'us-east-1',
+  awsCliPath: null,
   auditRetentionDays: AUDIT_RETENTION_LIMITS.default,
   // Kept, as before retention existed; shorter only when the user picks it.
   conversationRetention: null,
@@ -98,6 +100,12 @@ export function mergeAiConfig(prev: AiConfig, input: unknown, accountExists: (id
   if (i.bedrockRegion !== undefined) {
     if (typeof i.bedrockRegion !== 'string' || !REGIONS.some((r) => r.id === i.bedrockRegion)) throw new Error('不支持的 Bedrock region')
     next.bedrockRegion = i.bedrockRegion
+  }
+  if (i.awsCliPath !== undefined) {
+    if (i.awsCliPath !== null && typeof i.awsCliPath !== 'string') throw new Error('无效的 AWS CLI 路径')
+    if (typeof i.awsCliPath === 'string' && /[\u0000-\u001f]/.test(i.awsCliPath)) throw new Error('无效的 AWS CLI 路径')
+    const path = typeof i.awsCliPath === 'string' ? i.awsCliPath.trim() : ''
+    next.awsCliPath = path ? validateAwsCliPath(path) : null
   }
   if (i.auditRetentionDays !== undefined) {
     const d = i.auditRetentionDays

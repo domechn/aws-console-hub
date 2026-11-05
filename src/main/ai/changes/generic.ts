@@ -10,7 +10,7 @@ import { Type } from 'typebox'
 import type { Risk } from '../../../shared/ai'
 import { writeTier } from '../classify'
 import { redactSecrets } from '../redact'
-import { displayParams, scrub } from '../shape'
+import { displayParams, paramFields, scrub } from '../shape'
 import { templateCategory } from './cfn'
 import type { ChangeAdapter, Consequence } from './common'
 
@@ -28,13 +28,6 @@ function targetsOf(p: Record<string, unknown>): string[] {
  * A request's params as labelled rows: nested keys as「A › B」, list items numbered, strings as they are, other
  * values as JSON. `shown` is displayParams' output parsed back, so its redaction (and format-character escaping) holds.
  */
-export function paramFields(shown: unknown, at = ''): { label: string; value: string }[] {
-  if (shown && typeof shown === 'object' && Object.keys(shown).length) {
-    return Object.entries(shown).flatMap(([k, v]) => paramFields(v, Array.isArray(shown) ? `${at} [${Number(k) + 1}]` : at ? `${at} › ${k}` : k))
-  }
-  return at ? [{ label: at, value: typeof shown === 'string' ? shown : (JSON.stringify(shown) ?? 'null') }] : []
-}
-
 /** Rows the card has room for; the raw JSON (always complete) holds the rest. */
 const MAX_PARAM_ROWS = 299
 
@@ -49,7 +42,7 @@ export function responseSummary(response: unknown): string {
  * `extra`: dangers found before (an adapter's forbidden param that sent the change here). `ownRole`: the role the app
  * signs in with.
  */
-export function genericAdapter(service: string, action: string, params: Record<string, unknown>, opts: { ownRole?: string; extra?: string[] } = {}): ChangeAdapter {
+export function genericAdapter(service: string, action: string, params: Record<string, unknown>, opts: { ownRole?: string; extra?: string[]; cliFallback?: boolean } = {}): ChangeAdapter {
   const t = writeTier(service, action, params, opts.ownRole)
   // A template is a string (key scans don't see roles in it): the change-set adapter's scanner, and no unseen URL.
   const template: string[] = []
@@ -73,7 +66,7 @@ export function genericAdapter(service: string, action: string, params: Record<s
     // otherwise the permission pre-check (iam:SimulatePrincipalPolicy) stands in.
     dryRun: false,
     iamActions: [`${service === 'apigatewayv2' ? 'apigateway' : service}:${action}`],
-    generic: { tier, dangers },
+    generic: { tier, dangers, cliFallback: opts.cliFallback },
     snapshot: async () => null,
     plan: (p: Record<string, unknown>) => {
       // Write cards reveal values (displayParams): the user must see what an injected instruction may have picked.
@@ -85,6 +78,7 @@ export function genericAdapter(service: string, action: string, params: Record<s
         confirmText: key,
         risk,
         reasons: [
+          ...(opts.cliFallback ? ['应用没有内置这个服务的预览，将通过 AWS CLI 直接执行'] : []),
           ...dangers.map((d) => `需要强确认的类别：${d}（此类操作需要仔细核对）`),
           ...(t.destructive && tier === 'B' ? ['操作名属于删除 / 停止 / 撤销 / 改策略一类，风险按「破坏性」计'] : []),
           '没有专用适配器，应用无法预知影响'

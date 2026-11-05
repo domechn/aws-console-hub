@@ -4,6 +4,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { redactSecrets } from './redact'
+import { redactStructured } from './shape'
+import { scrub } from './shape'
 import type { AttachmentData } from './attachments'
 
 type SqlValue = string | number | null | Uint8Array
@@ -282,7 +284,11 @@ export class AiStore {
 
   addMessage(conversationId: string, m: { role: string; content: unknown; tokensIn?: number; tokensOut?: number }): number {
     const now = Date.now()
-    const stored = redactSecrets(JSON.stringify(m.content))
+    const message = m.role === 'assistant' && m.content && typeof m.content === 'object' && Array.isArray((m.content as { content?: unknown }).content)
+      ? { ...m.content, content: (m.content as { content: Record<string, unknown>[] }).content.map((part) =>
+        part.type === 'toolCall' ? { ...part, arguments: scrub(part.arguments) } : part) }
+      : m.content
+    const stored = redactSecrets(JSON.stringify(redactStructured(message)))
     const inserted = this.db
       .prepare('insert into messages (conversation_id, role, content_json, tokens_in, tokens_out, created_at) values (?, ?, ?, ?, ?, ?)')
       .run(conversationId, m.role, stored, m.tokensIn ?? null, m.tokensOut ?? null, now) as { lastInsertRowid: number | bigint }
@@ -401,7 +407,7 @@ export class AiStore {
   }
 
   audit(type: string, accountId: string | null, data: unknown): void {
-    this.db.prepare('insert into audit (t, type, account_id, data_json) values (?, ?, ?, ?)').run(Date.now(), type, accountId, redactSecrets(JSON.stringify(data)))
+    this.db.prepare('insert into audit (t, type, account_id, data_json) values (?, ?, ?, ?)').run(Date.now(), type, accountId, redactSecrets(JSON.stringify(redactStructured(data))))
   }
 
   auditEntries(): { t: number; type: string; accountId: string | null; data: unknown }[] {

@@ -9,6 +9,7 @@ import { ToastOverlay } from './toast'
 import { runTabAction } from './tabIpc'
 import { consoleRegion, isConsoleUrl, windowOpenAction } from './urls'
 import { AwsClients } from './ai/aws'
+import { findAwsCli, stopAllCli } from './ai/awsCli'
 import { loginIdentity } from './ai/changes/engine'
 import { AiConfigStore } from './ai/config'
 import { AiStore, openAiDb } from './ai/db'
@@ -142,6 +143,7 @@ function createWindow(): void {
   const accounts = new AccountStore()
   const recents = new RecentsStore((items) => send('recents:updated', items))
   app.on('before-quit', () => recents.flush())
+  app.on('before-quit', stopAllCli)
   trimActivityLog()
 
   /**
@@ -456,6 +458,7 @@ function createWindow(): void {
     const via = account.kind === 'assume' ? accounts.get(account.viaId ?? '') : undefined
     return getAccountCredentials(account, via)
   }
+  const aiConfig = new AiConfigStore(path.join(app.getPath('userData'), 'ai-config.json'))
   const awsClients = new AwsClients(async (accountId) => {
     try {
       return await accountCredentials(accountId)
@@ -464,7 +467,7 @@ function createWindow(): void {
       toasts.show('error', redactSecrets(err instanceof Error ? err.message : String(err)))
       throw err
     }
-  })
+  }, () => aiConfig.get().awsCliPath)
   let aiDb
   try {
     aiDb = openAiDb()
@@ -475,13 +478,15 @@ function createWindow(): void {
   }
   const ai = new AiService({
     store: new AiStore(aiDb),
-    config: new AiConfigStore(path.join(app.getPath('userData'), 'ai-config.json')),
+    config: aiConfig,
     keys: new KeyStore(),
     models: createConfiguredModels(),
     account: (id) => accounts.get(id),
     aws: (accountId, ...call) => awsClients.call(accountId, ...call),
+    awsCli: (accountId, service, action, params, region) => awsClients.callCli(accountId, service, action, params, region),
     awsSupports: (service, action) => awsClients.supports(service, action),
     awsInputMembers: (service, action) => awsClients.inputMembers(service, action),
+    awsCliAvailable: () => findAwsCli(aiConfig.get().awsCliPath),
     // No toast here: a failed Bedrock request already reports the error (explained) in the panel and a toast.
     credentials: async (accountId) => accountCredentials(accountId),
     regionFor: (id) => {

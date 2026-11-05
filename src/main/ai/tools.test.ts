@@ -18,6 +18,34 @@ function context(call: ToolContext['call'] = vi.fn(async () => ({}))) {
 const text = (r: { content: { type: string; text?: string }[] }): string => r.content[0].text ?? ''
 
 describe('read tools', () => {
+  it('refuses a CLI-equivalent casing before asking for approval', async () => {
+    const { ctx, tools } = context()
+    ctx.approve = vi.fn(async () => ({ ok: false as const, message: 'denied' }))
+    await expect(tools.aws_read.execute('id', { service: 'ec2', action: 'DescribeVPCAttribute', params: { VpcId: 'vpc-1', Attribute: 'enableDnsSupport' } })).rejects.toThrow('请使用 DescribeVpcAttribute')
+    expect(ctx.approve).not.toHaveBeenCalled()
+  })
+  it('refuses an unknown bundled SDK member before asking for read approval', async () => {
+    const { ctx, tools } = context()
+    ctx.approve = vi.fn(async () => ({ ok: false as const, message: 'denied' }))
+    await expect(tools.aws_read.execute('id', { service: 'sqs', action: 'ListQueues', params: { Typo: 'x' } })).rejects.toThrow(/未知参数 Typo；可用：.*QueueNamePrefix/)
+    expect(ctx.approve).not.toHaveBeenCalled()
+  })
+  it('keeps secret-looking approval params out of audit and model-facing tool results', async () => {
+    const { ctx, tools, audit } = context()
+    ctx.approve = vi.fn(async () => ({ ok: false as const, message: '用户拒绝了这次调用' }))
+    const result = await tools.aws_read.execute('id', { service: 'budgets', action: 'ListBudgets', params: { Password: 'chosen-secret', Nested: { SessionToken: 'another-secret' } } })
+    expect(JSON.stringify(audit.mock.calls)).not.toContain('chosen-secret')
+    expect(JSON.stringify(audit.mock.calls)).not.toContain('another-secret')
+    expect(JSON.stringify(result)).not.toContain('chosen-secret')
+    expect(JSON.stringify(result)).not.toContain('another-secret')
+  })
+  it('never offers conversation approval for CLI reads', async () => {
+    const { ctx, tools } = context()
+    const asked: Parameters<NonNullable<ToolContext['approve']>>[0][] = []
+    ctx.approve = vi.fn(async (req) => (asked.push(req), { ok: false as const, message: 'no' }))
+    await tools.aws_read.execute('id', { service: 'budgets', action: 'ListBudgets', params: {} })
+    expect(asked[0].sessionAllowed).toBe(false)
+  })
   it('offers at least the planned read set and nothing that writes', () => {
     expect(TOOL_NAMES).toEqual(
       expect.arrayContaining(['aws_whoami', 'list_ec2_instances', 'describe_ec2_instance', 'list_s3_buckets', 'list_lambda_functions', 'list_rds_instances', 'get_metrics', 'query_logs', 'cost_summary', 'aws_read'])
@@ -50,11 +78,11 @@ describe('read tools', () => {
     expect(call).toHaveBeenCalledWith('rds', 'DescribeDBInstances', expect.anything(), 'eu-west-1', undefined)
   })
 
-  it('aws_read runs tier A reads directly and asks for the rest; writes go to propose_change; unsupported ones get no card', async () => {
+  it('aws_read runs tier A reads directly and asks for other services; writes go to propose_change', async () => {
     const { ctx, tools, call, audit } = context(vi.fn(async () => ({ SecurityGroups: [{ GroupId: 'sg-1' }, { GroupId: 'sg-2' }] })))
     const asked: Parameters<NonNullable<ToolContext['approve']>>[0][] = []
     ctx.approve = vi.fn(async (req) => (asked.push(req), { ok: false as const, message: '用户拒绝了这次调用（x）' }))
-    ctx.supports = vi.fn(async (service: string) => (service === 'made-up' ? '暂不支持执行 made-up' : null))
+    ctx.supports = vi.fn(async () => null)
     const ok = await tools.aws_read.execute('id', { service: 'ec2', action: 'DescribeSecurityGroups', params: { MaxResults: 5 } })
     expect(ok.details).toEqual({ summary: '2 条' })
     expect(ctx.approve).not.toHaveBeenCalled()
@@ -79,11 +107,12 @@ describe('read tools', () => {
     }
     await expect(tools.aws_read.execute('id', { service: 'dynamodb', action: 'TransactWriteItems', params: {} })).rejects.toThrow('写操作')
     await expect(tools.aws_read.execute('id', { service: 'ce', action: 'GetCostAndUsage', params: {} })).rejects.toThrow('cost_summary')
-    await expect(tools.aws_read.execute('id', { service: 'made-up', action: 'ListThings', params: {} })).rejects.toThrow('暂不支持执行 made-up')
+    const unknown = await tools.aws_read.execute('id', { service: 'made-up', action: 'ListThings', params: {} })
+    expect(unknown.details).toMatchObject({ denied: true })
+    expect(asked.at(-1)?.why).toContain('应用没有内置这个服务的预览，将通过 AWS CLI 直接执行')
     await expect(tools.aws_read.execute('id', { service: 'EC2', action: 'x', params: {} })).rejects.toThrow('无效')
-    expect(asked).toHaveLength(4)
+    expect(asked).toHaveLength(5)
     expect(call).toHaveBeenCalledTimes(1)
-    expect(audit).toHaveBeenCalledWith('tool_refused', expect.objectContaining({ service: 'made-up', class: 'unsupported' }))
     expect(audit).toHaveBeenCalledWith('tool_call', expect.objectContaining({ tool: 'aws_read', ok: false }))
   })
 
